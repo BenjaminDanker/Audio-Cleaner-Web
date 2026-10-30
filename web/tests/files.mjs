@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, check, dragRange, dropFile, jobIdOf, launch, mainButton, pick, setLeveling, setStrength, setVoice, settleRecommendation, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, barBalance, check, dragRange, dropFile, jobIdOf, launch, mainButton, pick, setLeveling, setStrength, setVoice, settleRecommendation, signIn, summary } from './helpers.mjs';
 
 const EMAIL = `files-${Date.now()}@example.com`;
 const SERVER_RATES = { denoise: 0.009, leveling: 0.001, rebuild: 0.03 }; // the served list (GET /api/billing/pricing), per minute
@@ -41,7 +41,7 @@ await page.route('**/api/jobs', (r) => {
 
 const start = () => page.getByTestId('start');
 const choose = (f) => dropFile(page, join(FILES, f));
-const freshApp = async () => { await page.goto(`${BASE}/app`); await page.getByTestId('available').waitFor(); };
+const freshApp = async () => { await page.goto(`${BASE}/app`); await page.getByTestId('bar-balance').waitFor(); };
 const withMe = (patch) => page.route('**/api/me', async (r) => { const res = await r.fetch(); const j = await res.json(); await r.fulfill({ response: res, json: patch(j) }); });
 const withPricing = (patch) => page.route('**/api/billing/pricing', async (r) => { const res = await r.fetch(); const j = await res.json(); await r.fulfill({ response: res, json: patch(j) }); });
 const lastPost = () => posts.at(-1);
@@ -54,8 +54,7 @@ async function send() {
   await page.getByTestId('job-error').waitFor({ timeout: 60000 });
   return lastPost();
 }
-const openOutput = async () => { if (!(await page.getByTestId('output-pop').count())) await page.getByTestId('output-button').click(); await page.getByTestId('output-pop').waitFor(); };
-const closePop = async () => { if (await page.getByTestId('output-pop').count()) await page.getByTestId('output-button').click(); };
+const openOutput = async () => { await page.getByTestId('output-pane').waitFor(); }; // (the output pane is always in view under the editor)
 const seconds = async () => Number(await page.getByTestId('wave').getAttribute('data-seconds'));
 const waitStartPrice = () => page.waitForFunction(() => /^Start · /.test(document.querySelector('[data-testid=start]')?.textContent || ''), null, { timeout: 15000 });
 
@@ -157,15 +156,18 @@ await check('bad files: a file whose length no reader can find (garbage with an 
   return why;
 });
 
-await check('credit: with no balance a priced start is off (Start is grey with its price, no balance warning, the header says $0.00) while free runs (Free noise removal, free subtitles on a 10 min file) are not held back; with credit on the page Start is on, and our side still refuses a start above the real balance (402, "This job costs about ...")', async () => {
+await check('credit: with no balance a priced start is off (Start is grey with its price, no balance warning, the header says $0.00) while free runs (Free noise removal, free subtitles on a 10 min file) are not held back; with credit on the page Start is on, and our side still refuses a start above the real balance (402, "This job costs about ..."); the balance in the start row is red (class short) while the price is above it and not when it is covered', async () => {
   await freshApp();
   await choose('noisy.wav');
   await pick(page, 'noise', 'denoise');
   await start().waitFor();
   await page.waitForFunction(() => /^Start · \$/.test(document.querySelector('[data-testid=start]')?.innerText.replace(/\s+/g, ' ').trim() || ''), null, { timeout: 15000 });
   if (await page.locator('[data-testid=notes]', { hasText: /your balance is/ }).count()) throw new Error('a balance warning before starting');
-  const chip = (await page.locator('.balance-chip').innerText()).trim(); // (the header's balance: the page's own 'available' number is gone once a file is chosen)
+  const chip = (await page.locator('.balance-chip').innerText()).trim(); // (the header's balance; the start row has it too: checked below)
   if (chip !== '$0.00') throw new Error('the account is not empty: ' + chip);
+  // the balance in the start row is red when it cannot cover the price (and says how much there is)
+  if ((await barBalance(page).innerText()).trim() !== '$0.00') throw new Error('the start row says the balance is ' + await barBalance(page).innerText());
+  if (!(await page.getByTestId('bar-balance').evaluate((a) => a.classList.contains('short')))) throw new Error('the balance is not marked short for a price above $0.00');
   if (await start().isEnabled()) throw new Error('start is on for a price above a balance of $0.00');
   // (nothing is sent by a click on the grey button)
   const sent = posts.length;
@@ -235,11 +237,13 @@ await check('credit: with no balance a priced start is off (Start is grey with i
   // credit comes (the account state is read again by a reload): Start is on for the same choices
   admin('grant', EMAIL, '1', 'files credit check');
   await freshApp();
-  if ((await page.getByTestId('available').innerText()).trim() !== '$1.00') throw new Error('the credit is not on the page: ' + await page.getByTestId('available').innerText());
+  if ((await barBalance(page).innerText()).trim() !== '$1.00') throw new Error('the credit is not on the page: ' + await barBalance(page).innerText());
+  if (await page.getByTestId('bar-balance').evaluate((a) => a.classList.contains('short'))) throw new Error('the empty editor marks $1.00 as short');
   await choose('noisy.wav');
   await pick(page, 'noise', 'denoise');
   await waitStartPrice();
   if (!(await start().isEnabled())) throw new Error('start is off with $1.00 of credit');
+  if (await page.getByTestId('bar-balance').evaluate((a) => a.classList.contains('short'))) throw new Error('the balance is marked short with $1.00 for a price of a few cents');
   return reason;
 });
 
@@ -297,7 +301,7 @@ await check('leveling alone, subtitles alone, and both together each send exactl
   if ('browser' in L.noise[0]) throw new Error('noise: ' + JSON.stringify(L.noise));
 
   await pick(page, 'subs', 'browser');
-  await page.getByTestId('denoise-local-subs-note').waitFor();
+  await waitStartPrice();
   b = await send();
   L = shape(b, 'leveling,noise,subtitles', 2);
   if (L.subtitles[0].quality !== 'free' || !whole(L.subtitles, T) || 'browser' in L.noise[0]) throw new Error('denoise + free subtitles: ' + JSON.stringify(L));
@@ -328,7 +332,7 @@ await check('the line before Start names exactly what will download by itself: t
   await openOutput();
   const line = () => page.getByTestId('will-download').innerText();
   let t = await line();
-  // (the Output menu starts with the SRT only; the old form ticked all three: tick the other two to get the same line)
+  // (the subtitle files start with the SRT only; the old form ticked all three: tick the other two, in the Subtitles card, to get the same line)
   if (!/noisy-cleaned\.flac/.test(t) || !/\(SRT\)/.test(t) || /VTT|TXT/.test(t)) throw new Error('default: ' + t);
   await page.getByTestId('cap-vtt').check();
   await page.getByTestId('cap-txt').check();
@@ -341,12 +345,10 @@ await check('the line before Start names exactly what will download by itself: t
   if (!/talk\.mp3/.test(t) || !/\(TXT\)/.test(t) || /SRT|VTT/.test(t)) throw new Error('after the changes: ' + t);
   await page.getByTestId('cap-txt').uncheck();
   await page.getByTestId('cap-srt').check();
-  await closePop();
   await pick(page, 'subs', 'off');
   await openOutput();
   t = await line();
   if (!/talk\.mp3/.test(t) || /subtitles/.test(t)) throw new Error('with the subtitles off: ' + t);
-  await closePop();
   return t.replace(/\s+/g, ' ');
 });
 
@@ -616,7 +618,7 @@ await check('nothing chosen: Start is off with the reason; a file name with dire
   if (await start().isEnabled()) throw new Error('start enabled with nothing chosen');
   await page.unroute('**/api/me');
   await page.reload();
-  await page.getByTestId('available').waitFor();
+  await page.getByTestId('bar-balance').waitFor();
   const buffer = readFileSync(join(FILES, 'noisy.wav'));
   await page.setInputFiles('input[type=file]', { name: 'evil‮gpj.wav', mimeType: 'audio/wav', buffer });
   await start().waitFor({ timeout: 20000 });
@@ -624,7 +626,6 @@ await check('nothing chosen: Start is off with the reason; a file name with dire
   if (/[‪-‮⁦-⁩]/.test(shown) || !shown.includes('□')) throw new Error(JSON.stringify(shown));
   await openOutput();
   const outName = await page.getByTestId('out-name').inputValue();
-  await closePop();
   if (/[‪-‮⁦-⁩]/.test(outName)) throw new Error('the result name keeps the direction-changing character: ' + JSON.stringify(outName));
   return shown;
 });

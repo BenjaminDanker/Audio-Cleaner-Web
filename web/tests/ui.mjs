@@ -88,11 +88,8 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
         await page.goto(`${BASE}/app/job/${id}`);
         await (id === 'edone' ? page.getByTestId('studio') : page.getByTestId('job')).waitFor();
         if (id === 'edone') {
-          // the editor's popovers and the "All the options" window are part of the scan
-          await page.getByTestId('output-button').click();
-          await page.getByTestId('output-pop').waitFor();
-          for (const x of await page.evaluate(audit)) probs.push(`/app/job/${id} (output): ${x}`);
-          await page.getByTestId('output-button').click();
+          // the editor's popovers and the "All the options" window are part of the scan (the output pane is always in view, so the page's own scan has it)
+          await page.getByTestId('output-pane').waitFor();
           await page.getByTestId('bar-files').click();
           for (const x of await page.evaluate(audit)) probs.push(`/app/job/${id} (your files): ${x}`);
           await page.getByTestId('bar-files').click();
@@ -143,9 +140,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await waitResult(page, 'result', 120000);
     if (Number(await resultAttr(page, 'rms')) < 0.001) throw new Error('silent under CSP');
     // Save changes as an MP3 (the encoder is a worker)
-    await page.getByTestId('output-button').click();
     await page.getByTestId('out-name').fill('csp.mp3');
-    await page.getByTestId('output-button').click();
     const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.getByTestId('save-changes').click()]);
     await dl.saveAs(join(FILES, 'csp-out.mp3'));
     await page.goto(`${BASE}/app`);

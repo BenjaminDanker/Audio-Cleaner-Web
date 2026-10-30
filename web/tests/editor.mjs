@@ -1,7 +1,7 @@
 // The per-part editor (the one editor screen: before a file runs, while it runs, and on a finished job's page).
 //  1. a finished job's page IS the editor: its file came down by itself, Download again, play and the speaker buttons, the inspector;
 //     its waveform, its tracks, and leaving the page and coming back keeps the part that was chosen;
-//  2. choosing a part: dragging across the waveform, the handles (mouse and keyboard), the range box (steppers, Use playhead, Play part),
+//  2. choosing a part: dragging across the waveform, the handles (mouse and keyboard; the timeline is the only way: the settings have no Start/End card),
 //     Select all, Escape; the merge rules on a file that has not run yet (a change cuts at the part's edges, neighbours that are the same
 //     join by themselves, a split stays until a change touches it, Select more, Mixed, undo / redo) and Zoom;
 //  3. painting parts (a new one replaces what it covers) and the rows (a click on a section chooses exactly it, a drag across a row chooses a part);
@@ -13,7 +13,7 @@
 //  6. suggestions made by the server: the chip, the pins, the card (Apply / Dismiss), undo, dismissed ones stay dismissed after a reload;
 //  7. the start screen with parts: the price worked out here (the server's estimate for the same timeline says the same), Details, the job it makes; Voice Off for the
 //     whole file with noise removal on one part is only that part; suggestions found in the browser before the upload (a worker, progress,
-//     Cancel, "Suggestions appear after the first run." for a file over 30 minutes);
+//     Cancel, no suggestions line for a file over 30 minutes);
 //  8. phone (390x844, touch, light and dark): no sideways scroll, the inspector is a sheet above the bar, tap / long-press / Select more;
 //  9. the words: no avoided words anywhere in the editor, its popovers and the "All the options" window (which holds "Which one should I
 //     pick?"); the automatic settings say which one they picked and why; echo removal has its own price and its own row.
@@ -75,7 +75,7 @@ async function spare(need = 60) {
 }
 const asked = (m, re) => requests.filter((r) => r.m === m && re.test(r.p));
 const shot = async (name, p = page) => { if (SHOTS) await p.screenshot({ path: join(SHOTS, `${name}.png`) }); };
-const gotoApp = async (path = '/app', p = page) => { await spare(); await p.goto(`${BASE}${path}`); await p.getByTestId('available').or(p.getByTestId('job-page')).first().waitFor({ timeout: 20000 }); };
+const gotoApp = async (path = '/app', p = page) => { await spare(); await p.goto(`${BASE}${path}`); await p.getByTestId('bar-balance').or(p.getByTestId('available')).or(p.getByTestId('job-page')).first().waitFor({ timeout: 20000 }); };
 const waitDownloads = async (n, timeout = 60000) => { const t0 = Date.now(); while (got.length < n && Date.now() - t0 < timeout) await sleep(250); await sleep(600); };
 const balance = async () => (await apiCall(page, 'GET', 'me')).body.balance?.available_micros ?? (await apiCall(page, 'GET', 'billing/balance')).body?.available_micros;
 const autoOn = () => page.evaluate((k) => localStorage.setItem(k, 'on'), AUTO_KEY);
@@ -160,7 +160,7 @@ await check('the page of a finished job is the editor: the file came down by its
   if (got.length !== 1 || !/\.flac$/.test(got[0])) throw new Error('downloaded: ' + got.join(', '));
   const st = studio(page);
   for (const [k, v] of [['stage', 'done'], ['phase', 'ready'], ['changed', 'no']]) if ((await st.getAttribute(`data-${k}`)) !== v) throw new Error(`data-${k} is ${await st.getAttribute(`data-${k}`)}`);
-  for (const id of ['download-again', 'play', 'time', 'hear-voice', 'hear-level', 'inspector', 'waveform', 'output-button', 'bar-files', 'track-voice', 'track-level', 'track-subs']) if (!(await page.getByTestId(id).count())) throw new Error(`${id} is gone`);
+  for (const id of ['download-again', 'play', 'time', 'hear-voice', 'hear-level', 'inspector', 'waveform', 'output-pane', 'bar-files', 'track-voice', 'track-level', 'track-subs']) if (!(await page.getByTestId(id).count())) throw new Error(`${id} is gone`);
   if (await page.getByTestId('hear-echo').count() || await page.getByTestId('track-echo').count()) throw new Error('an Echo track for a file with one audio track');
   if (await page.getByTestId('save-changes').count()) throw new Error('Save changes with nothing changed');
   if ((await page.getByTestId('download-again').innerText()).trim() !== 'Download again') throw new Error('main button: ' + await mainButton(page));
@@ -203,11 +203,11 @@ await check('the editor of a finished job: the real waveform and the heard line,
 
 /* ------------------------------------------------------------------------------------------------ 2. choosing a part */
 
-await check('a part is chosen by dragging across the waveform, by its handles (mouse and arrow keys), by the range box (steppers, Use playhead), Play part plays it and stops at its end, Select all and Escape give the whole file back', async () => {
+await check('a part is chosen by dragging across the waveform and by its handles (mouse and arrow keys) and nothing else (the settings have no Start/End card: no steppers, Use playhead or Play part); a click sets the playhead and Play plays from it, Select all and Escape give the whole file back', async () => {
   const T = await waveSeconds();
   await drag(20, 30);
   if ((await selectionTitle(page)) !== '0:20–0:30 · 10 s') throw new Error('drag: ' + await selectionTitle(page));
-  if ((await page.getByTestId('time-s').innerText()) !== '0:20' || (await page.getByTestId('time-e').innerText()) !== '0:30') throw new Error('range box');
+  for (const id of ['range-box', 'time-s', 'time-e', 'nudge-s-minus', 'nudge-s-plus', 'nudge-e-minus', 'nudge-e-plus', 'use-playhead-s', 'use-playhead-e', 'play-part']) if (await page.getByTestId(id).count()) throw new Error(`${id} is back in the settings`);
   // the handles, with the mouse
   const box = await page.getByTestId('waveform').boundingBox();
   const x = (t) => box.x + (t / T) * box.width;
@@ -216,53 +216,41 @@ await check('a part is chosen by dragging across the waveform, by its handles (m
   await page.mouse.down();
   await page.mouse.move(x(36), end.y + end.height / 2, { steps: 6 });
   await page.mouse.up();
-  if ((await page.getByTestId('time-e').innerText()) !== '0:36') throw new Error('handle end: ' + await page.getByTestId('time-e').innerText());
+  if ((await selectionTitle(page)) !== '0:20–0:36 · 16 s') throw new Error('handle end: ' + await selectionTitle(page));
   const start = await page.getByTestId('handle-start').boundingBox();
   await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
   await page.mouse.down();
   await page.mouse.move(x(14), start.y + start.height / 2, { steps: 6 });
   await page.mouse.up();
-  if ((await page.getByTestId('time-s').innerText()) !== '0:14') throw new Error('handle start: ' + await page.getByTestId('time-s').innerText());
+  if ((await selectionTitle(page)) !== '0:14–0:36 · 22 s') throw new Error('handle start: ' + await selectionTitle(page));
   // ... and with the arrow keys (a second at a time)
   await page.getByTestId('handle-end').focus();
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowLeft');
-  if ((await page.getByTestId('time-e').innerText()) !== '0:37') throw new Error('handle end by keys: ' + await page.getByTestId('time-e').innerText());
+  if ((await selectionTitle(page)) !== '0:14–0:37 · 23 s') throw new Error('handle end by keys: ' + await selectionTitle(page));
   await page.getByTestId('handle-start').focus();
   await page.keyboard.press('ArrowRight');
-  if ((await page.getByTestId('time-s').innerText()) !== '0:15') throw new Error('handle start by keys: ' + await page.getByTestId('time-s').innerText());
-  // the steppers (a second at a time)
-  await page.getByTestId('nudge-s-plus').click();
-  await page.getByTestId('nudge-s-plus').click();
-  await page.getByTestId('nudge-e-minus').click();
-  if ((await selectionTitle(page)) !== '0:17–0:36 · 19 s') throw new Error('steppers: ' + await selectionTitle(page));
-  await page.getByTestId('nudge-s-minus').click();
-  await page.getByTestId('nudge-e-plus').click();
-  if ((await selectionTitle(page)) !== '0:16–0:37 · 21 s') throw new Error('steppers back: ' + await selectionTitle(page));
-  // Use playhead: click the waveform (no drag) to move it, then take it as the start, then as the end (the part stays a second long at least)
+  if ((await selectionTitle(page)) !== '0:15–0:37 · 22 s') throw new Error('handle start by keys: ' + await selectionTitle(page));
+  // a new part by a drag elsewhere (no stepper is needed to move it)
+  await drag(8, 11);
+  if ((await selectionTitle(page)) !== '0:08–0:11 · 3 s') throw new Error('a drag elsewhere: ' + await selectionTitle(page));
+  // a click sets the playhead; Play plays from there
   await seekTo(8);
   near(await timeNow(), 8, 0.7, 'playhead after a click');
-  await page.getByTestId('use-playhead-s').click();
-  if ((await page.getByTestId('time-s').innerText()) !== '0:08') throw new Error('start at the playhead: ' + await page.getByTestId('time-s').innerText());
-  await page.getByTestId('use-playhead-e').click();
-  if ((await selectionTitle(page)) !== '0:08–0:09 · 1 s') throw new Error('an end not after the start: ' + await selectionTitle(page));
-  // Play part: it plays the part and stops at its end
-  await page.getByTestId('nudge-e-plus').click();
-  await page.getByTestId('nudge-e-plus').click();
-  if ((await selectionTitle(page)) !== '0:08–0:11 · 3 s') throw new Error('part for Play part: ' + await selectionTitle(page));
-  await page.getByTestId('play-part').click();
+  await page.getByTestId('play').click();
   await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.dataset.playing === 'yes', null, { timeout: 20000 });
+  await page.waitForFunction(() => Number(document.querySelector('[data-testid=studio]')?.dataset.time) > 8.6, null, { timeout: 20000 });
+  await page.getByTestId('play').click();
   await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.dataset.playing === 'no', null, { timeout: 20000 });
-  near(await timeNow(), 11, 0.5, 'Play part stops at the end of the part');
   // Select all, and Escape
   await page.getByTestId('select-all').click();
   if ((await selectionTitle(page)) !== 'Whole file · 0:48' || (await page.getByTestId('select-all').getAttribute('aria-pressed')) !== 'true') throw new Error('select all: ' + await selectionTitle(page));
-  if (await page.getByTestId('range-box').count() === 0) throw new Error('the whole file has its range box too (handles at the ends)');
+  if ((await page.getByTestId('handle-start').count()) === 0 || (await page.getByTestId('handle-end').count()) === 0) throw new Error('the whole file has its handles at the ends');
   await drag(20, 30);
   await page.keyboard.press('Escape');
   if ((await selectionTitle(page)) !== 'Whole file · 0:48') throw new Error('Escape: ' + await selectionTitle(page));
-  return 'drag, handles (mouse, keys), steppers, Use playhead, Play part, Select all, Escape';
+  return 'drag, handles (mouse, keys), a new drag, playhead and Play, Select all, Escape; no Start/End card';
 });
 
 
@@ -758,7 +746,7 @@ await check('suggestions found in the browser (in a worker, with progress) for a
   return labels.join(' | ').slice(0, 300);
 });
 
-await check('looking can be canceled, and a file over 30 minutes says "Suggestions appear after the first run." (nothing is measured) while choosing parts yourself still works', async () => {
+await check('looking can be canceled, and a file over 30 minutes shows no looking and no line about it (nothing is measured) while choosing parts yourself still works', async () => {
   await gotoApp('/app');
   await autoOn();
   await page.setInputFiles('input[type=file]', join(FILES, 'long10min.mp3'));
@@ -771,19 +759,20 @@ await check('looking can be canceled, and a file over 30 minutes says "Suggestio
   await autoOn();
   await page.setInputFiles('input[type=file]', LONG);
   await page.getByTestId('start').waitFor({ timeout: 30000 });
-  await page.getByTestId('sg-unavailable').waitFor({ timeout: 120000 });
-  if ((await page.getByTestId('sg-unavailable').innerText()).trim() !== 'Suggestions appear after the first run.') throw new Error('words: ' + await page.getByTestId('sg-unavailable').innerText());
-  if (await page.getByTestId('sg-progress').count()) throw new Error('measuring a long file');
   await page.waitForFunction(() => document.querySelector('[data-testid=waveform]')?.dataset.reading === 'no', null, { timeout: 120000 });
+  await sleep(1500); // (the answer that nothing is measured comes with the length: it would be on the page by now)
+  if (await page.getByTestId('sg-progress').count()) throw new Error('measuring a long file');
+  for (const id of ['sg-unavailable', 'sg-chip', 'sg-card', 'sg-error']) if (await page.getByTestId(id).count()) throw new Error(`${id} on a file that is not looked at`);
+  if (/Suggestions appear after the first run/.test(await page.locator('main').innerText())) throw new Error('the old line about suggestions is back');
   await drag(600, 700);
-  if (!(await page.getByTestId('range-box').count()) || !/^10:00–11:40 · 1 min 40 s$/.test(await selectionTitle(page))) throw new Error('choosing a part by hand: ' + await selectionTitle(page));
-  return 'canceled; over 30 minutes: after the first run';
+  if (!/^10:00–11:40 · 1 min 40 s$/.test(await selectionTitle(page))) throw new Error('choosing a part by hand: ' + await selectionTitle(page));
+  return 'canceled; over 30 minutes: not looked at, no line';
 });
 
 /* ------------------------------------------------------------------------------------------------ 8. phone */
 
 for (const scheme of ['light', 'dark']) {
-  await check(`phone 390x844, ${scheme}: nothing scrolls sideways (the job page, a part chosen, the sheet open, the start screen), the inspector is a sheet above the bar, a tap on a section chooses it, a long press and Select more add ranges, a finger moves a handle`, async () => {
+  await check(`phone 390x844, ${scheme}: nothing scrolls sideways (the job page, a part chosen, the sheet open, the start screen), the inspector is a sheet over the bottom of the page (the start row is in the page), a tap on a section chooses it, a long press and Select more add ranges, a finger moves a handle`, async () => {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2, colorScheme: scheme });
     const p = await ctx.newPage();
     try {
@@ -816,11 +805,12 @@ for (const scheme of ['light', 'dark']) {
       await wide('with a part chosen');
       const geo = await p.evaluate(() => {
         const h = document.querySelector('[data-testid=inspector]'); const c = document.querySelector('[data-testid=bar]');
-        const hs = getComputedStyle(h); const cs = getComputedStyle(c); const hr = h.getBoundingClientRect(); const cr = c.getBoundingClientRect();
-        return { hostPos: hs.position, hostBottom: hr.bottom, hostTop: hr.top, barPos: cs.position, barTop: cr.top, barBottom: cr.bottom, h: window.innerHeight };
+        const hs = getComputedStyle(h); const cs = getComputedStyle(c); const hr = h.getBoundingClientRect();
+        return { hostPos: hs.position, hostBottom: hr.bottom, hostTop: hr.top, barPos: cs.position, h: window.innerHeight };
       });
-      if (geo.hostPos !== 'fixed' || !['fixed', 'sticky'].includes(geo.barPos)) throw new Error('not a sheet and a bar: ' + JSON.stringify(geo));
-      if (!(geo.hostBottom <= geo.barTop + 1) || !(geo.barBottom >= geo.h - 1) || !(geo.hostTop > geo.h * 0.2)) throw new Error('the sheet is not between the page and the bar: ' + JSON.stringify(geo));
+      // the sheet floats over the bottom of the screen; the start row is a part of the page (it scrolls with it)
+      if (geo.hostPos !== 'fixed' || geo.barPos === 'fixed' || geo.barPos === 'sticky') throw new Error('not a sheet over a page with its start row in it: ' + JSON.stringify(geo));
+      if (!(geo.hostBottom >= geo.h - 16) || !(geo.hostBottom <= geo.h) || !(geo.hostTop > geo.h * 0.2)) throw new Error('the sheet is not at the bottom of the screen: ' + JSON.stringify(geo));
       // the sheet folds with a tap on its title (the sections are behind it while it is open), the part stays
       await tap(p.locator('.studio .ih-main'));
       if ((await insp.getAttribute('data-sheet')) !== 'min' || (await title()) !== '0:15–0:25 · 10 s') throw new Error('the sheet did not fold: ' + await insp.getAttribute('data-sheet'));
@@ -871,12 +861,12 @@ for (const scheme of ['light', 'dark']) {
       for (let i = 1; i <= 8; i++) await touch('touchMove', hx + ((wb.x + (32 / T) * wb.width - hx) * i) / 8, hy);
       await touch('touchEnd');
       await p.waitForTimeout(250);
-      const e = await p.getByTestId('time-e').innerText();
-      near(Number(e.split(':')[1]), 32, 1.5, 'a finger moves the end handle');
+      const e = /–\d+:(\d\d)/.exec(await title());
+      near(Number(e?.[1]), 32, 1.5, `a finger moves the end handle (${await title()})`);
       await shot(`phone-${scheme}-handle`, p);
       // the start screen
       await p.goto(`${BASE}/app`);
-      await p.getByTestId('available').waitFor();
+      await p.getByTestId('bar-balance').waitFor();
       await dropFile(p, join(FILES, 'noisy.wav'), { recommended: true }); // the choices stay as recommended: the sheet is folded here, so the old-defaults helper would find no buttons
       await p.waitForTimeout(500);
       await wide('start screen');
@@ -911,17 +901,14 @@ const scan = async (what, p = page) => {
   return text.length;
 };
 
-await check('words: the editor, its popovers (Output, Your files, Details), its tooltips and the "All the options" window use plain words (no model names, no "premium", never "polish", no "our servers")', async () => {
+await check('words: the editor (with its output pane), its popovers (Your files, Details), its tooltips and the "All the options" window use plain words (no model names, no "premium", never "polish", no "our servers")', async () => {
   let chars = 0;
   await openJob(J2.id);
   await drag(2, 6);
   await setStrength(page, 'strong');
   await sleep(1200);
   chars += await scan('the editor of a finished job');
-  await page.getByTestId('output-button').click();
-  await page.getByTestId('output-pop').waitFor();
-  chars += await scan('the Output menu');
-  await page.getByTestId('output-button').click();
+  await page.getByTestId('output-pane').waitFor();
   await page.getByTestId('bar-files').click();
   await page.getByTestId('files').waitFor();
   chars += await scan('Your files');

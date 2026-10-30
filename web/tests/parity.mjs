@@ -111,6 +111,99 @@ await check('Opening a file: Your jobs stays on the Cleanup page; opening a job 
   } finally { await s.off(); }
 });
 
+await check('Opening a file: the Cleanup page is the editor before a file is chosen (Choose a file, the drop zone in the main pane, the (i) button with Good to know, a Start that is off, the balance, the jobs beside it, no Balance card); choosing a file fills it in without a page reload', async () => {
+  const listRoute = (jobs) => page.route(/\/api\/jobs$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs, limits: { maxActiveJobs: 3, retentionSeconds: 7200 } } }) : r.continue()));
+  await listRoute([]);
+  try {
+    await page.goto(`${BASE}/app`);
+    const empty = page.getByTestId('studio-empty');
+    await empty.waitFor({ timeout: 20000 });
+    has(await txt(page.locator('main h1')), /^Choose a file$/);
+    if ((await page.locator('main h1').count()) !== 1) throw new Error('more than one h1');
+    if ((await empty.locator('.pane.main input[type=file]').count()) !== 1) throw new Error('the drop zone is not in the main pane');
+    if (!(await empty.getByTestId('start-empty').isDisabled())) throw new Error('Start is on with no file');
+    has(await txt(empty.getByTestId('bar-balance')), /^Balance \$\d+\.\d\d$/);
+    if (await page.getByTestId('available').count() || await page.getByTestId('held').count() || await page.getByRole('heading', { name: 'Add a file' }).count() || await page.getByRole('heading', { name: 'Balance', exact: true }).count()) throw new Error('the old Add a file / Balance cards are back');
+    if (await page.getByRole('heading', { name: 'Good to know' }).count()) throw new Error('Good to know is on the page: it belongs to the (i) window');
+    // the jobs are a column beside the editor
+    await page.getByTestId('jobs-note').waitFor();
+    has(await txt(page.locator('.jobs-col')), /Nothing here yet\. Your files show up here once they run\./);
+    const ed = await empty.locator('.ed').boundingBox();
+    const col = await page.locator('.jobs-col').boundingBox();
+    if (!(col.x >= ed.x + ed.width - 1) || Math.abs(col.y - ed.y) > 80) throw new Error(`the jobs are not beside the editor: editor ${JSON.stringify(ed)}, jobs ${JSON.stringify(col)}`);
+    // the (i) button opens the same window, with Good to know in it
+    await page.getByTestId('info-open').click();
+    await page.getByTestId('info-modal').waitFor();
+    has(await txt(page.getByTestId('good-to-know')), /^Good to know Free noise removal happens in your browser/);
+    await page.getByTestId('info-close').click();
+    // the start row is a part of the page
+    const pos = await page.getByTestId('studio-empty').locator('.bb').evaluate((e) => getComputedStyle(e).position);
+    if (pos === 'fixed' || pos === 'sticky') throw new Error('the start row is ' + pos);
+    // choosing a file swaps the empty editor for the real one in place: no reload, the jobs stay beside it
+    await page.evaluate(() => { window.__sameDocument = 1; });
+    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+    await page.getByTestId('start').waitFor({ timeout: 30000 });
+    if (await page.getByTestId('studio-empty').count()) throw new Error('the empty editor is still there');
+    if ((await page.evaluate(() => window.__sameDocument)) !== 1) throw new Error('the page was reloaded');
+    await page.getByTestId('jobs-note').waitFor();
+    const col2 = await page.locator('.jobs-col').boundingBox();
+    const ed2 = await page.locator('.studio .ed').boundingBox();
+    if (!(col2.x >= ed2.x + ed2.width - 1)) throw new Error('the jobs moved from beside the editor');
+    return 'empty editor, jobs beside it, a file fills it in place';
+  } finally { await page.unroute(/\/api\/jobs$/); }
+});
+
+await check('The editor\'s pages (the Cleanup page and a job\'s page) are 1440 px wide on a wide screen and the header and footer match them; other pages keep the narrower width; the header has a Billing link when signed in', async () => {
+  const s = await stubJob('pw1', {}, null);
+  await page.setViewportSize({ width: 1700, height: 900 });
+  try {
+    const widths = async () => page.evaluate(() => {
+      const w = (sel) => document.querySelector(sel)?.getBoundingClientRect().width ?? null;
+      return { head: w('.header-inner'), foot: w('.footer-grid'), body: w('.studio .container.ws') ?? w('main .container') };
+    });
+    await page.goto(`${BASE}/app`);
+    await page.getByTestId('studio-empty').waitFor();
+    const cleanup = await widths();
+    await gotoJob('pw1');
+    const job = await widths();
+    await page.goto(`${BASE}/app/billing`);
+    await page.getByTestId('available').waitFor();
+    const billing = await widths();
+    for (const [what, w] of [['Cleanup', cleanup], ['job', job]]) {
+      if (Math.abs(w.body - 1440) > 2 || Math.abs(w.head - w.body) > 2 || Math.abs(w.foot - w.body) > 2) throw new Error(`${what}: ${JSON.stringify(w)}`);
+    }
+    if (!(billing.head < 1300) || Math.abs(billing.head - billing.foot) > 2) throw new Error('Billing: ' + JSON.stringify(billing));
+    const nav = page.getByRole('navigation', { name: 'Main' });
+    if ((await nav.getByRole('link', { name: 'Billing', exact: true }).getAttribute('href')) !== '/app/billing') throw new Error('no Billing link in the header');
+    return `Cleanup ${Math.round(cleanup.body)}, job ${Math.round(job.body)}, Billing ${Math.round(billing.head)} px`;
+  } finally { await page.setViewportSize({ width: 1280, height: 900 }); await s.off(); }
+});
+
+await check('Opening a file: the start row is under the editor and the settings, in the page (not fixed, not sticky), with Details / Your files, the balance link to Billing and the one button in that order; the output pane is above it', async () => {
+  await open('noisy.wav');
+  const bar = page.getByTestId('bar');
+  const g = await bar.evaluate((b) => {
+    const r = (sel) => document.querySelector(sel).getBoundingClientRect();
+    const first = b.querySelector('[data-testid=bar-det]').getBoundingClientRect();
+    const bal = b.querySelector('[data-testid=bar-balance]').getBoundingClientRect();
+    const btn = b.querySelector('[data-testid=start]').getBoundingClientRect();
+    return { pos: getComputedStyle(b).position, top: b.getBoundingClientRect().top + window.scrollY, insp: r('[data-testid=inspector]').bottom + window.scrollY, out: r('[data-testid=output-pane]').bottom + window.scrollY,
+      det: first.left, bal: bal.left, btn: btn.left, href: b.querySelector('[data-testid=bar-balance]').getAttribute('href') };
+  });
+  if (g.pos === 'fixed' || g.pos === 'sticky') throw new Error('the start row is ' + g.pos);
+  if (!(g.top >= g.insp - 1) || !(g.top >= g.out - 1)) throw new Error('the start row is not under the editor and the settings: ' + JSON.stringify(g));
+  if (!(g.det < g.bal && g.bal < g.btn)) throw new Error('order in the start row: ' + JSON.stringify(g));
+  if (g.href !== '/app/billing') throw new Error('the balance goes to ' + g.href);
+  // it scrolls with the page: a fixed bar would stay where it is
+  const y0 = (await bar.boundingBox()).y;
+  await page.evaluate(() => window.scrollBy(0, 120));
+  await sleep(200);
+  const y1 = (await bar.boundingBox()).y;
+  const moved = await page.evaluate(() => window.scrollY);
+  if (moved > 0 && Math.abs(y0 - y1 - moved) > 2) throw new Error(`the start row did not scroll with the page: ${y0} -> ${y1} after ${moved} px`);
+  return `under the editor; order Details, balance, button; scrolled ${moved} px with the page`;
+});
+
 await check('Opening a file: the Cleanup page opens without signing in (the free tools; a job\'s page and billing still ask for sign-in), and "taking a short break" shows when the server is on a break (the editor stays, with a notice that the paid options are unavailable; billing shows the calm panel)', async () => {
   const other = await browser.newContext();
   const p = await other.newPage();
@@ -395,7 +488,7 @@ await check('Subtitles: Language is Detect automatically plus the 28 languages',
   return `${opts.length} entries`;
 });
 
-await check('Subtitles: also translate into up to 3 languages (Standard / Extra accurate; Free has none), one set of files per language', async () => {
+await check('Subtitles: also translate into up to 3 languages (Standard / Extra accurate; Free has none); the subtitle files are chosen under the list in the same card, with no note about a set per language', async () => {
   await open('noisy.wav');
   await setSubs(page, 'free');
   if (!(await page.locator('.studio select[data-act=tr-add]').isDisabled())) throw new Error('translations are offered with Free');
@@ -404,62 +497,67 @@ await check('Subtitles: also translate into up to 3 languages (Standard / Extra 
   for (const l of ['es', 'fr', 'de']) await add.selectOption(l);
   if ((await page.getByTestId('translation-chip').count()) !== 3) throw new Error('chips');
   if (await add.count()) throw new Error('a fourth language is offered');
-  await page.getByTestId('output-button').click();
-  has(await txt(page.getByTestId('output-pop')), /One set of subtitle files per language\./);
-  await page.getByTestId('output-button').click();
+  // the file boxes sit in the Subtitles card, under "Translate to"; the old note about a set of files per language is gone
+  const card = page.locator('.studio [data-testid=inspector] section.l-subs');
+  for (const k of ['srt', 'vtt', 'txt']) if ((await card.getByTestId(`cap-${k}`).count()) !== 1) throw new Error(`cap-${k} is not in the Subtitles card`);
+  if ((await card.getByTestId('translation-chip').count()) !== 3) throw new Error('the chips are not in the Subtitles card');
+  const cardText = await txt(card);
+  if (!(cardText.indexOf('Translate to') > 0 && cardText.indexOf('Translate to') < cardText.indexOf('Files'))) throw new Error('the files are not under Translate to: ' + cardText);
+  if (/One set of subtitle files per language/.test(await page.locator('main').innerText())) throw new Error('the note about a set of files per language is back');
   await page.getByTestId('translation-chip').first().locator('button').click();
   if ((await page.getByTestId('translation-chip').count()) !== 2) throw new Error('a language was not taken away');
-  return '3 chips, none more, a set of files per language';
+  return '3 chips, none more, the file boxes in the Subtitles card';
 });
 
-await check('Subtitles: SRT / VTT / TXT are in the Output menu, each with its tooltip', async () => {
+await check('Subtitles: SRT / VTT / TXT are in the Subtitles card, each with its tooltip', async () => {
   await open('noisy.wav');
   await setSubs(page, 'standard');
-  await page.getByTestId('output-button').click();
+  if (await page.getByTestId('output-pane').getByTestId('cap-srt').count()) throw new Error('the subtitle files are in the output pane');
   for (const [k, re] of [['srt', /^SRT: subtitles that most video players and editors take\.$/], ['vtt', /^VTT: subtitles for web players\.$/], ['txt', /^TXT: the transcript as plain text, without times\.$/]]) {
     has(await tipOf(page.getByTestId(`cap-${k}`).locator('xpath=..')), re);
   }
-  await page.getByTestId('output-button').click();
   return 'three formats';
 });
 
-await check('Subtitles: Put the subtitles into the video (MKV) is in the Output menu for a video; its hint is its tooltip', async () => {
+await check('Subtitles: "Into the video" (MKV) is in the Subtitles card for a video; its hint is its tooltip', async () => {
   await open('speech.mp4');
   await setSubs(page, 'free');
-  await page.getByTestId('output-button').click();
   const box = page.getByRole('checkbox', { name: /Put the subtitles into the video/ });
   await box.waitFor();
   const tip = await tipOf(box.locator('xpath=..'));
   has(tip, /^Put into the video on your device, so nothing extra is uploaded\. Players can turn them on and off\. They go into an MKV file, the kind players show subtitles from\./);
   await box.check();
+  has(await txt(box.locator('xpath=..')), /^Into the video$/);
+  if ((await page.getByTestId('inspector').getByRole('checkbox', { name: /Put the subtitles into the video/ }).count()) !== 1) throw new Error('the box is not in the settings');
   has(await page.getByTestId('out-format').inputValue(), /^mkv$/);
-  await page.getByTestId('output-button').click();
   return 'tooltip; ticking picks MKV';
 });
 
-await check('Subtitles: Extra accurate goes to a speech partner (tooltip and All the options) and the Privacy details link stays', async () => {
+await check('Subtitles: Extra accurate goes to a speech partner (tooltip and All the options); there is no hint line under Translate to any more', async () => {
   await open('noisy.wav');
   await setSubs(page, 'accurate');
-  const note = page.getByTestId('accurate-note');
-  has(await txt(note), /^Extra accurate sends your audio to a speech partner we work with, only for this option\. Privacy details$/);
-  if ((await note.locator('a').getAttribute('href')) !== '/privacy') throw new Error('link');
+  has(await tipOf(page.locator('.studio button[data-act=s-q][data-v="3"]')), /with a speech partner we work with: your audio is sent to them, only for this option/);
+  if (await page.getByTestId('accurate-note').count()) throw new Error('the hint line under Translate to is back');
   await page.getByTestId('info-open').click();
   has(await txt(page.getByTestId('info-modal')), /with a speech partner we work with \(your audio goes to them, only for this option\)/);
   await page.getByTestId('info-close').click();
-  return 'note + link + window';
+  return 'tooltip + window, no line';
 });
 
-await check('Subtitles: the notes about mixing browser and server work (the transcript is written from the original, etc.) are today\'s words', async () => {
+await check('Subtitles: mixing browser and server work (Standard subtitles with Standard or Free noise removal, Free subtitles with Standard noise removal) shows no hint lines under Translate to; the prices and the file boxes are all that is there', async () => {
   await open('noisy.wav');
   await setSubs(page, 'standard');
-  has(await txt(page.getByTestId('both-note')), /^We write the transcript from your original recording \(it comes out more accurate\), and clean the sound separately\.$/);
+  const notes = ['both-note', 'browser-subs-note', 'denoise-local-subs-note', 'accurate-note'];
+  const none = async (what) => { for (const id of notes) if (await page.getByTestId(id).count()) throw new Error(`${what}: ${id} is on the page`); };
+  await none('Standard noise removal + Standard subtitles');
   await setKind(page, 'free');
   await setLeveling(page, 'off');
-  has(await txt(page.getByTestId('browser-subs-note')), /^The noise removal happens on your device\. For the subtitles, the original sound is uploaded\.$/);
+  await none('Free noise removal + Standard subtitles');
   await setKind(page, 'paid');
   await setSubs(page, 'free');
-  has(await txt(page.getByTestId('denoise-local-subs-note')), /^The cleanup is done on our side; the subtitles are made here on your device, from your original recording\.$/);
-  return 'three notes';
+  await none('Standard noise removal + Free subtitles');
+  if ((await page.getByTestId('cap-srt').count()) !== 1) throw new Error('the subtitle file boxes are gone');
+  return 'no hint lines';
 });
 
 /* ================================================================================================ Choosing parts */
@@ -557,23 +655,23 @@ await check('Choosing parts: Undo and redo', async () => {
   return 'buttons and Ctrl+Z';
 });
 
-await check('Choosing parts: Start / End ±1 s buttons, Use playhead, Play part are in the inspector', async () => {
+await check('Choosing parts: a part is chosen on the timeline only: the handles move it with the keys, and the inspector has no Start/End card (no ±1 s buttons, Use playhead, Play part)', async () => {
   await open('speech.wav');
   await dragRange(page, 3, 8);
-  await page.getByTestId('nudge-s-plus').click();
-  await page.getByTestId('nudge-e-minus').click();
+  has(await selectionTitle(page), /^0:03–0:08 · 5 s$/);
+  for (const id of ['range-box', 'time-s', 'time-e', 'nudge-s-minus', 'nudge-s-plus', 'nudge-e-minus', 'nudge-e-plus', 'use-playhead-s', 'use-playhead-e', 'play-part']) {
+    if (await page.getByTestId(id).count()) throw new Error(`${id} is back in the inspector`);
+  }
+  await page.getByTestId('handle-start').focus();
+  await page.keyboard.press('ArrowRight');
+  await page.getByTestId('handle-end').focus();
+  await page.keyboard.press('ArrowLeft');
   has(await selectionTitle(page), /^0:04–0:07 · 3 s$/);
-  if ((await txt(page.getByTestId('time-s'))) !== '0:04' || (await txt(page.getByTestId('time-e'))) !== '0:07') throw new Error('times');
-  await page.getByTestId('waveform').click({ position: { x: 520, y: 40 } });
-  await page.getByTestId('use-playhead-s').click();
-  const start = await txt(page.getByTestId('time-s'));
-  if (start === '0:04') throw new Error('Use playhead did nothing');
-  const label = (await txt(page.getByTestId('play-part'))).trim();
-  if (label !== 'Play part') throw new Error(label);
-  await page.getByTestId('play-part').click();
+  await page.getByTestId('waveform').click({ position: { x: 330, y: 40 } });
+  await page.getByTestId('play').click();
   await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.dataset.playing === 'yes', null, { timeout: 8000 });
   await page.getByTestId('play').click();
-  return `start now ${start}; Play part plays`;
+  return 'handles by keys; Play plays from the playhead; no range card';
 });
 
 await check('Choosing parts: Zoom − / + (not drawn on the prototype, drawn here as today)', async () => {
@@ -608,39 +706,35 @@ await check('Choosing parts: the strength slider for any strength (as on today\'
 
 /* ================================================================================================ The result file */
 
-await check('The result file: name and file type are in the Output menu (the type follows the name\'s ending and the other way round)', async () => {
+await check('The result file: name and file type are in the output pane under the editor, in view without opening anything (the type follows the name\'s ending and the other way round)', async () => {
   await open('noisy.wav');
-  await page.getByTestId('output-button').click();
-  has(await page.getByTestId('out-name').inputValue(), /^noisy-cleaned\.flac$/);
+  await page.getByTestId('output-pane').waitFor();
+  if (await page.getByTestId('output-button').count() || await page.getByTestId('output-pop').count()) throw new Error('the Output menu is back');
+  has(await page.getByTestId('output-pane').getByTestId('out-name').inputValue(), /^noisy-cleaned\.flac$/);
   await page.getByTestId('out-format').selectOption('mp3').catch(() => {});
   const name = await page.getByTestId('out-name').inputValue();
   await page.getByTestId('out-name').fill('talk.flac');
   if ((await page.getByTestId('out-format').inputValue()) !== 'flac') throw new Error('typing an ending did not pick the type');
-  await page.getByTestId('output-button').click();
-  has(await txt(page.getByTestId('output-button')), /^FLAC · talk$/);
+  has(await page.getByTestId('out-name').inputValue(), /^talk\.flac$/);
   return `${name} -> talk.flac`;
 });
 
 await check('The result file: video size Same, 2160p, 1440p, 1080p, 720p, 480p with the size notes as the tooltip/hint', async () => {
   await open('conv720.mp4');
-  await page.getByTestId('output-button').click();
   const size = page.getByTestId('out-size');
   await size.waitFor();
   const opts = await size.locator('option').allInnerTexts();
   if (opts[0] !== 'Same as the original' || opts.length < 3) throw new Error(opts.join());
   has(await txt(page.getByTestId('out-size-note')), /The picture is copied as it is whenever the new file type can hold it\.|can’t re-encode/);
-  await page.getByTestId('output-button').click();
   return opts.join(' | ');
 });
 
 await check('The result file: this browser can\'t make some types; audio saved as a video gets a plain black picture — the notes stay', async () => {
   await open('noisy.wav');
-  await page.getByTestId('output-button').click();
   await page.getByTestId('out-name').fill('clip.mkv');
   has(await txt(page.getByTestId('out-black-note')), /^There’s no picture in your recording, so the video gets a plain black one\.$/);
   await page.getByTestId('out-name').fill('clip.xyz');
   has(await txt(page.getByTestId('out-hint')), /We can’t make \.xyz files/);
-  await page.getByTestId('output-button').click();
   return 'black picture note; unknown ending refused';
 });
 
@@ -908,10 +1002,8 @@ await check('After processing: Change and save again — strength, rebuild, leve
     await page.waitForFunction(() => /Save changes · \$0\.0\d+/.test(document.querySelector('[data-testid=save-changes]')?.textContent || ''), null, { timeout: 8000 });
     has((await sectionTexts('voice')).join(' '), /Strong/);
     has((await sectionTexts('level')).join(' '), /Broadcast/);
-    await page.getByTestId('output-button').click();
     await page.getByTestId('out-name').fill('again.mp3');
-    await page.getByTestId('output-button').click();
-    has(await txt(page.getByTestId('output-button')), /^MP3 · again$/);
+    has(await page.getByTestId('out-format').inputValue(), /^mp3$/);
     return await txt(page.getByTestId('save-changes'));
   } finally { await s.off(); }
 });

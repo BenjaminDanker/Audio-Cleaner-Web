@@ -112,6 +112,17 @@ export default function InfoModal({ open, onClose, pricing }) {
               </div>
               <p className="small muted">You only pay for what gets processed. Billed per second of audio, no minimum charge. Each part you choose can have its own settings, and you pay for each part with what it uses.</p>
             </section>
+            <section data-testid="good-to-know">
+              <h3>Good to know</h3>
+              <ul>
+                <li>Free noise removal happens <b>in your browser</b>, so that file never leaves your device.</li>
+                <li>Uploading a video for us to work on? Only its <b>sound</b> is uploaded. Your browser puts the clean sound back into the video afterwards.</li>
+                <li>Your upload and your results are kept together for <b>2 hours after your last change</b> to a file (at most 6 hours after the upload), so you can listen, download again or change it, and then they are deleted together. You can delete them sooner.</li>
+                <li>Choose a part of your file on the timeline to change just that part: a few seconds with an echo, a louder stretch, a muffled answer. You see the price before you save, and a new strength is often free.</li>
+                <li>Changing a finished file only redoes the steps that changed, so a new strength is often free. The price is shown before you confirm.</li>
+                <li>You pay for what gets processed, by the second. A job that fails or is canceled costs nothing.</li>
+              </ul>
+            </section>
             <section>
               <h3>Good to know</h3>
               <Ul list={[ALTERNATIVES.browserDenoise, ALTERNATIVES.denoise, ALTERNATIVES.rebuild, ALTERNATIVES.browserSubs, ALTERNATIVES.accurateSubs, ALTERNATIVES.translations]} />

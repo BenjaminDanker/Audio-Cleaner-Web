@@ -5,7 +5,7 @@ import { api, apiOffline } from '../../api.js';
 import { needsAccount } from '../../access.js';
 import { useAuth } from '../../auth.jsx';
 import { forgetFinish, removeLocalCard } from '../../finish.js';
-import { bytes } from '../../format.js';
+import { balanceMoney, bytes } from '../../format.js';
 import { findRate, loadPricing, useNow, usePricing } from '../../hooks.js';
 import { jobPath } from '../../jobs.js';
 import { heardSeries, pcmPeaks } from '../../editor/peaks.js';
@@ -26,7 +26,7 @@ import { barOf, downloadText, notesOf, progressLine } from '../../studio/screen.
 import { forgetSession, warmUpDenoiser, warmUpSpeech } from '../../studio/session.js';
 import OutputFields, { useOutputChoice } from '../OutputPicker.jsx';
 import { useGoSignIn } from '../SignIn.jsx';
-import Bar from './Bar.jsx';
+import Bar, { OutputPane } from './Bar.jsx';
 import InfoModal from './InfoModal.jsx';
 import Inspector from './Inspector.jsx';
 import Timeline from './Timeline.jsx';
@@ -74,7 +74,7 @@ export default function Studio(props) {
   return <Ready {...props} job={job} ver={ver} />;
 }
 
-function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcome = '', active = 0, maxActive = null }) {
+function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcome = '', active = 0, maxActive = null, banner = null, aside = null }) {
   const nav = useNavigate();
   const { balance, refresh, signedIn, known } = useAuth();
   const goSignIn = useGoSignIn();
@@ -430,9 +430,6 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
       case 'l-lvl': apply('level', { lvl: +v, lufs: null }); break;
       case 's-q': if (+v === 1) warmUpSpeech(); apply('subs', { q: +v }); break;
       case 'tr-del': apply('subs', (x) => ({ tr: (x.tr || []).filter((l) => l !== v) })); break;
-      case 'nudge': nudge(b.dataset.w, +b.dataset.d); break;
-      case 'useph': useHere(b.dataset.w); break;
-      case 'playpart': { const r = S.sel ? S.sel[0] : { s: 0, e: T }; togglePlay(r.s, r.e); break; }
       case 'info': setModal(true); break;
       case 'hear': setHear((hh) => ({ ...hh, [b.dataset.tr]: !hh[b.dataset.tr] })); break;
       case 'cancel': cancelJob(); break;
@@ -463,19 +460,6 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     }
   };
 
-  const nudge = (which, d) => {
-    if (processing || locked) return;
-    const r = S.sel ? S.sel[0] : { s: 0, e: T };
-    if (S.sel && S.sel.length > 1) return;
-    if (which === 's') selectRange(Math.min(r.s + d, r.e - 1), r.e);
-    else selectRange(r.s, Math.max(r.e + d, r.s + 1));
-  };
-  const useHere = (which) => {
-    if (processing || locked) return;
-    const r = S.sel ? S.sel[0] : { s: 0, e: T };
-    if (which === 's') selectRange(Math.min(ph, r.e - 1), r.e);
-    else selectRange(r.s, Math.max(ph, r.s + 1));
-  };
 
   // the slider: one undo step for a whole drag
   const sliding = useRef(false);
@@ -495,19 +479,17 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const { suppress, lpFired } = usePointer({ rootRef, waveRef, T, live });
   Object.assign(live.current, { mobile, processing, setMore, setSheet, setPop, pop, modal, more, seek, togglePlay, session });
 
-  // the bar's height, for the room under the page
+  // on a phone the settings sheet floats over the bottom of the page: room under the page for it
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return undefined;
     const set = () => {
-      const bb = root.querySelector('.bb');
       const ins = root.querySelector('#insp');
-      root.style.setProperty('--bar-h', `${bb ? bb.offsetHeight : 0}px`);
       root.style.setProperty('--sel-h', mobile && ins ? `${ins.offsetHeight + 8}px` : '0px');
     };
     set();
     const ro = window.ResizeObserver ? new ResizeObserver(set) : null;
-    root.querySelectorAll('.bb, #insp').forEach((n) => ro?.observe(n));
+    root.querySelectorAll('#insp').forEach((n) => ro?.observe(n));
     window.addEventListener('resize', set);
     return () => { ro?.disconnect(); window.removeEventListener('resize', set); };
   }, [mobile, stage, sheet, ver, pop]);
@@ -553,6 +535,10 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   })();
 
   const bar = barOf({ stage, account, estMicros, server, processing, saving, procLine, building, finState, changed, deltaMicros, needVideo });
+  const avail = balance?.available_micros;
+  const wallet = signedIn && avail != null
+    ? { text: balanceMoney(avail), short: (stage === 'ready' && !affordable) || (done && changedTracks && !affordableSave) }
+    : null;
   const primaryDisabled = stage === 'ready' ? !canStart : processing || building ? true
     : changed ? (!choice.valid && plan.cleaning && !locked ? true : (changedTracks && (quote.state !== 'ok' && !isLocal ? true : !affordableSave)) || (isLocal && changedTracks && !hasFileHere) || (plan.wantsText && !session.out.sfiles.length))
       : false;
@@ -566,7 +552,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     S, session, tips, stage, sheet, mobile, info, verdict, sVerdict, rebuildPaused, locked, lockedWhy, eta, loadLeft, ph, zoom, pins, hear, hearText, heard, data,
     scrollRef, waveRef, reading, prog: processing ? (procLine?.value ?? 0) : 0, cost: c, total: estMicros, rates: rates || { std: 0, ext: 0 }, deltaMicros, changed: changedTracks, price,
     conversion, pop, choice, plan, out: session.out, files, preview: previewText, job, expiresIn, delAsk, paid: job?.costMicros || session.paid || 0, finState, fin, bar, needVideo,
-    disabled: processing, willDownload, tooBigNote, mkvNote, primaryDisabled,
+    disabled: processing, willDownload, tooBigNote, mkvNote, primaryDisabled, wallet,
     h: { onDb, slideStart, slideEnd, onVideo: (f) => fin?.setVideo(f) },
   };
 
@@ -579,29 +565,38 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
       {...(done && gains ? { 'data-gains': gains } : {})}
       data-time={ph.toFixed(2)} data-playing={playing ? 'yes' : 'no'} data-held={playInfo.held ?? 0} data-buffering={playInfo.buffering ? 'yes' : 'no'} data-seconds={T} data-changed={done ? (changedTracks ? 'tracks' : changedOut ? 'output' : 'no') : undefined}
     >
-      <div className="container ws" data-stage={stage}>
-        {notes.length > 0 && (
-          <div className="notes" data-testid="notes">
-            {notes.map((n) => (
-              <div key={n.key} className={n.cls} role={n.cls.startsWith('banner') ? 'alert' : undefined} data-testid={n.testid}>
-                {n.text}{' '}
-                {n.kind === 'credit' && <Link to="/app/billing">Add credit</Link>}
-                {n.kind === 'prices' && <button type="button" className="btn btn-ghost btn-sm" onClick={() => loadPricing().catch(() => {})}>Try again</button>}
+      <div className="container ws wide" data-stage={stage}>
+        <div className={`lay${aside ? ' with-aside' : ''}`}>
+          <div className="work">
+            {banner}
+            {notes.length > 0 && (
+              <div className="notes" data-testid="notes">
+                {notes.map((n) => (
+                  <div key={n.key} className={n.cls} role={n.cls.startsWith('banner') ? 'alert' : undefined} data-testid={n.testid}>
+                    {n.text}{' '}
+                    {n.kind === 'credit' && <Link to="/app/billing">Add credit</Link>}
+                    {n.kind === 'prices' && <button type="button" className="btn btn-ghost btn-sm" onClick={() => loadPricing().catch(() => {})}>Try again</button>}
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
+            <div className="ed">
+              <div className="edl">
+                <div className="pane main" id="edmain">
+                  <TopPane {...{ session, job, S, T, info, fileUrl, audioUrl, mediaRef, engineRef, done, localAb, ph, playing, signedIn, pend, reco, zoom, more, fileMeta }} />
+                  <Timeline ctx={ctx} />
+                </div>
+                <OutputPane ctx={ctx} />
+              </div>
+              <aside className="pane insp lk" id="insp" aria-label="Selection" data-testid="inspector" data-sheet={sheet ? 'open' : 'min'} ref={(el) => el && el.classList.toggle('min', !sheet)}>
+                <Inspector ctx={{ ...ctx, h: { ...ctx.h } }} />
+              </aside>
+            </div>
+            <Bar ctx={ctx} />
           </div>
-        )}
-        <div className="ed">
-          <div className="pane main" id="edmain">
-            <TopPane {...{ session, job, S, T, info, fileUrl, audioUrl, mediaRef, engineRef, done, localAb, ph, playing, signedIn, pend, reco, zoom, more, fileMeta }} />
-            <Timeline ctx={ctx} />
-          </div>
-          <aside className="pane insp lk" id="insp" aria-label="Selection" data-testid="inspector" data-sheet={sheet ? 'open' : 'min'} ref={(el) => el && el.classList.toggle('min', !sheet)}>
-            <Inspector ctx={{ ...ctx, h: { ...ctx.h } }} />
-          </aside>
+          {aside}
         </div>
       </div>
-      <Bar ctx={ctx} />
       <div className="toast" role="status" hidden={!toast} data-testid="toast">{toast}</div>
       <div className="tip" role="tooltip" hidden ref={tipRef} />
       <InfoModal open={modal} onClose={() => setModal(false)} pricing={pricing} />

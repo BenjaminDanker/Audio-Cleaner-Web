@@ -35,13 +35,12 @@ async function run(file, { noise = 'off', embed = false, caps = ['srt', 'vtt', '
   await dropFile(page, join(FILES, file));
   await pick(page, 'noise', noise);
   await pick(page, 'subs', 'browser');
-  await page.getByTestId('output-button').click(); // the Output menu: the subtitle files and "into the video"
+  // the Subtitles card of the settings: the subtitle files and "into the video"
   if (embed) await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).check();
   for (const id of ['srt', 'vtt', 'txt']) {
     const box = page.getByTestId(`cap-${id}`);
     if (caps.includes(id)) await box.check(); else await box.uncheck();
   }
-  await page.getByTestId('output-button').click();
   downloads.length = 0;
   const t0 = Date.now();
   await page.getByTestId('start').click();
@@ -151,18 +150,14 @@ await check('subtitles, free, video: embedded + TXT gives exactly two files by t
 });
 
 await check('subtitles, free: Save changes with the subtitle formats and the video: the new choice is what comes down (SRT instead of TXT; the video without the subtitles inside is not offered as a variant)', async () => {
-  await page.getByTestId('output-button').click();
   await page.getByTestId('cap-srt').check();
   await page.getByTestId('cap-txt').uncheck();
-  await page.getByTestId('output-button').click();
   downloads.length = 0;
   await page.getByTestId('save-changes').click();
   for (let i = 0; i < 80 && downloads.length < 2; i++) await page.waitForTimeout(250);
   if (names().join() !== 'speech-subtitled.mkv,speech.srt') throw new Error('downloaded: ' + names());
   await page.getByTestId('download-again').waitFor();
-  await page.getByTestId('output-button').click();
   await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).uncheck();
-  await page.getByTestId('output-button').click();
   downloads.length = 0;
   await page.getByTestId('save-changes').click();
   for (let i = 0; i < 40 && downloads.length < 1; i++) await page.waitForTimeout(250);

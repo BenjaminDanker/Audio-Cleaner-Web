@@ -111,7 +111,7 @@ const editorState = (p) => p.evaluate(() => {
     voice: ['off', 'noise', 'rebuild'].find((m) => id(`voice-${m}`)?.getAttribute('aria-checked') === 'true'),
     kind: pressed('v-kind'), strength: pressed('v-str'), subs: pressed('s-q'), level: pressed('l-lvl'),
     language: document.querySelector('.studio select[data-act=s-lang]')?.value,
-    analysis: ['reco-listening', 'reco-status', 'reco-line', 'sg-progress', 'sg-chip', 'sg-card', 'sg-unavailable', 'sg-canceled', 'sg-error'].filter((t) => id(t)),
+    analysis: ['reco-listening', 'reco-status', 'reco-line', 'sg-progress', 'sg-chip', 'sg-card', 'sg-canceled', 'sg-error'].filter((t) => id(t)),
   };
 });
 /** Opens a file on a signed-out /app. With Automatic on it waits for what it set ("Set automatically for this file"); with it off, long enough for a quick listen to have begun. */
@@ -147,10 +147,10 @@ async function planAndLeave(p, { keepAuto = false } = {}) {
   await p.getByTestId('waveform').scrollIntoViewIfNeeded();
   await dragRange(p, 2, 6);
   await setLeveling(p, 'podcast');
-  await p.getByTestId('output-button').click();
   await p.getByTestId('out-name').fill('my-take.flac');
-  await p.getByTestId('output-button').click();
 }
+/** What the output pane says: the file type and the name ("flac my-take.flac"). */
+const outputOf = async (p) => `${await p.getByTestId('out-format').inputValue()} ${await p.getByTestId('out-name').inputValue()}`;
 const detailLines = async (p) => {
   await p.getByTestId('bar-det').click();
   const lines = await p.locator('[data-testid=details] ul.fl li:not(.tot)').allInnerTexts();
@@ -163,13 +163,35 @@ await check('signed out: /app opens (no redirect), the header says Sign in, the 
   await page.getByTestId('free-no-account').waitFor({ timeout: 15000 });
   if (new URL(page.url()).pathname !== '/app') throw new Error(page.url());
   if (!(await page.locator('.site-header').getByRole('link', { name: 'Sign in' }).count())) throw new Error('no Sign in in the header');
+  if (await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Billing' }).count()) throw new Error('a Billing link in the header of a visitor without an account');
   const text = await page.getByTestId('free-no-account').innerText();
   if (!/free tools work without an account/.test(text) || !(await page.getByTestId('free-no-account').getByRole('link', { name: 'Sign in' }).count())) throw new Error(text);
   if (!(await page.locator('input[type=file]').count())) throw new Error('no file picker');
-  if (await page.getByTestId('jobs-note').count() || await page.getByTestId('available').count()) throw new Error('the jobs list or the balance is shown');
+  // the page is the (empty) editor already, with the note above it; no jobs column and no balance without an account
+  await page.getByTestId('studio-empty').waitFor();
+  if (!(await page.getByTestId('studio-empty').locator('.pane.main input[type=file]').count())) throw new Error('the file picker is not in the editor\'s main pane');
+  const above = await page.evaluate(() => document.querySelector('[data-testid=free-no-account]').getBoundingClientRect().bottom <= document.querySelector('[data-testid=studio-empty] .ed').getBoundingClientRect().top + 1);
+  if (!above) throw new Error('the note is not above the editor');
+  if (await page.getByTestId('jobs-note').count() || await page.locator('.jobs-col').count() || await page.getByTestId('bar-balance').count()) throw new Error('the jobs list or the balance is shown');
   await page.waitForTimeout(800);
   onlyPublic('while the empty page was open');
   return text.replace(/\s+/g, ' ').slice(0, 90);
+});
+
+await check('signed out: choosing a file swaps the empty editor for the real one in place (no reload) and the free-tools note stays above it; the start row is in the page, with no balance link', async () => {
+  await page.goto(`${BASE}/app`);
+  await page.getByTestId('studio-empty').waitFor();
+  await page.evaluate(() => { window.__sameDocument = 1; });
+  await dropFile(page, NOISY);
+  if (await page.getByTestId('studio-empty').count()) throw new Error('the empty editor is still there');
+  if ((await page.evaluate(() => window.__sameDocument)) !== 1) throw new Error('the page was reloaded');
+  await page.getByTestId('free-no-account').waitFor();
+  const above = await page.evaluate(() => document.querySelector('[data-testid=free-no-account]').getBoundingClientRect().bottom <= document.querySelector('.studio .ed').getBoundingClientRect().top + 1);
+  if (!above) throw new Error('the note is not above the editor once a file is chosen');
+  if (await page.getByTestId('bar-balance').count()) throw new Error('a balance is shown to a visitor without an account');
+  const pos = await page.getByTestId('bar').evaluate((b) => getComputedStyle(b).position);
+  if (pos === 'fixed' || pos === 'sticky') throw new Error('the start row is ' + pos);
+  return 'swapped in place; note above the editor; start row ' + pos;
 });
 
 await check('signed out, Automatic on (the default): it listens in the browser and sets only free options for the whole file (Gentle / Strong with the heavy remover / Strong for a voice it would rebuild / Balanced with no subtitles when no one speaks), no Leveling, nothing paid and nothing about the file sent; the switch is on with a tooltip that says it picks among the free options', async () => {
@@ -189,6 +211,9 @@ await check('signed out, Automatic on (the default): it listens in the browser a
     if (await savedAuto(w.p) !== null) throw new Error('the saved choice was written: ' + await savedAuto(w.p));
     const sw = w.p.locator('.studio button[data-act=auto]');
     if (!/picks among the free options/.test((await editorState(w.p)).tip)) throw new Error('tip: ' + (await editorState(w.p)).tip);
+    // (the start row is in the page: the clicks on Details above left it scrolled down; a scroll hides a tooltip, so bring the switch into view first, at once)
+    await w.p.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    await w.p.waitForTimeout(400);
     await sw.hover();
     await w.p.waitForTimeout(1300);
     const shown = await w.p.locator('[role=tooltip]:not([hidden])').allInnerTexts();
@@ -286,6 +311,7 @@ await check('signed out, Automatic on: the suggestions for moments offer Free st
 
 await check('signed out: a Free noise removal run completes (the cleaned file downloads) and nothing about the file is sent: no job, no upload, no price asked for from our side, no request that is not a plain GET', async () => {
   calls.length = 0; downloads.length = 0;
+  await page.goto(`${BASE}/app`);
   await dropFile(page, NOISY);
   const label = (await mainButton(page)).trim();
   if (label !== 'Start · Free') throw new Error('button: ' + label);
@@ -326,14 +352,12 @@ const BIG = join(FILES, 'big4k.avi'); // 10 s of a plain 4K picture at 30 frames
 if (!existsSync(BIG)) execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x336699:size=3840x2160:rate=30:duration=10', '-i', NOISY, '-t', '10', '-map', '0:v', '-map', '1:a',
   '-c:v', 'mpeg4', '-b:v', '1M', '-g', '300', '-threads', '4', '-c:a', 'ac3', '-b:a', '192k', BIG]);
 const NOTHING_TO_DO = 'Choose at least one thing to do: noise removal, subtitles, or another file type or video size.';
-const outField = (p, id) => p.locator(`[data-testid=output-pop] [data-testid=${id}]`);
-/** The Output menu open (and left open): the file type and size lists are ready. */
+const outField = (p, id) => p.locator(`[data-testid=output-pane] [data-testid=${id}]`);
+/** The output pane (always in view under the editor): the file type and size lists are ready. */
 async function openOutput(p) {
-  if (!(await p.getByTestId('output-pop').count())) await p.getByTestId('output-button').click();
   await outField(p, 'out-format').waitFor();
-  await p.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pop] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
+  await p.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pane] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
 }
-const closeOutput = async (p) => { if (await p.getByTestId('output-pop').count()) await p.getByTestId('output-button').click(); };
 
 await check('signed out: another file type or video size with nothing else chosen is free: with the file\'s own type and size Start says what to choose, with another type it is "Start · Free", the file comes down in the new type with its own sound, the card is "File conversion", and nothing about the file is sent', async () => {
   calls.length = 0; downloads.length = 0;
@@ -346,7 +370,6 @@ await check('signed out: another file type or video size with nothing else chose
   await openOutput(page);
   await outField(page, 'out-format').selectOption('mkv');
   await outField(page, 'out-name').fill('converted copy.mkv');
-  await closeOutput(page);
   await page.waitForFunction(() => !document.querySelector('[data-testid=notes] .banner-warn') && document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 5000 });
   const label = (await mainButton(page)).trim();
   if (label !== 'Start · Free') throw new Error('button: ' + label);
@@ -385,8 +408,7 @@ await check('signed out: a new picture size alone converts in the browser too (a
     await pick(page, 'subs', 'off');
     await openOutput(page);
     await outField(page, 'out-size').selectOption('480');
-    await closeOutput(page);
-    await page.waitForFunction(() => document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 5000 });
+      await page.waitForFunction(() => document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 5000 });
     if ((await mainButton(page)).trim() !== 'Start · Free') throw new Error('button: ' + (await mainButton(page)));
     await page.getByTestId('start').click();
     await waitResult(page, 'result', 180000);
@@ -406,7 +428,6 @@ await check('signed out: a new picture size alone converts in the browser too (a
   await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).waitFor({ timeout: 5000 });
   await openOutput(page);
   await outField(page, 'out-format').selectOption('flac');
-  await closeOutput(page);
   await page.waitForFunction(() => document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 5000 });
   if ((await mainButton(page)).trim() !== 'Start · Free') throw new Error('button: ' + (await mainButton(page)));
   await page.getByTestId('start').click();
@@ -435,7 +456,6 @@ await check('signed out: a video type this browser can\'t make for a video (an A
   await outField(page, 'out-format').selectOption('mkv');
   const note = (await outField(page, 'out-size-note').innerText()).replace(/\s+/g, ' ');
   if (!/^Made on our side, so the whole video is uploaded\./.test(note)) throw new Error('size note: ' + note);
-  await closeOutput(page);
   await page.waitForFunction(() => /Sign in to start/.test(document.querySelector('.studio .bb .btn-lg')?.textContent || ''), null, { timeout: 5000 });
   if (await page.getByTestId('start').isDisabled()) throw new Error('the button is disabled');
   if ((await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).count())) throw new Error('it says nothing is chosen');
@@ -461,25 +481,21 @@ await check('signed out: a video made on our side shows its price in Details wor
   await pick(page, 'subs', 'off');
   await openOutput(page);
   await outField(page, 'out-format').selectOption('webm'); // (the MPEG-4 picture does not go into WebM: made again, 4K at 30 frames a second is 4 units)
-  await closeOutput(page);
   await page.waitForFunction(() => /Sign in to start/.test(document.querySelector('.studio .bb .btn-lg')?.textContent || ''), null, { timeout: 5000 });
   let d = await detailsOf(page);
   if (d.lines.length !== 1 || !COUNTS(4).test(d.lines[0]) || !/ \$0\.004$/.test(d.lines[0]) || d.total !== '$0.004') throw new Error('webm: ' + JSON.stringify(d));
   await openOutput(page);
   await outField(page, 'out-size').selectOption('720'); // 4K made 720p: half the original's pixels a second count, 2 units
-  await closeOutput(page);
   d = await detailsOf(page);
   if (d.lines.length !== 1 || !COUNTS(2).test(d.lines[0]) || !/ \$0\.002$/.test(d.lines[0]) || d.total !== '$0.002') throw new Error('webm 720p: ' + JSON.stringify(d));
   await openOutput(page);
   await outField(page, 'out-format').selectOption('mkv');
   await outField(page, 'out-size').selectOption('same');
-  await closeOutput(page);
   d = await detailsOf(page);
   if (d.lines.join('|') !== 'Video on our side, the picture copied as it is Free' || d.total !== 'Free') throw new Error('mkv: ' + JSON.stringify(d));
   if ((await mainButton(page)).trim() !== 'Sign in to start') throw new Error('button: ' + (await mainButton(page)));
   await openOutput(page);
   await outField(page, 'out-format').selectOption('mp4'); // (MPEG-4 goes into an MP4 as it is: the same free copy)
-  await closeOutput(page);
   d = await detailsOf(page);
   if (d.lines.join('|') !== 'Video on our side, the picture copied as it is Free') throw new Error('mp4: ' + JSON.stringify(d));
   onlyPublic('while pricing a conversion on our side');
@@ -510,7 +526,6 @@ await check('signed out: a sound asked for as a video type this browser can\'t m
     const ours = groups.find((g) => g.label === 'Video (plain black picture), made on our side');
     if (!ours || ours.values.join() !== 'mp4,mov,mkv,webm' || groups.some((g) => g.label === 'Video (plain black picture)')) throw new Error('groups: ' + JSON.stringify(groups));
     await outField(p, 'out-format').selectOption('mkv');
-    await closeOutput(p);
     await p.waitForFunction(() => /Sign in to start/.test(document.querySelector('.studio .bb .btn-lg')?.textContent || ''), null, { timeout: 5000 });
     const d = await detailsOf(p);
     if (d.lines.join('|') !== 'Video with a plain black picture, on our side Free' || d.total !== 'Free') throw new Error('details: ' + JSON.stringify(d));
@@ -539,7 +554,7 @@ await check('signed out: a plan with a paid part says "Sign in to start" with th
   if (/Includes a small amount for each run|Worked out from the price list/.test(await page.getByTestId('details').innerText())) throw new Error('an old note in Details');
   await page.getByTestId('bar-det').click();
   onlyPublic('while a paid plan was chosen');
-  before = { title: await selectionTitle(page), lines, out: (await page.getByTestId('output-button').innerText()).replace(/\s+/g, ' ').trim() };
+  before = { title: await selectionTitle(page), lines, out: await outputOf(page) };
   await page.getByTestId('start').click();
   await page.waitForURL(/\/login$/, { timeout: 15000 });
   const copy = await kept(page);
@@ -560,7 +575,7 @@ await check('signing in (the link opened in another tab) brings the file and the
   if (new URL(p2.url()).pathname !== '/app') throw new Error(p2.url());
   const name = await p2.getByTestId('file-name').innerText();
   const title = await selectionTitle(p2);
-  const out = (await p2.getByTestId('output-button').innerText()).replace(/\s+/g, ' ').trim();
+  const out = await outputOf(p2);
   const lines = await detailLines(p2);
   const note = await p2.getByTestId('draft-restored').innerText();
   if (name !== 'noisy.wav') throw new Error('file: ' + name);
@@ -686,7 +701,7 @@ await check('the pages that belong to an account still ask for sign-in (billing,
   }
 });
 
-await check('signed in nothing changes: the Cleanup page shows the jobs list and the balance (no line about the free tools without an account), the same paid plan shows "Start · price" worked out here (no estimate asked of our side)', async () => {
+await check('signed in nothing changes: the Cleanup page shows the jobs list beside the editor and the balance in its start row (no line about the free tools without an account), the same paid plan shows "Start · price" worked out here (no estimate asked of our side)', async () => {
   const p = await context.newPage();
   const seen = [];
   p.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) seen.push(`${r.method()} ${u.pathname}`); });
@@ -694,7 +709,7 @@ await check('signed in nothing changes: the Cleanup page shows the jobs list and
     await signIn(p, EMAIL);
     await p.goto(`${BASE}/app`);
     await p.getByTestId('jobs-note').waitFor({ timeout: 15000 });
-    await p.getByTestId('available').waitFor();
+    await p.getByTestId('bar-balance').waitFor();
     if (await p.getByTestId('free-no-account').count()) throw new Error('the signed-out line is shown');
     if (!seen.includes('GET /api/jobs')) throw new Error('no jobs list: ' + seen.join(', '));
     await dropFile(p, NOISY);

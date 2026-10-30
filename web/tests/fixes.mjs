@@ -68,7 +68,7 @@ if (want('jobs')) {
       return r.continue();
     });
     await page.goto(`${BASE}/app`);
-    await page.getByTestId('available').waitFor();
+    await page.getByTestId('bar-balance').waitFor();
     // the list on /app holds a short row with no Delete button: the job's own page has it
     await page.getByTestId('job-row').waitFor();
     if (await page.getByRole('button', { name: 'Delete now' }).count()) throw new Error('a Delete button on the list');
@@ -155,9 +155,7 @@ if (want('jobs')) {
       await page.getByTestId('download-again').click();
       await waitFor(2);
       if (sorted().join() !== 'noisy-cleaned.flac,noisy-transcript.txt') throw new Error('downloaded: ' + sorted());
-      await page.getByTestId('output-button').click();
       await page.getByTestId('cap-srt').check();
-      await page.getByTestId('output-button').click();
       downloads.length = 0;
       await page.getByTestId('save-changes').click();
       await waitFor(3);

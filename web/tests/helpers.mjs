@@ -146,6 +146,7 @@ export async function dropFile(page, path, { recommended = false } = {}) {
 /** Drag across the waveform from second `s` to second `e` (the editor takes whole seconds). */
 export async function dragRange(page, s, e) {
   const wf = page.getByTestId('waveform');
+  await wf.scrollIntoViewIfNeeded(); // (the start row is in the page now: a click on Start or Details may have scrolled the picture out of view)
   const box = await wf.boundingBox();
   const T = Number(await page.getByTestId('wave').getAttribute('data-seconds'));
   const x = (t) => box.x + (t / T) * box.width;
@@ -158,6 +159,8 @@ export async function dragRange(page, s, e) {
 }
 /** The selection's title ("Whole file · 0:11", "0:03–0:08 · 5 s"). */
 export const selectionTitle = (page) => page.locator('.studio .js-title').innerText();
+/** The balance in the start row ("Balance $5.00"; the link to Billing), on the empty editor and with a file or a job. The amount alone: `barBalance(page)`. */
+export const barBalance = (page) => page.locator('[data-testid=bar-balance] b');
 /** The price on the main button ("Start · $0.003", "Save changes · Free"). */
 export const mainButton = (page) => page.locator('.studio .bb .btn-lg').innerText();
 

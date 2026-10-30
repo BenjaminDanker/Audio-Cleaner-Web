@@ -25,8 +25,7 @@ export default function TopPane({ session, job, S, T, info, fileUrl, audioUrl, m
         <span className="spinner" aria-hidden="true" /> Listening to your file for moments worth a look… {Math.round(session.sg.progress * 100)}% <button type="button" className="link" data-act="sg-cancel" data-testid="sg-cancel">Cancel</button>
       </span>
     )
-    : session.auto && session.sg.phase === 'unavailable' && !job ? <span className="autol muted" data-testid="sg-unavailable">{session.sg.why}</span>
-      : session.sg.phase === 'canceled' ? <span className="autol muted" data-testid="sg-canceled">Stopped looking. You can still choose parts yourself.</span>
+    : session.sg.phase === 'canceled' ? <span className="autol muted" data-testid="sg-canceled">Stopped looking. You can still choose parts yourself.</span>
         : session.sg.phase === 'error' ? <span className="autol muted" data-testid="sg-error">Couldn’t look for suggestions in this file. You can still choose parts yourself.</span> : null;
 
   return (

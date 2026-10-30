@@ -1,4 +1,3 @@
-import { Link } from 'react-router';
 import { LANGUAGES } from '../../jobs.js';
 import { dbAt, posOf, strengthName } from '../../media/blend.js';
 import { human } from '../../format.js';
@@ -50,10 +49,10 @@ const clockMin = (t) => fmt(t);
  */
 export default function Inspector({ ctx }) {
   const {
-    S, session, tips, sheet, info, verdict, sVerdict, rebuildPaused, locked, lockedWhy, eta, loadLeft, h,
+    S, session, tips, sheet, info, verdict, sVerdict, rebuildPaused, locked, lockedWhy, eta, loadLeft, h, plan, out, disabled, tooBigNote, mkvNote,
   } = ctx;
+  const burnTip = plan.embedOnServer ? tips['burn.server'] : `${tips.burn}${mkvNote ? `, so you’ll get an MKV instead of ${mkvNote}` : ''}`;
   const R = ranges(S);
-  const one = R.length === 1 ? R[0] : null;
   const sg = S.sel && S.sel.length === 1 && session.auto && S.sugg.find((g) => g.st === 'new' && g.s === R[0].s && g.e === R[0].e);
   const auto = (tr) => session.auto && overl(S, tr).every((x) => x.auto);
   const tag = (tr) => (auto(tr) ? <span className="atag">Automatic</span> : null);
@@ -127,11 +126,6 @@ export default function Inspector({ ctx }) {
   const lv = uni(S, 'level', 'lvl');
   const lufs = uni(S, 'level', 'lufs');
   const echoV = uni(S, 'echo', 'on');
-  const hasAccurate = overl(S, 'subs').some((x) => x.q === 3);
-  const mixedBrowserSubs = overl(S, 'subs').some((x) => x.q === 1);
-  const paidSoundSel = overl(S, 'voice').some((x) => x.mode === 2 || (x.mode === 1 && x.kind === 'paid')) || overl(S, 'echo').some((x) => x.on) || overl(S, 'level').some((x) => x.lvl);
-  const freeSoundSel = overl(S, 'voice').some((x) => x.mode === 1 && x.kind === 'free');
-  const paidSubsSel = overl(S, 'subs').some((x) => x.q >= 2);
 
   return (
     <>
@@ -153,22 +147,6 @@ export default function Inspector({ ctx }) {
             <button type="button" className="btn btn-sm btn-primary" data-act="sg-apply" data-id={sg.id} data-testid="sg-apply">Apply</button>
             <button type="button" className="x" data-act="sg-dismiss" data-id={sg.id} aria-label="Dismiss" data-testid="sg-dismiss">&times;</button>
           </div>
-        )}
-        {one && (
-          <section className="ctl rng" aria-label="The part" data-testid="range-box">
-            {[['s', 'Start', one.s], ['e', 'End', one.e]].map(([w, label, v]) => (
-              <div className="rr" key={w}>
-                <span className="srl">{label}</span>
-                <button type="button" className="btn btn-secondary btn-sm" data-act="nudge" data-w={w} data-d="-1" aria-label={`${label} one second earlier`} data-testid={`nudge-${w}-minus`}>−</button>
-                <b className="rv" data-testid={`time-${w}`}>{clockMin(v)}</b>
-                <button type="button" className="btn btn-secondary btn-sm" data-act="nudge" data-w={w} data-d="1" aria-label={`${label} one second later`} data-testid={`nudge-${w}-plus`}>+</button>
-                <button type="button" className="btn btn-ghost btn-sm" data-act="useph" data-w={w} data-testid={`use-playhead-${w}`}>Use playhead</button>
-              </div>
-            ))}
-            <div className="rr">
-              <button type="button" className="btn btn-secondary btn-sm" data-act="playpart" data-testid="play-part">Play part</button>
-            </div>
-          </section>
         )}
         <section className="ctl l-noise voice">
           <div className="cl"><i className="mk" /><b>Voice</b>{tag('voice')}<Mixed show={vm === null} /></div>
@@ -231,10 +209,22 @@ export default function Inspector({ ctx }) {
               )}
             </div>
           </div>
-          {hasAccurate && <span className="hint" data-testid="accurate-note">Extra accurate sends your audio to a speech partner we work with, only for this option. <Link to="/privacy">Privacy details</Link></span>}
-          {freeSoundSel && paidSubsSel && <span className="hint" data-testid="browser-subs-note">The noise removal happens on your device. For the subtitles, the original sound is uploaded.</span>}
-          {paidSoundSel && mixedBrowserSubs && <span className="hint" data-testid="denoise-local-subs-note">The cleanup is done on our side; the subtitles are made here on your device, from your original recording.</span>}
-          {paidSoundSel && paidSubsSel && <span className="hint" data-testid="both-note">We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.</span>}
+          <div className="sr files">
+            <span className="srl">Files</span>
+            <div className={`pills${plan.wantsText ? '' : ' dis'}`}>
+              {['srt', 'vtt', 'txt'].map((k) => (
+                <label className="pill" key={k} {...tipAttr(tips[`sf.${k}`])}>
+                  <input type="checkbox" data-act="o-sf" value={k} checked={out.sfiles.includes(k)} disabled={!plan.wantsText || disabled} data-testid={`cap-${k}`} />{k.toUpperCase()}
+                </label>
+              ))}
+              {plan.videoResult && (
+                <label className="pill" {...tipAttr(burnTip)}>
+                  <input type="checkbox" data-act="o-burn" checked={out.burn && plan.canEmbed} disabled={!plan.wantsText || !plan.canEmbed || disabled} aria-label="Put the subtitles into the video" data-testid="embed" />Into the video
+                </label>
+              )}
+            </div>
+          </div>
+          {tooBigNote && <span className="hint" data-testid="embed-too-big">{tooBigNote}</span>}
         </section>
       </div>
     </>

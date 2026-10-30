@@ -1,7 +1,7 @@
 /* The editor (components/studio): Voice, Echo, Leveling and Subtitles tracks over the recording's waveform, an inspector for the selection,
    and the bar at the bottom. The approved prototype's styles, scoped under .studio so they can't touch the other pages. Colours and sizes
    come from the site's own tokens (global.css). Positions are set through the CSSOM (React's style prop), never inline style attributes. */
-.studio { --c-noise: var(--brand); --c-rebuild: var(--accent); --c-echo: #d9480f; --c-level: #b87500; --c-subs: #c2255c; --c-sugg: #7c4dff; --pad: 16px; --wave: color-mix(in srgb, var(--muted) 55%, transparent); --bar-h: 76px; --sel-h: 0px; --rulerh: 30px; }
+.studio { --c-noise: var(--brand); --c-rebuild: var(--accent); --c-echo: #d9480f; --c-level: #b87500; --c-subs: #c2255c; --c-sugg: #7c4dff; --pad: 16px; --wave: color-mix(in srgb, var(--muted) 55%, transparent); --sel-h: 0px; --rulerh: 30px; }
 @media (prefers-color-scheme: dark) {
   .studio { --c-echo: #ff922b; --c-level: #f0b84a; --c-subs: #f06595; --c-sugg: #b79bff; }
 }
@@ -19,13 +19,21 @@
 .studio .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .studio .lg { display: inline; }
 .studio .sm { display: none; }
-.studio .ws { padding-block: 16px calc(var(--bar-h) + var(--sel-h) + 20px); display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-content: start; }
+.studio .ws { padding-block: 16px calc(var(--sel-h) + 24px); display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-content: start; }
+.studio .ws.wide { max-width: 1440px; }
+/* the page: the editor and the start row (.work), and the jobs beside it (.jobs-col) when the page has them */
+.studio .lay { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }
+.studio .lay.with-aside { grid-template-columns: minmax(0, 1fr) 300px; }
+.studio .work { display: grid; gap: 14px; min-width: 0; align-content: start; }
 .studio .ws[data-stage="processing"] .lk, .studio .ws[data-stage="processing"] .lk-b { pointer-events: none; opacity: 0.7; }
 .studio .empty { max-width: 700px; margin-inline: auto; width: 100%; display: grid; gap: 18px; padding-top: 14px; }
 .studio .empty h1 { margin: 0; }
 .studio .empty .dropzone { min-height: 240px; position: relative; }
 .studio .dz-ico { width: 52px; height: 52px; color: var(--brand); }
-.studio .ed { display: grid; grid-template-columns: minmax(0, 1fr) 356px; gap: 14px; align-items: start; }
+.studio .ed { display: grid; grid-template-columns: minmax(0, 1fr) 356px; gap: 14px; align-items: stretch; }
+/* the left column: the editor, then the output; the output grows so both columns end at the same line */
+.studio .edl { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.studio .outp { flex: 1; padding: 14px 16px; display: grid; gap: 10px; align-content: start; }
 .studio .pane { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
 .studio .main { padding: 14px 16px 16px; }
 .studio .top { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 12px 16px; margin-bottom: 16px; }
@@ -172,14 +180,12 @@
 .studio .trs .select { flex: 1 1 150px; width: auto; }
 .studio .trc { display: inline-flex; align-items: center; gap: 2px; padding: 2px 2px 2px 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--c) 45%, var(--border)); background: color-mix(in srgb, var(--c) 10%, var(--surface)); font-size: 0.84rem; font-weight: 650; }
 .studio .trc .x { font-size: 1.1rem; padding: 0 6px; }
-.studio .bb { position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; background: color-mix(in srgb, var(--surface) 95%, transparent); backdrop-filter: blur(10px); border-top: 1px solid var(--border); box-shadow: 0 -6px 24px rgb(16 24 40 / 9%); padding-bottom: env(safe-area-inset-bottom); }
-.studio .bb-in { position: relative; display: flex; align-items: center; gap: 14px; padding-block: 11px; }
+.studio .bb-in { position: relative; display: flex; align-items: center; gap: 14px; padding: 12px 16px; flex-wrap: wrap; }
+.studio .bal { display: inline-flex; align-items: baseline; gap: 6px; padding: 7px 13px; border-radius: 999px; border: 1px solid var(--border); color: var(--text); text-decoration: none; white-space: nowrap; font-size: 0.92rem; }
+.studio .bal:hover { border-color: var(--brand); }
+.studio .bal.short { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+.studio .bal.short .muted { color: inherit; }
 .studio .bb-sp { flex: 1; }
-.studio .outb { gap: 8px; min-width: 0; max-width: 360px; justify-content: flex-start; }
-.studio .outb .ico { width: 16px; height: 16px; }
-.studio .outt { display: flex; min-width: 0; white-space: pre; }
-.studio .outt b { flex: none; }
-.studio .onm { overflow: hidden; text-overflow: ellipsis; min-width: 0; font-weight: 400; }
 .studio .bl { font-size: 0.92rem; }
 .studio .bl .sm i { font-style: normal; display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid var(--link); font-weight: 800; }
 .studio .bb .btn-lg { flex: none; min-width: 200px; }
@@ -210,7 +216,7 @@
 .studio .fl li small { font-size: 0.78rem; }
 .studio .quote { margin: 0 0 10px; font-size: 0.86rem; color: var(--muted); font-style: italic; }
 .studio .delr { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-.studio .toast { position: fixed; left: 50%; bottom: calc(var(--bar-h) + var(--sel-h) + 16px); transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 10px; font-size: 0.9rem; z-index: 90; box-shadow: var(--shadow-lg); max-width: calc(100vw - 32px); }
+.studio .toast { position: fixed; left: 50%; bottom: calc(var(--sel-h) + 16px); transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 10px; font-size: 0.9rem; z-index: 90; box-shadow: var(--shadow-lg); max-width: calc(100vw - 32px); }
 @media (max-width: 760px) {
   .studio .ws { padding-inline: 12px; gap: 12px; }
   .studio .ed { grid-template-columns: minmax(0, 1fr); }
@@ -233,7 +239,7 @@
   .studio .lab { font-size: 0.72rem; }
   .studio .wf { height: 64px; }
   .studio .hnd { height: 64px; }
-  .studio .insp { position: fixed; left: 8px; right: 8px; bottom: calc(var(--bar-h) + 8px); z-index: 55; max-height: min(60vh, 520px); overflow: auto; box-shadow: var(--shadow-lg); border-radius: 16px; }
+  .studio .insp { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 55; max-height: min(60vh, 520px); overflow: auto; box-shadow: var(--shadow-lg); border-radius: 16px; }
   .studio .insp.min { overflow: hidden; }
   .studio .insp.min .ib-body { display: none; }
   .studio .ih { padding: 18px 14px 10px; touch-action: none; flex-wrap: nowrap; }
@@ -246,16 +252,14 @@
   .studio .ih-sum + .chv { margin-left: 4px; }
   .studio .insp.min .chv svg { transform: rotate(180deg); }
   .studio .ib-body { padding: 0 14px 14px; gap: 14px; }
-  .studio .bb-in { gap: 10px; padding-block: 9px; }
-  .studio .bb-sp { display: none; }
-  .studio .outb { flex: 1 1 0; max-width: none; padding-inline: 10px; }
+  .studio .bb-in { gap: 10px; padding: 10px 12px; }
+  .studio .bb .btn-lg { flex: 1 1 auto; }
   .studio .bb .btn-lg { min-width: 0; padding-inline: 14px; font-size: 0.98rem; }
   .studio .bl .lg { display: none; }
   .studio .bl .sm { display: inline; }
   .studio .pg { flex-direction: column; align-items: stretch; gap: 4px; }
   .studio .pg progress.bar { flex: none; width: 100%; }
   .studio .pg .muted { font-size: 0.8rem; }
-  .studio .bb[data-stage="processing"] .outb { display: none; }
   .studio .pop { left: 8px !important; right: 8px !important; width: auto; }
 }
 .studio .tb-more { display: none; }
@@ -348,3 +352,21 @@
 .studio .pg .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* the bar at the bottom covers the end of the page: the site's footer gets room under it */
 body:has(.studio) .site-footer { padding-bottom: 100px; }
+
+/* the jobs beside the editor (Cleanup page); under it when the window is narrow */
+.studio .jobs-col { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.studio .jobs-col .jh { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.studio .jobs-col h2 { font-size: 1.05rem; margin: 0; }
+.studio .jobs-col .job-row { padding: 12px 14px; }
+.studio .jobs-col .job-head { flex-wrap: wrap; gap: 8px; }
+@media (max-width: 1180px) { .studio .lay.with-aside { grid-template-columns: minmax(0, 1fr); } }
+/* before a file is chosen: the same layout, the place to drop a file where the picture and the timeline go */
+.studio .ghost { opacity: 0.55; }
+.studio .ghost-rows { display: grid; gap: 8px; margin-top: 14px; }
+.studio .ghost-row { display: grid; grid-template-columns: 76px minmax(0, 1fr); align-items: center; gap: 10px; font-size: 0.82rem; color: var(--muted); font-weight: 600; }
+.studio .ghost-row i { display: block; height: 24px; border-radius: 6px; border: 1px dashed var(--border); background: var(--surface-2); }
+.studio .main .dropzone { min-height: 200px; margin-top: 12px; }
+@media (max-width: 760px) { .studio .insp.still { position: static; max-height: none; box-shadow: var(--shadow); border-radius: var(--radius); } }
+.studio .ctl .pills .pill { padding: 3px 8px; }
+.studio .sr.files { align-items: start; }
+.studio .sr.files .srl { padding-top: 5px; }

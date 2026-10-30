@@ -1,14 +1,11 @@
 import { useRef } from 'react';
+import { Link } from 'react-router';
 import { bytes, human } from '../../format.js';
 import { fmt, lenTxt, money } from '../../editor/tracks.js';
-import { FORMAT } from '../../media/convert.js';
 import { LANGUAGES } from '../../jobs.js';
 import OutputFields from '../OutputPicker.jsx';
-import { IcChevron, IcFile } from './icons.jsx';
-import { tipAttr } from './ui.jsx';
 
 const LANG = Object.fromEntries(LANGUAGES.map(([c, n]) => [c || 'auto', n]));
-const typeLabel = (id) => FORMAT[id]?.label.replace(/ \(.*\)$/, '') || String(id).toUpperCase();
 
 /** A step's start-up per run, as seconds of audio: "2.3 s", "1:38". */
 const startup = (f) => (f < 60 ? `${Math.round(f * 10) / 10} s` : fmt(f));
@@ -84,56 +81,31 @@ function Files({ ctx }) {
   );
 }
 
-/** The output: file type and name (OutputFields as it is), the video size, the subtitle files and "into the video". */
-function Output({ ctx }) {
-  const { choice, info, plan, out, cost: c, tips, disabled, willDownload, tooBigNote, mkvNote } = ctx;
-  const sa = plan.wantsText;
-  const burnTip = plan.embedOnServer ? tips['burn.server'] : `${tips.burn}${mkvNote ? `, so you’ll get an MKV instead of ${mkvNote}` : ''}`;
+/** The output, under the editor: the file type and name, and the video size (OutputFields as it is), and what downloads by itself. */
+export function OutputPane({ ctx }) {
+  const { choice, info, disabled, willDownload } = ctx;
   return (
-    <div className="pop pl-out" role="dialog" aria-label="Output" data-testid="output-pop">
-      <div className="of"><OutputFields choice={choice} info={info} idPrefix="out" disabled={disabled} /></div>
-      <div className="of">
-        <span className="srl">Subtitle files</span>
-        <div className={`pills${sa ? '' : ' dis'}`}>
-          {['srt', 'vtt', 'txt'].map((k) => (
-            <label className="pill" key={k} {...tipAttr(tips[`sf.${k}`])}>
-              <input type="checkbox" data-act="o-sf" value={k} checked={out.sfiles.includes(k)} disabled={!sa || disabled} data-testid={`cap-${k}`} />{k.toUpperCase()}
-            </label>
-          ))}
-          {plan.videoResult && (
-            <label className="pill" {...tipAttr(burnTip)}>
-              <input type="checkbox" data-act="o-burn" checked={out.burn && plan.canEmbed} disabled={!sa || !plan.canEmbed || disabled} aria-label="Put the subtitles into the video" data-testid="embed" />Put into the video
-            </label>
-          )}
-        </div>
-        {sa && c.trLangs.length > 0 && <span className="note mt0">One set of subtitle files per language.</span>}
-        {tooBigNote && <span className="note mt0" data-testid="embed-too-big">{tooBigNote}</span>}
-      </div>
+    <section className="pane outp lk" aria-label="Your file" data-testid="output-pane">
+      <OutputFields choice={choice} info={info} idPrefix="out" disabled={disabled} />
       {willDownload && <p className="note mt0" data-testid="will-download">When it’s done, these download by themselves: <b>{willDownload}</b>.</p>}
-    </div>
+    </section>
   );
 }
 
-/** The bar at the bottom: the output, what the price is made of or the files, and the one button. */
+/** The start row, under the editor and the settings: what the price is made of (or the files, or the progress), the balance, and the one button. */
 export default function Bar({ ctx }) {
-  const { stage, pop, choice, bar, h, primaryDisabled } = ctx;
+  const { stage, pop, bar, h, primaryDisabled, wallet } = ctx;
   const picker = useRef(null);
   const link = (v, label, icon) => (
     <button type="button" className="link bl" data-act="pop" data-v={v} aria-label={label} data-testid={`bar-${v}`}><span className="lg">{label}</span><span className="sm"><i>{icon}</i></span></button>
   );
-  const stem = choice.name.replace(/\.[^.]+$/, '');
   const { mid, button, building } = bar;
   const needVideo = ctx.needVideo;
   return (
-    <div className="bb" data-stage={stage} data-testid="bar" data-building={building ? 'yes' : 'no'}>
-      <div className="container bb-in">
-        {pop === 'out' && <Output ctx={ctx} />}
+    <div className="pane bb" data-stage={stage} data-testid="bar" data-building={building ? 'yes' : 'no'}>
+      <div className="bb-in">
         {pop === 'files' && <Files ctx={ctx} />}
         {pop === 'det' && <Details ctx={ctx} />}
-        <button type="button" className="btn btn-secondary outb lk-b" data-act="pop" data-v="out" aria-expanded={pop === 'out'} data-testid="output-button">
-          <IcFile /><span className="outt"><b>{typeLabel(choice.format)}</b><span className="onm"> · {stem}</span></span><IcChevron />
-        </button>
-        <span className="bb-sp" />
         {mid.kind === 'details' && link('det', 'Details', 'i')}
         {mid.kind === 'files' && link('files', 'Your files', '☰')}
         {mid.kind === 'progress' && (
@@ -144,6 +116,12 @@ export default function Bar({ ctx }) {
             </div>
             {mid.cancel && <button type="button" className="link bl" data-act="cancel" data-testid="cancel-job">{mid.cancel}</button>}
           </>
+        )}
+        <span className="bb-sp" />
+        {wallet && (
+          <Link to="/app/billing" className={`bal${wallet.short ? ' short' : ''}`} data-testid="bar-balance" aria-label={`Balance ${wallet.text}${wallet.short ? ', not enough for this. Add credit' : ''}`}>
+            <span className="muted">Balance</span> <b>{wallet.text}</b>
+          </Link>
         )}
         <button
           type="button" className="btn btn-primary btn-lg" data-act="primary" disabled={primaryDisabled} data-testid={button.testid} data-state={button.state}

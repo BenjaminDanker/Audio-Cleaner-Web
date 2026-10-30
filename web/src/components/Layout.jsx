@@ -51,6 +51,9 @@ function AccountMenu() {
   );
 }
 
+/** The editor's pages (Cleanup and a job's page) are wider than the others: the header and the footer line up with them. */
+const wideAt = (path) => /^\/app(\/job\/[^/]+)?\/?$/.test(path);
+
 function Header() {
   const { ready, known, signedIn, balance } = useAuth();
   const [open, setOpen] = useState(false);
@@ -58,7 +61,7 @@ function Header() {
   useEffect(() => setOpen(false), [loc.pathname, loc.hash]);
   return (
     <header className="site-header">
-      <div className="container header-inner">
+      <div className={`container header-inner${wideAt(loc.pathname) ? ' wide' : ''}`}>
         <Link to="/" className="brand" aria-label={`${SITE.name} home`}>
           <Logo />
           <span>{SITE.name}</span>
@@ -66,6 +69,7 @@ function Header() {
         <nav className="nav" id="main-nav" data-open={open} aria-label="Main">
           <NavLink to="/app" end>Cleanup</NavLink>
           <NavLink to="/app/live">Live</NavLink>
+          {ready && signedIn && <NavLink to="/app/billing">Billing</NavLink>}
           <Link to={{ pathname: '/', hash: '#pricing' }}>Pricing</Link>
         </nav>
         <div className="header-right">
@@ -123,11 +127,12 @@ function OfflineBanner() {
 
 function Footer() {
   const { contact } = useAuth();
+  const loc = useLocation();
   const email = SITE.supportEmail.trim();
   const legalName = SITE.legalName.trim();
   return (
     <footer className="site-footer">
-      <div className="container footer-grid">
+      <div className={`container footer-grid${wideAt(loc.pathname) ? ' wide' : ''}`}>
         <div>
           <Link to="/" className="brand"><Logo size={26} /><span>{SITE.name}</span></Link>
           <p className="muted small mt0">A small tool for cleaning up voices. Your files stay yours.</p>

@@ -4,7 +4,7 @@
 // Usage: node tests/e2e.mjs [section ...]   sections: basic auth studio transcribe billing keys account
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, check, dropFile, launch, loginLink, mainButton, pick, setLeveling, signIn, summary, waitCardDone, waitResult } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, barBalance, check, dropFile, launch, loginLink, mainButton, pick, setLeveling, signIn, summary, waitCardDone, waitResult } from './helpers.mjs';
 
 const only = process.argv.slice(2);
 const want = (s) => only.length === 0 || only.includes(s);
@@ -22,9 +22,6 @@ const startPrice = async () => {
 };
 /** The editor's price words ("Free", "<$0.001", "$0.024", "$1.50"). */
 const words = (m) => (m <= 0 ? 'Free' : m < 1000 ? '<$0.001' : `$${m >= 100000 || m % 10000 === 0 ? (m / 1e6).toFixed(2) : (m / 1e6).toFixed(3)}`);
-/** Output menu: open it (a no-op when it is open) and close it again. */
-const openOutput = async () => { if (!(await page.getByTestId('output-pop').count())) await page.getByTestId('output-button').click(); await page.getByTestId('output-pop').waitFor(); };
-const closeOutput = async () => { if (await page.getByTestId('output-pop').count()) await page.getByTestId('output-button').click(); };
 /** Your files: the names of the files listed (the first word of each row), then closed again. */
 async function madeFiles() {
   await page.getByTestId('bar-files').click();
@@ -129,7 +126,7 @@ if (want('auth')) {
       await p1.goto(link);
       await p1.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 15000 });
       if (p1.url().includes('token')) throw new Error('token still in URL');
-      await p1.waitForSelector('[data-testid=available]');
+      await p1.waitForSelector('[data-testid=available]'); // (the visitor was sent to sign in from Billing and lands back there: its own balance card)
       // a reused link is refused
       await p1.context().clearCookies();
       await p1.goto(link);
@@ -178,8 +175,8 @@ if (want('auth')) {
       await p1.waitForTimeout(3000); // past the first answer and the retry, which is refused too
       if (asked.length !== 2) throw new Error(`after 3 s the account check had been asked ${asked.length} times (expected 2: the page, then the retry after the wait)`);
       if (new URL(p1.url()).pathname !== '/app' || paths.includes('/login')) throw new Error(`the page went to ${paths.join(' -> ')} while the server was busy`);
-      if ((await p1.getByTestId('free-no-account').count()) || (await p1.getByTestId('available').count())) throw new Error('the page claims the visitor is signed out, or shows the balance, while the check has not been answered');
-      await p1.getByTestId('available').waitFor({ timeout: 10000 }); // the third ask is answered: the page is there
+      if ((await p1.getByTestId('free-no-account').count()) || (await p1.getByTestId('bar-balance').count())) throw new Error('the page claims the visitor is signed out, or shows the balance, while the check has not been answered');
+      await p1.getByTestId('bar-balance').waitFor({ timeout: 10000 }); // the third ask is answered: the page is there
       if (paths.includes('/login') || new URL(p1.url()).pathname !== '/app') throw new Error(`the page ended at ${paths.join(' -> ')}`);
       const gaps = [asked[1] - asked[0], asked[2] - asked[1]].map((ms) => Math.round(ms / 100) / 10);
       if (gaps.some((g) => g < 1.9 || g > 5)) throw new Error(`the check was asked again after ${gaps} s (the server said 2)`);
@@ -194,8 +191,8 @@ if (want('studio')) {
   await signIn(page, EMAIL);
   await check('cleanup page: balance and no Terms prompt for an account that agreed (signing in is agreeing)', async () => {
     await gotoApp('/app');
-    await page.waitForFunction(() => document.querySelector('[data-testid=available]')?.textContent === '$5.00', null, { timeout: 15000 });
-    const bal = await page.getByTestId('available').innerText();
+    await page.waitForFunction(() => document.querySelector('[data-testid=bar-balance] b')?.textContent === '$5.00', null, { timeout: 15000 });
+    const bal = await barBalance(page).innerText();
     if (bal !== '$5.00') throw new Error('balance ' + bal);
     if (await page.getByRole('dialog').count()) throw new Error('a Terms prompt is still shown');
     return `balance ${bal}`;
@@ -222,7 +219,7 @@ if (want('studio')) {
       if (!agreed) throw new Error('OK did not send the current Terms version');
       await page.getByTestId('terms-notice').waitFor({ state: 'detached' });
       await page.reload();
-      await page.getByTestId('available').waitFor();
+      await page.getByTestId('bar-balance').waitFor();
       if (await page.getByTestId('terms-notice').count()) throw new Error('notice back after a reload');
       return `${t.replace(/\s+/g, ' ')} (agreed to ${agreed})`;
     } finally {
@@ -265,12 +262,12 @@ if (want('studio')) {
     if ((await page.getByTestId('download-again').count()) !== 1) throw new Error('want exactly one Download again button');
     const [again] = await Promise.all([page.waitForEvent('download'), page.getByTestId('download-again').click()]);
     if (again.suggestedFilename() !== dl.suggestedFilename()) throw new Error('again: ' + again.suggestedFilename());
-    // the balance is on the Cleanup page, not on the job's page: the header's Cleanup link goes there, and the finished job is one of its rows
+    // the header's Cleanup link goes to the Cleanup page: the balance in its start row has dropped, and the finished job is one of the rows beside the editor
     await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Cleanup', exact: true }).click();
     await page.waitForURL(/\/app$/);
-    await page.waitForFunction(() => document.querySelector('[data-testid=available]')?.textContent !== '$5.00', null, { timeout: 15000 });
+    await page.waitForFunction(() => { const t = document.querySelector('[data-testid=bar-balance] b')?.textContent; return t && t !== '$5.00'; }, null, { timeout: 15000 });
     await page.locator('[data-testid=job-row][data-status=done]', { hasText: 'noisy.' }).first().waitFor({ timeout: 15000 }).catch(() => { throw new Error('the finished job is not a row on the Cleanup page'); });
-    return `${est}; downloaded ${dl.suggestedFilename()} ${statSync(p).size} bytes; balance ${await page.getByTestId('available').innerText()}`;
+    return `${est}; downloaded ${dl.suggestedFilename()} ${statSync(p).size} bytes; balance ${await barBalance(page).innerText()}`;
   });
 }
 
@@ -280,10 +277,9 @@ if (want('transcribe')) {
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'standard');
-    await openOutput(); // (the Output menu starts with the SRT only; the old form ticked all three)
+    // (the subtitle files start with the SRT only, in the Subtitles card; the old form ticked all three)
     await page.getByTestId('cap-vtt').check();
     await page.getByTestId('cap-txt').check();
-    await closeOutput();
     await startPrice();
     if (!/^Start · (\$0\.0[0-9]+|<\$0\.001)$/.test(await mainButton(page))) throw new Error('start label: ' + await mainButton(page));
     got.length = 0;
@@ -307,14 +303,12 @@ if (want('transcribe')) {
     await dropFile(page, join(FILES, 'speech.mp4'));
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'standard');
-    await openOutput();
     await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).check();
     await page.getByTestId('cap-txt').check();
     for (const k of ['srt', 'vtt']) await page.getByTestId(`cap-${k}`).uncheck();
     await startPrice();
     const hint = await page.getByTestId('will-download').innerText();
     if (!/speech-subtitled\.mkv/.test(hint) || !/TXT/.test(hint) || /SRT|VTT/.test(hint)) throw new Error('the line before Start: ' + hint);
-    await closeOutput();
     got.length = 0;
     await page.getByTestId('start').click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });

@@ -244,11 +244,9 @@ await check('free + free: browser noise removal AND free subtitles at the same t
   await pick(page, 'subs', 'browser');
   const label = (await page.getByTestId('start').innerText()).trim();
   if (label !== 'Start · Free') throw new Error('label: ' + label);
-  // (the subtitle files: the editor starts with SRT only; the other two are ticked in the Output menu)
-  await page.getByTestId('output-button').click();
+  // (the subtitle files: the editor starts with SRT only; the other two are ticked in the Subtitles card)
   await page.getByTestId('cap-vtt').check();
   await page.getByTestId('cap-txt').check();
-  await page.getByTestId('output-button').click();
   downloads.length = 0;
   await page.getByTestId('start').click();
   await waitResult(page, 'result', 180000);

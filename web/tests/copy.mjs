@@ -79,10 +79,17 @@ await check('copy: public pages (signed out, with the Cleanup and Live pages, wh
   return '10 pages clean (the sign-in page too)';
 });
 
-await check('copy: signed-in pages (Cleanup, Billing, Live, Account) and the editor with a file chosen (its tracks, inspector, tooltips, Output menu, Details, Your files and the All the options window) show no internals', async () => {
+await check('copy: signed-in pages (Cleanup, Billing, Live, Account) and the editor with a file chosen (its tracks, inspector, tooltips, output pane, Details, Your files and the All the options window) show no internals', async () => {
   await signIn(page, EMAIL);
   const bad = [];
   for (const p of ['/app', '/app/billing', '/app/live', '/app/account']) bad.push(...(await scan(page, p)));
+  // the empty editor (before a file is chosen) and its All the options window, opened from the (i) button
+  await page.goto(`${BASE}/app`);
+  await page.getByTestId('studio-empty').waitFor();
+  await page.getByTestId('info-open').click();
+  await page.getByTestId('info-modal').waitFor();
+  bad.push(...findings(await visibleText(page)).map((x) => `/app before a file, All the options: ${x}`));
+  await page.getByTestId('info-close').click();
   const scanHere = async (where) => {
     const text = await visibleText(page);
     bad.push(...findings(text).map((x) => `${where}: ${x}`));
@@ -91,7 +98,7 @@ await check('copy: signed-in pages (Cleanup, Billing, Live, Account) and the edi
   };
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'noisy.wav'));
-  await scanHere('/app with a file');
+  await scanHere('/app with a file (the output pane is in view)');
   await pick(page, 'subs', 'accurate');
   await scanHere('/app with a file, Extra accurate subtitles');
   // the paid options of each noise choice (Voice rebuild too: it is paused on this backend, which says so), and no Restore highs in any of them (the step is gone)
@@ -101,7 +108,7 @@ await check('copy: signed-in pages (Cleanup, Billing, Live, Account) and the edi
   }
   await setVoice(page, 'rebuild').catch(() => {});
   await scanHere('/app, Voice rebuild');
-  for (const [id, popId, name] of [['output-button', 'output-pop', 'the Output menu'], ['bar-det', 'details', 'Details']]) {
+  for (const [id, popId, name] of [['bar-det', 'details', 'Details']]) {
     await page.getByTestId(id).click();
     await page.getByTestId(popId).waitFor();
     await scanHere(`/app, ${name}`);
@@ -124,7 +131,7 @@ await check('copy: signed-in pages (Cleanup, Billing, Live, Account) and the edi
     await page.goto(`${BASE}/app/job/copydone`);
     await page.getByTestId('download-again').waitFor({ timeout: 20000 });
     await scanHere('a finished job page');
-    for (const [id, popId, name] of [['bar-files', 'files', 'Your files'], ['output-button', 'output-pop', 'the Output menu']]) {
+    for (const [id, popId, name] of [['bar-files', 'files', 'Your files']]) {
       await page.getByTestId(id).click();
       await page.getByTestId(popId).waitFor();
       await scanHere(`a finished job page, ${name}`);
@@ -140,7 +147,7 @@ await check('copy: signed-in pages (Cleanup, Billing, Live, Account) and the edi
     await page.unroute('**/api/jobs/copydone/peaks/**');
   }
   if (bad.length) throw new Error(bad.join(' | '));
-  return '4 pages + the editor (a file chosen, the menus, All the options, a finished job) clean';
+  return '4 pages + the editor (empty, a file chosen, the menus, All the options, a finished job) clean';
 });
 
 await check('legal: Terms and Privacy have no unfinished placeholders ("to be confirmed", [brackets], "undefined") and no empty contact links', async () => {
@@ -240,9 +247,16 @@ await check('retention: the signed-in Cleanup page (the list note and "Good to k
   await page.getByTestId('jobs-note').waitFor();
   const note = (await page.getByTestId('jobs-note').innerText()).replace(/\s+/g, ' ');
   if (!/for 2 hours after your last change to it, and at most 6 hours after the upload/.test(note)) throw new Error('the list note: ' + note);
-  const good = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
+  // "Good to know" is a section of the All the options window (the (i) button on the editor)
+  await page.getByTestId('info-open').click();
+  await page.getByTestId('info-modal').waitFor();
+  const good = (await page.getByTestId('good-to-know').innerText()).replace(/\s+/g, ' ');
+  const modalText = (await page.getByTestId('info-modal').innerText()).replace(/\s+/g, ' ');
+  await page.getByTestId('info-close').click();
   if (!/upload and your results are kept together for 2 hours after your last change to a file \(at most 6 hours after the upload\)[^.]*deleted together/.test(good)) throw new Error('Cleanup "Good to know": ' + good.slice(-700));
   bad.push(...oldRetention(good).map((x) => `cleanup: ${x}`));
+  bad.push(...oldRetention(modalText).map((x) => `cleanup, All the options: ${x}`));
+  bad.push(...oldRetention((await page.locator('main').innerText()).replace(/\s+/g, ' ')).map((x) => `cleanup page: ${x}`));
   await page.goto(`${BASE}/app/account`);
   await page.waitForSelector('main h1');
   const acct = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
@@ -287,7 +301,7 @@ await check('file conversion: the Terms, the Privacy Policy and the price table 
   const rate = (await (await fetch(`${BASE}/api/billing/pricing`)).json()).rates.find((r) => r.product === 'convert');
   if (!rate || rate.label !== 'Video conversion') throw new Error('price list: ' + JSON.stringify(rate));
   await page.goto(`${BASE}/#pricing`);
-  await page.waitForSelector('table.price-table tbody tr');
+  await page.waitForSelector('table.price-table:not([aria-busy]) tbody tr'); // (the rows are drawn at once; the prices fill in when the list has arrived)
   const rows = (await page.locator('table.price-table tr').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
   const free = rows.find((r) => /^File type and video size in your browser/.test(r));
   if (!free || !/Another file type \(MP4, MKV, WebM, MP3, …\) or video size, on its own or with the rest\. Made on your own device, nothing is uploaded\. Free$/.test(free)) throw new Error('free row: ' + free);

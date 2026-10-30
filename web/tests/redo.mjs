@@ -41,7 +41,7 @@ await signIn(page, EMAIL);
 admin('grant', EMAIL, '5', 'redo test');
 
 const sleep = (ms) => page.waitForTimeout(ms);
-const gotoApp = async (path = '/app') => { await spare(); await page.goto(`${BASE}${path}`); await page.getByTestId('available').or(page.getByTestId('job-page')).first().waitFor({ timeout: 20000 }); };
+const gotoApp = async (path = '/app') => { await spare(); await page.goto(`${BASE}${path}`); await page.getByTestId('bar-balance').or(page.getByTestId('available')).or(page.getByTestId('job-page')).first().waitFor({ timeout: 20000 }); };
 const waitDownloads = async (n, timeout = 60000) => {
   const t0 = Date.now();
   while (got.length < n && Date.now() - t0 < timeout) await sleep(250);

@@ -4,7 +4,7 @@
 // other, the name a paid job is saved under; every result comes down by itself, and Save changes brings the new type. Another file type or
 // video size is a feature of its own: with nothing else chosen it is free, runs in the browser (a card named File conversion) and gives the file
 // in the new type or size with its own sound; a video type this browser can't make for a video is offered as made on our side.
-// The choices live in the editor's Output menu (OutputFields). The files that come out are looked at with ffprobe. An encoder the
+// The choices live in the editor's output pane (OutputFields). The files that come out are looked at with ffprobe. An encoder the
 // headless Chromium lacks is reported as a skip.
 // Needs the local backend (port 8792), `npm run build` output and the fixtures. Usage: node tests/convert.mjs
 import { execFileSync } from 'node:child_process';
@@ -46,19 +46,18 @@ if (!existsSync(big)) {
   }
 }
 
-// Before Start the file type and name are chosen in the Output menu; after the result is made they can change there too
-// ("Save changes"), and saving brings down the files with the new choice.
+// Before Start the file type and name are chosen in the output pane under the editor (always visible); after the result is made they can
+// change there too ("Save changes"), and saving brings down the files with the new choice.
 const downloads = [];
 page.on('download', (d) => downloads.push(d));
-const field = (id) => page.locator(`[data-testid=output-pop] [data-testid=${id}]`);
+const field = (id) => page.locator(`[data-testid=output-pane] [data-testid=${id}]`);
 const formField = field;
 const optionValues = (f) => f('out-format').locator('option').evaluateAll((os) => os.map((o) => o.value));
-const openOutput = async () => {
-  if (!(await page.getByTestId('output-pop').count())) await page.getByTestId('output-button').click();
-  await field('out-format').waitFor();
-  await page.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pop] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
+const outputReady = async (p) => {
+  await p.locator('[data-testid=output-pane] [data-testid=out-format]').waitFor();
+  await p.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pane] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
 };
-const closeOutput = async () => { if (await page.getByTestId('output-pop').count()) await page.getByTestId('output-button').click(); };
+const openOutput = () => outputReady(page); // (the pane is always there: wait until its file type list is filled in)
 /** What Your files says about the last file made (its note, e.g. "copied as it is"). */
 const madeNote = async () => {
   await page.getByTestId('bar-files').click();
@@ -77,7 +76,6 @@ async function prepare(file) {
 /** Start the free cleanup and wait for the editor to hand the files over (they come down by themselves). */
 async function startFree() {
   downloads.length = 0;
-  await closeOutput();
   await page.getByTestId('start').click();
   await waitResult(page, 'result', 180000);
 }
@@ -97,7 +95,7 @@ async function saveAs(name, { format, size } = {}) {
   return { p, name: dl.suggestedFilename(), note: await madeNote() };
 }
 
-await check('audio: the name starts as <name>-cleaned.<type> in the Output menu, the type list is only what this browser can make, and the name and the list follow each other both ways', async () => {
+await check('audio: the name starts as <name>-cleaned.<type> in the output pane, the type list is only what this browser can make, and the name and the list follow each other both ways', async () => {
   await prepare('noisy.wav');
   if ((await formField('out-name').inputValue()) !== 'noisy-cleaned.wav') throw new Error('default name');
   const vals = await optionValues(formField);
@@ -219,7 +217,6 @@ await check('file type alone: with the file\'s own type and size Start says what
   if (await page.getByTestId('start').isEnabled()) throw new Error('Start is on with nothing chosen');
   await field('out-format').selectOption('mkv');
   await field('out-name').fill('only the type.mkv');
-  await closeOutput();
   await startReady();
   if ((await startLabel()) !== 'Start · Free') throw new Error('button: ' + (await startLabel()));
   const hint = await page.getByTestId('will-download').innerText().catch(() => '');
@@ -255,7 +252,6 @@ await check('video size alone: a 720p video at 480p is made again in the browser
   if (existsSync(big) && (enc.avc || enc.vp9)) {
     await prepareConversion('conv720.mp4');
     await field('out-size').selectOption('480');
-    await closeOutput();
     await startReady();
     if ((await startLabel()) !== 'Start · Free') throw new Error('button: ' + (await startLabel()));
     downloads.length = 0;
@@ -272,7 +268,6 @@ await check('video size alone: a 720p video at 480p is made again in the browser
   await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).waitFor({ timeout: 5000 });
   await field('out-format').selectOption('flac');
   await field('out-name').fill('only the type.flac');
-  await closeOutput();
   await startReady();
   downloads.length = 0;
   await page.getByTestId('start').click();
@@ -318,19 +313,16 @@ await check('a video too big for this browser to put together is offered as made
     // a real MP4 (its header first) followed by empty space up to 1.6 GB: a file of that size that takes no disk to keep
     execFileSync(FFMPEG, ['-v', 'error', '-y', '-i', join(FILES, 'test.mp4'), '-c', 'copy', '-movflags', '+faststart', sparse]);
     truncateSync(sparse, Math.round(1.6 * 1024 ** 3));
-    const groupsOf = (p) => p.locator('[data-testid=output-pop] [data-testid=out-format]').evaluate((sel) => [...sel.querySelectorAll('optgroup')].map((g) => ({ label: g.label, values: [...g.querySelectorAll('option')].map((o) => o.value) })));
+    const groupsOf = (p) => p.locator('[data-testid=output-pane] [data-testid=out-format]').evaluate((sel) => [...sel.querySelectorAll('optgroup')].map((g) => ({ label: g.label, values: [...g.querySelectorAll('option')].map((o) => o.value) })));
     const open = async (p) => {
       await p.goto(`${BASE}/app`);
       await dropFile(p, sparse);
-      if (!(await p.getByTestId('output-pop').count())) await p.getByTestId('output-button').click();
-      await p.locator('[data-testid=output-pop] [data-testid=out-format]').waitFor();
-      await p.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pop] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
+      await outputReady(p);
     };
     // a browser that can write to disk: no limit, the file is put together here
     await open(page);
     const here = await groupsOf(page);
     if (!here.find((x) => x.label === 'Video') || here.find((x) => x.label === 'Video, made on our side')) throw new Error('with a place on disk: ' + JSON.stringify(here));
-    await closeOutput();
     // a browser that cannot (the same page, without the private file system): over 1.5 GB it is made on our side
     const ctx = await browser.newContext();
     try {
@@ -366,20 +358,17 @@ await check('a video made on our side is priced up front, here, from what the br
   try {
     await prepareConversion('big4k.avi');
     await field('out-format').selectOption('webm'); // the MPEG-4 picture does not go into WebM: made again; 4K at 30 frames a second is 4 units
-    await closeOutput();
     await page.waitForFunction(() => /^Start · \$0\.004$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
     let d = await detailsOf();
     if (d.lines.length !== 1 || !COUNTS(4).test(d.lines[0]) || !/ \$0\.004$/.test(d.lines[0]) || d.total !== '$0.004') throw new Error('webm: ' + JSON.stringify(d));
     await openOutput();
     await field('out-size').selectOption('720');
-    await closeOutput();
     await page.waitForFunction(() => /^Start · \$0\.002$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
     d = await detailsOf();
     if (d.lines.length !== 1 || !COUNTS(2).test(d.lines[0]) || d.total !== '$0.002') throw new Error('webm 720p: ' + JSON.stringify(d));
     await openOutput();
     await field('out-format').selectOption('mkv');
     await field('out-size').selectOption('same');
-    await closeOutput();
     await page.waitForFunction(() => /^Start · Free$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
     d = await detailsOf();
     if (d.lines.join('|') !== 'Video on our side, the picture copied as it is Free' || d.total !== 'Free') throw new Error('mkv: ' + JSON.stringify(d));
@@ -393,7 +382,6 @@ await check('a video made on our side is priced up front, here, from what the br
 await check('a picture copied on our side, end to end: an AVI into MKV is a free job (kind convert), the video comes down as made there with its own picture and sound, and costs nothing', async () => {
   await prepareConversion('noisy.avi');
   await field('out-format').selectOption('mkv');
-  await closeOutput();
   await page.waitForFunction(() => /^Start · Free$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
   downloads.length = 0;
   const posted = [];
@@ -435,15 +423,12 @@ await check('a sound asked for as a video type this browser can\'t make is made 
     await dropFile(p, join(FILES, 'noisy.wav'));
     await pick(p, 'noise', 'off');
     await pick(p, 'subs', 'off');
-    await p.getByTestId('output-button').click();
-    const of = (id) => p.locator(`[data-testid=output-pop] [data-testid=${id}]`);
-    await of('out-format').waitFor();
-    await p.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pop] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
+    const of = (id) => p.locator(`[data-testid=output-pane] [data-testid=${id}]`);
+    await outputReady(p);
     const groups = await of('out-format').evaluate((sel) => [...sel.querySelectorAll('optgroup')].map((g) => ({ label: g.label, values: [...g.querySelectorAll('option')].map((o) => o.value) })));
     const ours = groups.find((g) => g.label === 'Video (plain black picture), made on our side');
     if (!ours || ours.values.join() !== 'mp4,mov,mkv,webm') throw new Error('groups: ' + JSON.stringify(groups));
     await of('out-format').selectOption('mkv');
-    await p.getByTestId('output-button').click();
     await p.waitForFunction(() => /^Start · Free$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
     await p.getByTestId('bar-det').click();
     const lines = (await p.locator('[data-testid=details] ul.fl li:not(.tot)').allInnerTexts()).map((l) => l.replace(/\s+/g, ' ').trim());
@@ -478,7 +463,6 @@ await check('paid job: a Denoising job for a sound file with a chosen name and t
   await formField('out-name').fill('episode one.mp3');
   const hint = await page.getByTestId('will-download').innerText();
   if (!/episode one\.mp3/.test(hint)) throw new Error('the line before Start: ' + hint);
-  await closeOutput();
   downloads.length = 0;
   await page.getByTestId('start').click();
   await page.getByTestId('submitted').waitFor({ timeout: 60000 });
@@ -506,7 +490,6 @@ await check('paid job on a video: the video with the cleaned sound comes down by
   await pick(page, 'noise', 'denoise');
   await openOutput();
   await formField('out-format').selectOption('mkv');
-  await closeOutput();
   downloads.length = 0;
   await page.getByTestId('start').click();
   await page.getByTestId('submitted').waitFor({ timeout: 60000 });

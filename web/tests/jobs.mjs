@@ -21,9 +21,9 @@ page.on('download', (d) => got.push(d.suggestedFilename()));
 await signIn(page, EMAIL);
 admin('grant', EMAIL, '5', 'jobs test');
 await page.goto(`${BASE}/app`); // loaded again: the credit is on the page
-await page.getByTestId('available').waitFor();
+await page.getByTestId('bar-balance').waitFor();
 
-const gotoApp = async (path = '/app') => { await page.goto(`${BASE}${path}`); await page.getByTestId('available').or(page.getByTestId('job-page')).first().waitFor({ timeout: 20000 }); };
+const gotoApp = async (path = '/app') => { await page.goto(`${BASE}${path}`); await page.getByTestId('bar-balance').or(page.getByTestId('job-page')).first().waitFor({ timeout: 20000 }); };
 const studio = () => page.getByTestId('studio');
 const status = (loc) => loc.getAttribute('data-status', { timeout: 3000 }).catch(() => null);
 const sleep = (ms) => page.waitForTimeout(ms);
@@ -37,7 +37,7 @@ const closeFiles = async () => { if (await page.getByTestId('files').count()) aw
 /** On /app: drop a file, ask for paid Denoising, press Start and wait for the job's own page. Answers the job's id. */
 async function startPaidJob(file = 'noisy.wav') {
   if (!/\/app$/.test(page.url())) await gotoApp('/app');
-  await page.getByTestId('available').waitFor();
+  await page.getByTestId('bar-balance').waitFor();
   await dropFile(page, join(FILES, file));
   await pick(page, 'noise', 'denoise');
   await waitStartPrice();
@@ -124,7 +124,7 @@ await check('done: the editor hands the files over, the file comes down by itsel
   return `${expiry}; ${got[0]}`;
 });
 
-await check('reload keeps the page: the same address and job, the finished editor and Download again (no new note, no download by itself); Listen (play and the speaker buttons) and changing it (the inspector, the Output menu) are there', async () => {
+await check('reload keeps the page: the same address and job, the finished editor and Download again (no new note, no download by itself); Listen (play and the speaker buttons) and changing it (the inspector, the output pane) are there', async () => {
   const url = page.url();
   got.length = 0;
   await page.reload();
@@ -135,7 +135,7 @@ await check('reload keeps the page: the same address and job, the finished edito
   if (await page.getByTestId('submitted').count()) throw new Error('the note came back after a reload');
   await sleep(1500);
   if (got.length) throw new Error('a reload downloaded by itself: ' + got.join(', '));
-  for (const id of ['download-again', 'play', 'hear-voice', 'hear-level', 'inspector', 'output-button', 'bar-files']) if (!(await page.getByTestId(id).count())) throw new Error(`${id} is missing after a reload`);
+  for (const id of ['download-again', 'play', 'hear-voice', 'hear-level', 'inspector', 'output-pane', 'bar-files']) if (!(await page.getByTestId(id).count())) throw new Error(`${id} is missing after a reload`);
   await page.getByTestId('download-again').click();
   await waitDownloads(1);
   if (got.length !== 1 || !/\.flac$/.test(got[0])) throw new Error('Download again after a reload: ' + got.join(', '));
