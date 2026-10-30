@@ -433,21 +433,22 @@ Receiving and sending are separate things here.
 
 **Receiving: Namecheap email forwarding.** In Namecheap, Domain List, `audiocleaner.live`, Mail Settings: "Email
 Forwarding" (the records are MX `eforward*.registrar-servers.com` and an SPF TXT
-`v=spf1 include:spf.efwd.registrar-servers.com ~all` on the bare domain). Add an alias such as `support@audiocleaner.live`
-that forwards to the owner's inbox. Nobody sees the inbox address, and there is no mailbox to run.
+`v=spf1 include:spf.efwd.registrar-servers.com ~all` on the bare domain). The alias `support@audiocleaner.live` forwards to
+the owner's inbox (Domain tab, Redirect Email). Nobody sees the inbox address, and there is no mailbox to run.
 
-**Sending: a transactional service with the domain verified.** Recommended: Resend (https://resend.com, free: 3,000 mails a
-month, 100 a day). Add the domain `audiocleaner.live` there and put the DNS records it shows into Namecheap (Advanced DNS).
-Resend uses a subdomain for the bounce path, so nothing clashes with the forwarding MX on the bare domain:
+**Sending: Resend, with the domain verified** (set up 2026-10-30; https://resend.com, free: 3,000 mails a month, 100 a day,
+shared by the site and the support replies below). The domain `audiocleaner.live` is verified there with these records in
+Namecheap (Advanced DNS, Host Records). They all sit on subdomains, so nothing clashes with the forwarding on the bare domain:
 
 | Type | Host | Value |
 |---|---|---|
-| MX | `send` | Resend's feedback server (priority 10) |
-| TXT | `send` | `v=spf1 include:amazonses.com ~all` (as Resend shows it) |
-| TXT | `resend._domainkey` | the DKIM public key Resend shows |
+| TXT | `resend._domainkey` | the DKIM public key Resend shows (`p=MIGfMA…`) |
+| CNAME | `send` | `send.forge.rmta.net` (Resend's bounce path; as Resend shows it) |
+| CNAME | `rsend` | `rsend.forge.rmta.net` (as Resend shows it) |
+| TXT | `_dmarc` | `v=DMARC1; p=none;` |
 
-Copy the exact values from Resend's page; wait until it says "Verified". Then create an API key (sending access) and set in
-`~/audio-cleaner/secrets/acw.env`:
+"Enable receiving" stays off in Resend: incoming mail is the forwarding's job. The site's API key (name
+`audio-cleaner-server`, sending access, this domain only) is in `~/audio-cleaner/secrets/acw.env`:
 
 ```
 SMTP_HOST=smtp.resend.com
@@ -459,17 +460,26 @@ SMTP_FROM=Audio Cleaner <no-reply@audiocleaner.live>
 
 Port 587 with STARTTLS is what both mail paths use (`acw/alerts.py` for alerts and the contact form, and the sign-in mail
 in `api/auth_routes.py`; the server certificate is verified). Port 465 (implicit TLS) works only for alerts and the
-contact form, not for sign-in links, so keep 587. Then `acw-ctl restart acw-web` and run
-`python -m acw.alerts test` (see "Alerts"). Replies to contact-form messages go to the sender (`Reply-To`); the address
-`no-reply@` need not exist, because it only sends.
+contact form, not for sign-in links, so keep 587. After a change: `acw-ctl restart acw-web`, then send a message through
+`/contact` and request a sign-in link; both should arrive "From: no-reply@audiocleaner.live", Gmail showing "mailed-by" and
+"signed-by: audiocleaner.live". Replies to contact-form messages go to the sender (`Reply-To`); the address `no-reply@`
+need not exist, because it only sends. The home watcher on the Raspberry Pi has its own mail login and is not part of this.
 
-**DMARC** (recommended, once sending works): a TXT record `_dmarc` with
-`v=DMARC1; p=none; rua=mailto:support@audiocleaner.live` (use the forwarded address). `p=none` only reports; reports arrive
-as mail to that address. Tighten to `p=quarantine` after a few weeks of clean reports.
+**Replying as support.** In the owner's Gmail, Settings, Accounts and Import, "Send mail as": `Audio Cleaner Support
+<support@audiocleaner.live>`, SMTP `smtp.resend.com`, port 587, username `resend`, password = a second Resend API key
+(`gmail-replies`, sending access, so it can be revoked without touching the site's), TLS. Gmail's confirmation mail reaches
+the owner through the `support@` forwarding. When answering a contact-form message, pick the support address in the reply's
+From field (it is not the default, so personal mail keeps the personal address) and cut the internal lines (account id,
+job details) from the quoted message.
+
+**DMARC** is `p=none` (reports nothing, rejects nothing). To get reports, add `rua=mailto:support@audiocleaner.live`;
+tighten to `p=quarantine` after a few weeks of clean sending.
 
 **If 100 a day is too few** (one sign-in link is one mail): Brevo (https://www.brevo.com, free: 300 a day; SMTP host
 `smtp-relay.brevo.com`, port 587, its own SMTP login and key, the domain verified the same way with its own DKIM and
-SPF/DMARC records).
+SPF/DMARC records). Brevo turns on sending only after a manual review (a support ticket, no stated turnaround), and its SPF
+include goes INTO the existing bare-domain record (`v=spf1 include:spf.efwd.registrar-servers.com include:spf.brevo.com ~all`):
+a second SPF record breaks both.
 
 **Not recommended: Gmail SMTP** (`smtp.gmail.com`, port 587, an app password from
 https://myaccount.google.com/apppasswords, `SMTP_FROM` = the Gmail address). It works, but every mail shows the personal
