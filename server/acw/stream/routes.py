@@ -16,6 +16,7 @@ could be abused as a cheap batch service.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import math
@@ -378,11 +379,26 @@ STALE_SESSION_SECONDS = 10.0
 _open: dict[str, list["Session"]] = {}  # user_id -> sessions this process is running
 
 
+# uvicorn (0.54, websockets-sansio) sends a refusal's HTTP response completely but doesn't count the handshake as answered, so it
+# then logs "ASGI callable returned without completing handshake." for every refused connection. Every early return in
+# stream_ws refuses on purpose, so that line is dropped for those connections only (the flag lives in the connection's context).
+_refused: contextvars.ContextVar[bool] = contextvars.ContextVar("acw_ws_refused", default=False)
+
+
+class _RefusalNoise(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (_refused.get() and record.getMessage().startswith("ASGI callable returned without completing handshake"))
+
+
+logging.getLogger("uvicorn.error").addFilter(_RefusalNoise())
+
+
 async def _deny(ws: WebSocket, status: int, message: str, retry_after: int | None = None) -> None:
     """Refuse the handshake with a real HTTP status (401 sign-in, 403 not allowed, 429 too often) where the
     server supports it; otherwise the plain 403 of a refused upgrade."""
     from fastapi.responses import JSONResponse
 
+    _refused.set(True)
     try:
         await ws.send_denial_response(JSONResponse(
             {"detail": message}, status_code=status, headers={"Retry-After": str(retry_after)} if retry_after else None,
