@@ -480,3 +480,11 @@ def test_cli_waiting_does_not_count_local_jobs(capsys):
     out, _ = run(capsys, "maintenance", "on", "--json")
     assert json.loads(out)["waiting"] == 1
     assert json.loads(run(capsys, "maintenance", "status", "--json")[0])["waiting"] == 1
+
+
+@pytest.mark.parametrize("reason", ["-x", "--now", "-5 min", "--help", "-"])
+def test_cli_reason_equals_form_accepts_a_reason_starting_with_a_dash(capsys, reason):
+    out, code = run(capsys, "maintenance", "on", f"--reason={reason}", "--json")
+    assert code is None and json.loads(out)["reason"] == reason
+    assert maintenance.state()["reason"] == reason
+    assert actions()[-1] == ("admin-cli", "maintenance_on", reason)
