@@ -24,7 +24,6 @@
    acw-tunnel-live ssh -R 18795 → 127.0.0.1:8795  (IPQoS lowdelay)
    acw-live     FastAPI/uvicorn on 127.0.0.1:8795 — the live WebSocket only (relay to acw-stream,
                 extra-accurate live captions, billing per second, closing orphaned live sessions)
-   acw-admin    the owner dashboard on 127.0.0.1:8796 (read-only; over SSH only)
    acw-stream   live DSP workers (one process per pair of live cores): echo canceller → DeepFilterNet3 → captions; Unix sockets,
                 no network (seccomp AF_UNIX + Landlock)
    acw-worker@N file-job workers (no network); each job stage runs in a sandboxed runner

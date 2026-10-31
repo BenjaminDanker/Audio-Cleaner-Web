@@ -1,6 +1,6 @@
 """Numbers for the home page on the Raspberry Pi (Host-Ops home/): jobs running and waiting per feature, live sessions, the
 GPU worker (every 10 s), and the money summary (every 5 min: this month and last month from the owner's dashboard
-calculations in acw.admin_app, and the last 30 days as a series).
+calculations in acw.owner_stats, and the last 30 days as a series).
 
 The web process POSTs them as JSON to `ACW_DASHBOARD_URL` (e.g. http://192.168.1.200/api/acw; unset = off, so test and dev
 instances send nothing). Features are named with the website's own words (job_view.label_of), so a new feature shows up
@@ -83,14 +83,14 @@ def collect() -> dict[str, float]:
 
 def money() -> dict:
     """This month and last month (the owner's dashboard's own calculations), and the last 30 days as a series."""
-    from . import admin_app
+    from . import owner_stats
     now = int(time.time())
     month = time.localtime(now)
     this = int(time.mktime((month.tm_year, month.tm_mon, 1, 0, 0, 0, 0, 0, -1)))
     prev_month = (month.tm_year - (month.tm_mon == 1), 12 if month.tm_mon == 1 else month.tm_mon - 1)
     prev = int(time.mktime((*prev_month, 1, 0, 0, 0, 0, 0, -1)))
-    return {"month": admin_app.overview(this, now), "prev": admin_app.overview(prev, this),
-            "series": admin_app.series(now - 30 * 86400, now)["points"]}
+    return {"month": owner_stats.overview(this, now), "prev": owner_stats.overview(prev, this),
+            "series": owner_stats.series(now - 30 * 86400, now)["points"]}
 
 
 def target() -> str | None:

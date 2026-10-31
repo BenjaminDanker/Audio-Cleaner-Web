@@ -6,7 +6,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from . import automatic, db, job_resources, jobs
+from . import automatic, db, job_resources, jobs, maintenance
 from .billing import pricing
 
 
@@ -92,6 +92,9 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         if job["id"] in waits:
             position = ids.index(job["id"]) + 1
             eta = waits[job["id"]]
+    held = position is not None and maintenance.paused(job)
+    if held:
+        eta = None  # nothing starts before maintenance ends
     callback = (callbacks if callbacks is not None else callbacks_for([job["id"]])).get(job["id"])
     out = {
         "queuePosition": position,
@@ -134,6 +137,8 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         out["chosen"] = params.get("chosen")  # null until the file has been listened to
         if automatic.pending(params):
             out["maximum"] = True  # estCostMicros is the most it can cost until then
+    if held:
+        out["paused"] = maintenance.JOB_MESSAGE
     if job["status"] in ("queued", "running", "cloud_asr"):
         out["estimateSeconds"] = int(job_resources.job_seconds(job))  # the whole job's rough length, for the wait before progress shows
     if callback is not None:

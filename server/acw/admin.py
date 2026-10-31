@@ -86,6 +86,17 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--channel", choices=("obs-plugin",), help="only this channel")
     p.add_argument("--verify", action="store_true", help="hash every served file against its recorded checksum; no network")
     p.add_argument("--status", action="store_true", help="print what is served and when it was last mirrored; no network")
+    p = sub.add_parser("maintenance", help="only admin accounts' work runs: others' jobs wait in the queue, their new live sessions are refused")
+    p.add_argument("do", choices=("on", "off", "status"))
+    p.add_argument("--reason", default="", help="why (kept in the audit log)")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("top", help="top spenders over the last days (money, jobs, live hours)")
+    p.add_argument("--days", type=int, default=30)
+    p.add_argument("--limit", type=int, default=25)
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("problems", help="failed jobs, money problems, unusual live session ends and alerts over the last days")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("backup")
     p.add_argument("dir")
     p.add_argument("--keep", type=int, default=30)
@@ -156,6 +167,26 @@ def main(argv: list[str] | None = None) -> None:
         db.execute("UPDATE users SET status = 'active' WHERE id = ?", (u["id"],))
         db.audit("admin-cli", "unsuspend", user_id=u["id"])
         print("active")
+    elif a.cmd == "maintenance":
+        from . import maintenance
+        if a.do == "on":
+            maintenance.switch_on(a.reason, "admin-cli")
+        elif a.do == "off":
+            maintenance.switch_off("admin-cli")
+        st = maintenance.state()
+        held = 0
+        if st is not None:
+            admins = maintenance.admin_ids()
+            held = sum(1 for r in db.all_rows("SELECT user_id FROM jobs WHERE status = 'queued' AND started_at IS NULL") if r["user_id"] not in admins)
+        out = {"on": st is not None, "since": (st or {}).get("since"), "reason": (st or {}).get("reason", ""), "waiting": held}
+        print(json.dumps(out) if a.json else ("on since " + time.strftime("%Y-%m-%d %H:%M", time.localtime(out["since"] or 0))
+                                              + f" ({out['waiting']} job(s) waiting)" if out["on"] else "off"))
+    elif a.cmd in ("top", "problems"):
+        from . import owner_stats
+        end = int(time.time())
+        start = end - max(1, min(a.days, 3650)) * 86400
+        out = owner_stats.top_users(start, end, max(1, min(a.limit, 200))) if a.cmd == "top" else owner_stats.errors(start, end)
+        print(json.dumps(out, default=str) if a.json else json.dumps(out, default=str, indent=1))
     elif a.cmd == "mirror":
         from . import mirror
 

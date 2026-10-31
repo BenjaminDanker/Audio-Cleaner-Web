@@ -336,7 +336,7 @@ WORKERS_CONF="$(printf '[Service]\nEnvironment=ACW_WORKERS=%d\n' "$WORKERS")"
 GPU=0
 if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1 && [ -x "$H/venv-gpu/bin/python" ]; then GPU=1; fi
 
-UNITS="acw-stream.service acw-web.service acw-live.service acw-bulk.service acw-tunnel.service acw-tunnel-live.service acw-admin.service"
+UNITS="acw-stream.service acw-web.service acw-live.service acw-bulk.service acw-tunnel.service acw-tunnel-live.service"
 # The bulk tunnel needs the VPS key to allow its port first (docs/operations.md, "Bulk transfers"), otherwise it
 # fails and alerts in a loop. So it is part of the deploy only once you enabled it (acw-ctl enable --now
 # acw-tunnel-bulk); from then on it is checked, restarted when its unit file changes and rolled back like the rest.
@@ -356,7 +356,6 @@ if [ "$APP_CHANGED" = 1 ] || [ "$LOCK_CHANGED" = 1 ]; then
   add_restart acw-web.service
   add_restart acw-live.service
   add_restart acw-bulk.service
-  add_restart acw-admin.service
   for i in $(seq 1 "$WORKERS"); do add_restart "acw-worker@$i.service"; done
   [ "$GPU" = 1 ] && add_restart acw-worker-gpu.service
 fi
@@ -514,6 +513,11 @@ systemctl --user enable --now acw-mirror.timer >/dev/null 2>&1
 if [ "$BULK_TUNNEL" = 0 ]; then
   say_warn "acw-tunnel-bulk (uploads/downloads on their own SSH connection) is installed but not enabled: after the VPS key allows port 18794, run 'acw-ctl enable --now acw-tunnel-bulk' (docs/operations.md, Bulk transfers)"
 fi
+# Retired units: the owner dashboard (acw-admin.service, 2026-10-31) moved onto the home page.
+for old in acw-admin.service; do
+  if [ -f "$U/$old" ]; then systemctl --user disable --now "$old" >/dev/null 2>&1 || true; rm -f "$U/$old"; units_changed=1; fi
+done
+[ "$units_changed" = 1 ] && systemctl --user daemon-reload
 # Workers beyond the new count (moved to a smaller machine): stop them.
 for i in $(seq $(( WORKERS + 1 )) 16); do systemctl --user disable --now "acw-worker@$i.service" >/dev/null 2>&1 || true; done
 [ "$GPU" = 1 ] || systemctl --user disable --now acw-worker-gpu.service >/dev/null 2>&1 || true

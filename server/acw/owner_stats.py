@@ -1,12 +1,8 @@
-"""The owner's dashboard: money, users, usage, errors and the machine, for any time range.
+"""The owner's numbers: money, users, usage and errors for a time range, read from the main database (opened read-only).
 
-    uvicorn acw.admin_app:app --host 127.0.0.1 --port 8796      (acw-admin.service)
-
-It is reachable from this machine only: it listens on 127.0.0.1, nothing forwards to it (the tunnels carry 8790 and
-8794, the VPS knows nothing of it), and requests whose Host isn't this machine's loopback address are refused (so a web
-page can't reach it through DNS rebinding). Open it over SSH:  ssh -L 8796:127.0.0.1:8796 <you>@primary-ram  and
-http://localhost:8796 . It only reads: the main database is opened read-only, and there is nothing here that changes
-anything. The machine history comes from acw/samples.py (recorded by the monitor every 2 minutes).
+The home page shows them: dashboard_stats.py sends this month, last month and the last 30 days to it, and `acw-admin top` and
+`acw-admin problems` (top spenders, failed jobs, money problems, unusual live session ends, alerts) answer its admin side.
+The machine history comes from acw/samples.py (recorded by the monitor every 2 minutes).
 """
 from __future__ import annotations
 
@@ -14,41 +10,17 @@ import json
 import math
 import sqlite3
 import time
-from pathlib import Path
-
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
 
 from . import job_view, samples
 from .billing import pricing
 from .config import get_settings
 
-UI = Path(__file__).resolve().parent / "admin_ui"
-PORT = 8796
-ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", "127.0.0.1", "localhost"}
 DAY = 86400
 MICROS = 1_000_000
 # Live sessions that ended the usual way; every other end reason is listed under errors.
 NORMAL_LIVE_ENDS = ("client_stop", "client_closed", "idle_timeout", "max_duration", "no_audio", "replaced", "trial_over")
 # Stripe's standard US card rate, for the estimated fee of each payment (the real fee is on Stripe's dashboard).
 FEE_RATE, FEE_FIXED_CENTS = 0.029, 30
-
-app = FastAPI(title="Audio Cleaner dashboard", docs_url=None, redoc_url=None, openapi_url=None)
-
-
-@app.middleware("http")
-async def local_only(request: Request, call_next):
-    host = request.headers.get("host", "")
-    client = request.client.host if request.client else ""
-    if host not in ALLOWED_HOSTS or client not in ("127.0.0.1", "::1") or "x-forwarded-for" in request.headers:
-        return JSONResponse({"detail": "Not here."}, status_code=403)
-    resp = await call_next(request)
-    resp.headers["Cache-Control"] = "no-store"
-    resp.headers["X-Frame-Options"] = "DENY"
-    resp.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
-    resp.headers["Referrer-Policy"] = "no-referrer"
-    return resp
-
 
 def _db() -> sqlite3.Connection:
     c = sqlite3.connect(f"file:{get_settings().db_path}?mode=ro", uri=True, timeout=10)
@@ -61,7 +33,7 @@ def _range(start: int | None, end: int | None) -> tuple[int, int, int]:
     end = int(end if end is not None else time.time())
     start = int(start if start is not None else end - 30 * DAY)
     if not 0 <= start < end:
-        raise HTTPException(400, "start must be before end")
+        raise ValueError("start must be before end")
     span = end - start
     bucket = next(b for b in (300, 1800, 3600, 6 * 3600, DAY, 7 * DAY, 30 * DAY) if span / b <= 120) if span <= 120 * 30 * DAY else 30 * DAY
     return start, end, bucket
@@ -94,20 +66,7 @@ def _live_label(denoise: str | None, captions: str | None) -> str:
     return "Live: " + (" + ".join(parts) or "nothing")
 
 
-@app.get("/")
-def index():
-    return FileResponse(UI / "index.html")
-
-
-@app.get("/static/{name}")
-def static(name: str):
-    if name not in ("app.js", "chart.umd.js", "style.css"):
-        raise HTTPException(404)
-    return FileResponse(UI / name)
-
-
-@app.get("/api/overview")
-def overview(start: int | None = Query(None), end: int | None = Query(None)) -> dict:
+def overview(start: int | None = None, end: int | None = None) -> dict:
     start, end, _ = _range(start, end)
     c = _db()
     try:
@@ -190,8 +149,7 @@ def overview(start: int | None = Query(None), end: int | None = Query(None)) -> 
         c.close()
 
 
-@app.get("/api/series")
-def series(start: int | None = Query(None), end: int | None = Query(None)) -> dict:
+def series(start: int | None = None, end: int | None = None) -> dict:
     start, end, bucket = _range(start, end)
     c = _db()
     try:
@@ -225,8 +183,7 @@ def series(start: int | None = Query(None), end: int | None = Query(None)) -> di
         c.close()
 
 
-@app.get("/api/users")
-def top_users(start: int | None = Query(None), end: int | None = Query(None), limit: int = Query(25, ge=1, le=200)) -> dict:
+def top_users(start: int | None = None, end: int | None = None, limit: int = 25) -> dict:
     start, end, _ = _range(start, end)
     c = _db()
     try:
@@ -247,8 +204,7 @@ def top_users(start: int | None = Query(None), end: int | None = Query(None), li
         c.close()
 
 
-@app.get("/api/errors")
-def errors(start: int | None = Query(None), end: int | None = Query(None)) -> dict:
+def errors(start: int | None = None, end: int | None = None) -> dict:
     start, end, _ = _range(start, end)
     c = _db()
     try:

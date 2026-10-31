@@ -22,7 +22,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import automatic, broker, db, edit_prices, edit_store, edit_subtitles, editing, hostload, job_convert, job_resources, job_view, jobs, keycaps, metrics
+from .. import automatic, broker, db, edit_prices, edit_store, edit_subtitles, editing, hostload, job_convert, job_resources, job_view, jobs, keycaps, maintenance, metrics
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -113,6 +113,7 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
         rows = [r for r in rows if not broker.gpu_stages(r)]  # the GPU worker takes these
     else:
         rows = [r for r in rows if not broker.gpu_only(r)]  # the voice rebuild waits for the card
+    rows = maintenance.runnable(rows)  # during maintenance only admins' jobs (and ones already started) begin
     if not rows:
         return None
     snap = cpus = None

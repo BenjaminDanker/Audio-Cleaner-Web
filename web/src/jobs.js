@@ -108,6 +108,7 @@ function roughWait(seconds) {
  */
 export function queueText(job) {
   if (job.status !== 'queued' || !Number.isFinite(job.queuePosition) || job.queuePosition < 1) return '';
+  if (job.paused) return typeof job.paused === 'string' ? job.paused : 'Paused for a short maintenance'; // starts when it ends
   const wait = Number.isFinite(job.queueWaitSeconds) && job.queueWaitSeconds > 0 ? `, about ${roughWait(job.queueWaitSeconds)}` : '';
   const ahead = job.queuePosition - 1;
   if (ahead === 0) return `You’re next${wait}`;

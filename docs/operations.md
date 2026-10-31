@@ -270,21 +270,25 @@ place (`DEFAULT_REPO` in `acw/mirror.py`, or `ACW_GITHUB_REPO`).
 Check: `curl -sI https://audiocleaner.live/api/downloads/obs-plugin/manifest.json` after the first pass finished
 (`mirror --status`).
 
-## Owner dashboard
+## Owner numbers
 
-Money, users, usage, errors and the machine for any time range, in a browser: `acw-admin.service`
-(`acw/admin_app.py`, page in `acw/admin_ui/`). It listens on **127.0.0.1:8796 only** and nothing forwards to it (the
-tunnels carry 8790 and 8794; the VPS knows nothing of it), it refuses any request whose Host isn't this machine's
-loopback address (no DNS rebinding), and it only reads (the database is opened read-only; there is nothing to change).
-Open it over SSH from your PC:
-
-```bash
-ssh -L 8796:127.0.0.1:8796 silver@primary-ram      # then open http://localhost:8796  (the dashboard runs as acw; you log in as yourself)
-```
+Money, users, usage and errors are on the home page (Raspberry Pi, https://192.168.1.200/, home network only, behind its
+password). The calculations are in `acw/owner_stats.py` (read-only database connection): `acw.dashboard_stats` sends this month,
+last month and the last 30 days to the page, and its admin side runs `acw-admin top --json` (top spenders) and
+`acw-admin problems --json` (failed jobs, money problems, unusual live session ends, alerts). The separate owner dashboard
+(`acw-admin.service` on 127.0.0.1:8796, opened over SSH) was retired on 2026-10-31; install.sh removes its unit.
 
 The machine graphs come from `data/samples.sqlite3` (`acw/samples.py`): the monitor records one row every 2 minutes
 (CPU, memory, GPU, disk, queue, live), kept a little over a year. Card fees are an estimate (2.9 % + 30 c); Stripe's
 dashboard has the exact ones.
+
+## Maintenance
+
+`acw-admin maintenance on [--reason TEXT]` / `off` / `status` (also a button on the home page's admin side). While it is on,
+only admin accounts (`ACW_ADMIN_EMAILS`) get work done: everyone else's file jobs are still taken and wait in the queue (the
+site shows them as paused for maintenance) and start when it ends; a job that had already started finishes. New live sessions
+from everyone else are refused with a short message (a live session can't wait); running ones continue. The switch is the
+`maintenance` row of the database's `meta` table, so the web, live and worker processes all see it at once.
 
 ## Admin CLI
 
@@ -352,8 +356,8 @@ account, so nothing is lost. The watcher sends what it gets as it is; de-duplica
 
 **Home page.** With `ACW_DASHBOARD_URL` set (`http://192.168.1.200/api/acw`), the web process posts every 10 s how many jobs
 run and wait per feature (the website's own names), live sessions per kind and the GPU worker's state, and every 5 minutes the
-money summary (this month and last month from the owner's dashboard calculations, `acw.admin_app`, and the last 30 days),
-to the home page on the Raspberry Pi (Host-Ops `home/`, http://192.168.1.200/). `acw.dashboard_stats`.
+money summary (this month and last month from `acw.owner_stats`, and the last 30 days),
+to the home page on the Raspberry Pi (Host-Ops `home/`, https://192.168.1.200/; posts still go to its plain-HTTP port). `acw.dashboard_stats`.
 
 **Set up (once).** Set `ACW_ALERT_EMAIL` and the `SMTP_*` variables in `~/audio-cleaner/secrets/acw.env` (the monitor
 and the failure hook read that file; workers send no mail; the mail account is described under "Mail"):
@@ -1007,8 +1011,7 @@ Both scripts are idempotent: each step looks at what is already done (moved fold
 unit list recorded in `/var/lib/acw-move/units.<user>`). They never print secret contents (only file names).
 
 **Afterwards.** Log out and in once (or restart the sessions that read `~/audio-cleaner/{models,bin}`): group `acw` only reaches
-running sessions at the next login; the ACL entry covers the folders meanwhile. Open the dashboard as before
-(`ssh -L 8796:127.0.0.1:8796 silver@primary-ram`). The journal of the old units stays in the owner's user journal; new lines
+running sessions at the next login; the ACL entry covers the folders meanwhile. The journal of the old units stays in the owner's user journal; new lines
 are in acw's (`acw-logs`). If the journal retention (`MaxRetentionSec`) is set system-wide it applies to both.
 
 **Way back**: `move-back-to-silver.sh` does the same steps in reverse (units back from the stash, folders and secrets back, links
