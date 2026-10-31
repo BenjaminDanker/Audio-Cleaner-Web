@@ -276,7 +276,7 @@ Money, users, usage and errors are on the home page (Raspberry Pi, https://192.1
 password). The calculations are in `acw/owner_stats.py` (read-only database connection): `acw.dashboard_stats` sends this month,
 last month and the last 30 days to the page, and its admin side runs `acw-admin top --json` (top spenders) and
 `acw-admin problems --json` (failed jobs, money problems, unusual live session ends, alerts). The separate owner dashboard
-(`acw-admin.service` on 127.0.0.1:8796, opened over SSH) was retired on 2026-10-31; install.sh removes its unit.
+(`acw-admin.service` on 127.0.0.1:8796, opened over SSH) was retired on 2026-10-31 and is gone.
 
 Machine graphs are the home page's own. Card fees are an estimate (2.9 % + 30 c); Stripe's dashboard has the exact ones.
 
