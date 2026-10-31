@@ -1,9 +1,11 @@
-"""acw.dashboard_stats: the numbers the web process sends to Netdata for the home dashboard (jobs per feature, live sessions, GPU worker)."""
+"""acw.dashboard_stats: the numbers the web process POSTs to the home service (jobs per feature, live sessions, GPU worker, money summary)."""
 import asyncio
 import json
 import logging
-import socket
+import threading
+import time
 import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -219,64 +221,214 @@ def test_params_that_are_json_but_not_an_object_are_skipped(gpu, raw):
     (None, None),
     ("", None),
     ("   ", None),
-    ("127.0.0.1:8125", ("127.0.0.1", 8125)),
-    (" 127.0.0.1:8125 ", ("127.0.0.1", 8125)),
-    (":9000", ("127.0.0.1", 9000)),
-    ("localhost:8125", ("localhost", 8125)),
-    ("nonsense", None),
-    ("host:port", None),
-    ("127.0.0.1:", None),
+    ("\n", None),
+    ("http://192.168.1.200/api/acw", "http://192.168.1.200/api/acw"),
+    ("  http://192.168.1.200/api/acw \n", "http://192.168.1.200/api/acw"),
 ])
 def test_target(monkeypatch, raw, expected):
     if raw is None:
-        monkeypatch.delenv("ACW_DASHBOARD_STATSD", raising=False)
+        monkeypatch.delenv("ACW_DASHBOARD_URL", raising=False)
     else:
-        monkeypatch.setenv("ACW_DASHBOARD_STATSD", raw)
+        monkeypatch.setenv("ACW_DASHBOARD_URL", raw)
     assert ds.target() == expected
 
 
-def test_a_bad_target_is_logged(monkeypatch, caplog):
-    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "nonsense")
-    with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
-        assert ds.target() is None
-    assert "nonsense" in caplog.text
+def test_the_old_statsd_variable_is_not_used(monkeypatch):
+    monkeypatch.delenv("ACW_DASHBOARD_URL", raising=False)
+    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:8125")
+    assert ds.target() is None
 
 
-# ---------------------------------------------------------------------------------------------------------- send
+# ---------------------------------------------------------------------------------------------------------- post
 
-def receiver():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("127.0.0.1", 0))
-    s.settimeout(2)
-    return s
+class Sink:
+    """A local HTTP server on 127.0.0.1 that records every request and answers with `status`."""
+
+    def __init__(self, status=200):
+        self.requests = []
+        self.status = status
+        sink = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                sink.requests.append({"method": self.command, "path": self.path, "type": self.headers.get("Content-Type"), "body": body})
+                self.send_response(sink.status)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            do_PUT = do_GET = do_POST
+
+            def log_message(self, *a):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/api/acw"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(5)
 
 
-def drain(s, n):
-    return [s.recv(1024).decode() for _ in range(n)]
+@pytest.fixture(autouse=True)
+def no_proxy(monkeypatch):
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
 
 
-def test_send_writes_one_statsd_gauge_line_per_key():
-    with receiver() as rx:
-        ds.send({"jobs_running": 3, "job_waiting_denoising": 0, "gpu_worker": 2}, rx.getsockname())
-        assert drain(rx, 3) == ["acw.jobs_running:3|g", "acw.job_waiting_denoising:0|g", "acw.gpu_worker:2|g"]
+def test_post_sends_the_body_as_json(no_proxy):
+    body = {"live": {"jobs_running": 3, "gpu_worker": 2}, "money": {"month": {"a": 1.5}, "series": [{"t": 1}]}}
+    with Sink() as sink:
+        assert ds.post(sink.url, body) is None
+    assert len(sink.requests) == 1
+    r = sink.requests[0]
+    assert r["method"] == "POST" and r["path"] == "/api/acw"
+    assert r["type"] == "application/json"
+    assert json.loads(r["body"]) == body
 
 
-def test_send_sends_the_whole_collect(gpu):
+def test_post_turns_values_json_cannot_hold_into_text(no_proxy):
+    with Sink() as sink:
+        ds.post(sink.url, {"live": {"x": 1}, "odd": {1, 2}})
+    got = json.loads(sink.requests[0]["body"])
+    assert got["live"] == {"x": 1} and isinstance(got["odd"], str)
+
+
+def test_post_raises_when_the_service_answers_with_an_error(no_proxy):
+    import urllib.error
+    with Sink(status=500) as sink:
+        with pytest.raises(urllib.error.HTTPError):
+            ds.post(sink.url, {"live": {}})
+    assert len(sink.requests) == 1
+
+
+def test_post_raises_when_nothing_listens(no_proxy):
+    import urllib.error
+    with Sink() as sink:
+        url = sink.url
+    with pytest.raises(urllib.error.URLError):
+        ds.post(url, {"live": {}})
+
+
+# ---------------------------------------------------------------------------------------------------------- money
+
+def local_ts(year, month, day, hour=12):
+    return int(time.mktime((year, month, day, hour, 0, 0, 0, 0, -1)))
+
+
+def add_payment(uid, status, cents, at):
+    db.execute("INSERT INTO payments(id, user_id, kind, status, amount_cents, tax_cents, created_at, updated_at)"
+               " VALUES (?,?,?,?,?,?,?,?)", (db.new_id(), uid, "checkout", status, cents, 0, at, at))
+
+
+def add_ledger(uid, kind, micros, at):
+    db.execute("INSERT INTO ledger(user_id, amount_micros, kind, balance_after_micros, created_at) VALUES (?,?,?,?,?)",
+               (uid, micros, kind, 0, at))
+
+
+def freeze(monkeypatch, now):
+    """Only dashboard_stats sees the fixed time (its `time` name is replaced, not the time module)."""
+    monkeypatch.setattr(ds, "time", types.SimpleNamespace(time=lambda: now + 0.4, localtime=time.localtime, mktime=time.mktime))
+
+
+def test_money_has_this_month_last_month_and_the_series(monkeypatch):
+    now = local_ts(2026, 10, 20)
+    freeze(monkeypatch, now)
+    m = ds.money()
+    assert set(m) == {"month", "prev", "series"}
+    this_start, prev_start = local_ts(2026, 10, 1, 0), local_ts(2026, 9, 1, 0)
+    assert m["month"]["range"] == {"start": this_start, "end": now}
+    assert m["prev"]["range"] == {"start": prev_start, "end": this_start}
+    for key in ("month", "prev"):
+        assert {"money", "users", "jobs", "live", "revenueByProduct"} <= set(m[key])
+    pts = m["series"]
+    assert isinstance(pts, list) and pts
+    assert all({"t", "topupsUsd", "usageUsd", "refundsUsd", "signups", "jobsDone"} <= set(p) for p in pts)
+    assert pts[-1]["t"] < now and pts[0]["t"] <= now - 30 * 86400 < pts[0]["t"] + (pts[1]["t"] - pts[0]["t"])
+    assert [p["t"] for p in pts] == sorted(p["t"] for p in pts)
+    json.dumps(m)  # the whole summary can be posted
+
+
+def test_money_empty_database_is_all_zero(monkeypatch):
+    freeze(monkeypatch, local_ts(2026, 10, 20))
+    m = ds.money()
+    assert m["month"]["money"]["topupsUsd"] == m["prev"]["money"]["topupsUsd"] == 0
+    assert m["month"]["money"]["payments"] == 0
+    assert all(p["topupsUsd"] == 0 and p["usageUsd"] == 0 for p in m["series"])
+
+
+def test_this_months_topups_are_in_month_and_not_in_prev(monkeypatch):
+    now = local_ts(2026, 10, 20)
+    freeze(monkeypatch, now)
     uid = add_user()
-    add_job(uid, "running")
-    g = ds.collect()
-    with receiver() as rx:
-        ds.send(g, rx.getsockname())
-        lines = drain(rx, len(g))
-    assert sorted(lines) == sorted(f"acw.{k}:{v}|g" for k, v in g.items())
-    assert "acw.job_running_denoising:1|g" in lines
+    add_payment(uid, "succeeded", 1000, local_ts(2026, 10, 5))
+    add_payment(uid, "succeeded", 2500, local_ts(2026, 10, 19))
+    add_payment(uid, "succeeded", 400, local_ts(2026, 9, 28))  # last month
+    add_payment(uid, "succeeded", 9900, local_ts(2026, 8, 31))  # two months ago: in neither
+    add_payment(uid, "failed", 7777, local_ts(2026, 10, 6))  # not paid
+    add_ledger(uid, "usage", -3_000_000, local_ts(2026, 10, 7))
+    add_ledger(uid, "usage", -1_000_000, local_ts(2026, 9, 10))
+    m = ds.money()
+    assert (m["month"]["money"]["topupsUsd"], m["month"]["money"]["payments"], m["month"]["money"]["usageUsd"]) == (35.0, 2, 3.0)
+    assert (m["prev"]["money"]["topupsUsd"], m["prev"]["money"]["payments"], m["prev"]["money"]["usageUsd"]) == (4.0, 1, 1.0)
+    assert m["month"]["money"]["failedPayments"] == 1
+
+
+def test_the_month_starts_at_local_midnight_on_the_first_and_ends_now(monkeypatch):
+    now = local_ts(2026, 10, 20)
+    freeze(monkeypatch, now)
+    uid = add_user()
+    first = local_ts(2026, 10, 1, 0)
+    add_payment(uid, "succeeded", 100, first)  # exactly the start: this month
+    add_payment(uid, "succeeded", 200, first - 1)  # a second earlier: last month
+    add_payment(uid, "succeeded", 300, now)  # now is exclusive
+    m = ds.money()
+    assert (m["month"]["money"]["topupsUsd"], m["prev"]["money"]["topupsUsd"]) == (1.0, 2.0)
+
+
+def test_in_january_last_month_is_december_of_the_year_before(monkeypatch):
+    now = local_ts(2027, 1, 10)
+    freeze(monkeypatch, now)
+    uid = add_user()
+    add_payment(uid, "succeeded", 500, local_ts(2026, 12, 31, 23))
+    add_payment(uid, "succeeded", 100, local_ts(2027, 1, 2))
+    add_payment(uid, "succeeded", 900, local_ts(2026, 11, 30))
+    m = ds.money()
+    assert m["prev"]["range"] == {"start": local_ts(2026, 12, 1, 0), "end": local_ts(2027, 1, 1, 0)}
+    assert (m["month"]["money"]["topupsUsd"], m["prev"]["money"]["topupsUsd"]) == (1.0, 5.0)
+
+
+def test_the_series_covers_the_last_30_days_in_buckets(monkeypatch):
+    now = local_ts(2026, 10, 20)
+    freeze(monkeypatch, now)
+    uid = add_user()
+    t1, t2 = now - 2 * 86400, now - 29 * 86400
+    add_payment(uid, "succeeded", 1200, t1)
+    add_payment(uid, "succeeded", 800, t1 + 60)  # same bucket
+    add_payment(uid, "succeeded", 5000, now - 31 * 86400)  # older than 30 days: not in the series
+    add_ledger(uid, "usage", -2_000_000, t2)
+    m = ds.money()
+    pts = m["series"]
+    step = pts[1]["t"] - pts[0]["t"]
+    by = {p["t"]: p for p in pts}
+    assert by[(t1 // step) * step]["topupsUsd"] == 20.0
+    assert by[(t2 // step) * step]["usageUsd"] == 2.0
+    assert sum(p["topupsUsd"] for p in pts) == 20.0
+    assert all(b["t"] - a["t"] == step for a, b in zip(pts, pts[1:]))
 
 
 # ---------------------------------------------------------------------------------------------------------- send_loop
 
 def fake_clock_rounds(monkeypatch, rounds, start=1000.0):
-    """Runs send_loop for `rounds` rounds on a fake clock. loop.time() reads the clock, and each asyncio.sleep moves it on
-    by the seconds slept, so round k starts at start + (k - 1) while SEND_S is 1. The `rounds`-th sleep cancels the loop.
+    """Runs send_loop on a fake clock. loop.time() reads the clock and each asyncio.sleep moves it on by the seconds slept,
+    so round k (0-based) starts at start + k * INTERVAL_S. The `rounds`-th sleep cancels the loop, so `rounds` rounds run.
     Returns (sleeps, clock): the argument of every sleep, and the clock."""
     clock = types.SimpleNamespace(now=start)
     sleeps = []
@@ -303,128 +455,171 @@ def fake_clock_rounds(monkeypatch, rounds, start=1000.0):
     return sleeps, clock
 
 
-def test_the_loop_returns_at_once_when_off(monkeypatch):
-    monkeypatch.delenv("ACW_DASHBOARD_STATSD", raising=False)
+def run_loop():
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ds.send_loop())
 
-    def boom(*a, **k):
-        raise AssertionError("must not be used")
-    for name in ("collect", "send"):
-        monkeypatch.setattr(ds, name, boom)
-    monkeypatch.setattr(ds, "socket", types.SimpleNamespace(socket=boom))  # (not the real module: the event loop needs it)
-    loop = asyncio.new_event_loop()
-    try:
+
+class Recorder:
+    """Replaces collect, money and post: counts the calls and records each posted (url, body). `post_fails` and
+    `money_fails` are sets of 0-based call numbers that raise."""
+
+    def __init__(self, monkeypatch, post_fails=(), money_fails=(), collect_fails=()):
+        self.posts, self.collects, self.moneys = [], 0, 0
+        self.post_fails, self.money_fails, self.collect_fails = set(post_fails), set(money_fails), set(collect_fails)
+        monkeypatch.setattr(ds, "collect", self.collect)
+        monkeypatch.setattr(ds, "money", self.money)
+        monkeypatch.setattr(ds, "post", self.post)
+
+    def collect(self):
+        n, self.collects = self.collects, self.collects + 1
+        if n in self.collect_fails:
+            raise RuntimeError(f"collect {n} broke")
+        return {"n": n}
+
+    def money(self):
+        n, self.moneys = self.moneys, self.moneys + 1
+        if n in self.money_fails:
+            raise RuntimeError(f"money {n} broke")
+        return {"m": n}
+
+    def post(self, url, body):
+        n = len(self.posts)
+        self.posts.append((url, body))
+        if n in self.post_fails:
+            raise OSError(f"post {n} broke")
+
+
+URL = "http://192.168.1.200/api/acw"
+
+
+def test_the_loop_returns_at_once_when_the_url_is_unset(monkeypatch):
+    for value in (None, "", "  "):
+        if value is None:
+            monkeypatch.delenv("ACW_DASHBOARD_URL", raising=False)
+        else:
+            monkeypatch.setenv("ACW_DASHBOARD_URL", value)
+        rec = Recorder(monkeypatch)
+
+        async def boom(*a, **k):
+            raise AssertionError("must not sleep")
         monkeypatch.setattr(ds.asyncio, "sleep", boom)
-        assert loop.run_until_complete(ds.send_loop()) is None
-    finally:
-        loop.close()
+        assert asyncio.run(ds.send_loop()) is None
+        assert rec.collects == rec.moneys == 0 and rec.posts == []
 
 
+def test_the_first_round_sends_live_and_money_then_sleeps_the_interval(monkeypatch):
+    monkeypatch.setenv("ACW_DASHBOARD_URL", URL)
+    rec = Recorder(monkeypatch)
+    sleeps, _ = fake_clock_rounds(monkeypatch, 1)
+    run_loop()
+    assert sleeps == [ds.INTERVAL_S] == [10]
+    assert rec.posts == [(URL, {"live": {"n": 0}, "money": {"m": 0}})]
 
 
-def test_the_loop_sends_a_round_then_sleeps_the_send_interval(monkeypatch, gpu):
-    with receiver() as rx:
-        host, port = rx.getsockname()
-        monkeypatch.setenv("ACW_DASHBOARD_STATSD", f"{host}:{port}")
-        sleeps, _ = fake_clock_rounds(monkeypatch, 1)
-        with pytest.raises(asyncio.CancelledError):
-            asyncio.run(ds.send_loop())
-        assert sleeps == [ds.SEND_S]
-        n = len(ds.collect())
-        lines = drain(rx, n)
-    assert "acw.jobs_running:0|g" in lines and "acw.gpu_worker:0|g" in lines
+def test_later_rounds_within_the_money_interval_send_only_live(monkeypatch):
+    monkeypatch.setenv("ACW_DASHBOARD_URL", URL)
+    rec = Recorder(monkeypatch)
+    rounds = ds.MONEY_S // ds.INTERVAL_S  # rounds 0 .. rounds-1 start less than MONEY_S after the first
+    sleeps, _ = fake_clock_rounds(monkeypatch, rounds)
+    run_loop()
+    assert sleeps == [ds.INTERVAL_S] * rounds
+    assert len(rec.posts) == rounds
+    assert rec.posts[0][1] == {"live": {"n": 0}, "money": {"m": 0}}
+    assert all(set(body) == {"live"} for _, body in rec.posts[1:])
+    assert [body["live"]["n"] for _, body in rec.posts] == list(range(rounds))
+    assert rec.moneys == 1 and rec.collects == rounds
 
 
-def test_rounds_within_the_interval_resend_the_count_and_it_is_counted_again_after_it(monkeypatch):
-    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
-    counts = iter([{"x": 1}, {"x": 2}])
-    collected = []
-
-    def collect():
-        collected.append(1)
-        return next(counts)
-    monkeypatch.setattr(ds, "collect", collect)
-    sent = []
-    monkeypatch.setattr(ds, "send", lambda g, a: sent.append(g))
-    # rounds start at t, t+1, ... t+10: counted at t and at t+10 (INTERVAL_S later), the rounds between resend the count
-    sleeps, _ = fake_clock_rounds(monkeypatch, 11)
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(ds.send_loop())
-    assert sleeps == [ds.SEND_S] * 11
-    assert len(collected) == 2
-    assert sent == [{"x": 1}] * 10 + [{"x": 2}]
+def test_money_comes_again_after_money_s_and_then_every_money_s(monkeypatch):
+    monkeypatch.setenv("ACW_DASHBOARD_URL", URL)
+    rec = Recorder(monkeypatch)
+    per = ds.MONEY_S // ds.INTERVAL_S
+    rounds = 2 * per + 1  # rounds 0, per, 2 * per carry money
+    fake_clock_rounds(monkeypatch, rounds)
+    run_loop()
+    with_money = [i for i, (_, body) in enumerate(rec.posts) if "money" in body]
+    assert with_money == [0, per, 2 * per]
+    assert [rec.posts[i][1]["money"] for i in with_money] == [{"m": 0}, {"m": 1}, {"m": 2}]
+    assert rec.moneys == 3 and len(rec.posts) == rounds
 
 
-def test_a_failing_count_drops_the_stored_count_until_the_next_good_one(monkeypatch):
-    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
-    outcomes = iter([{"x": 1}, RuntimeError("boom"), {"x": 3}])
+def test_money_is_timed_by_the_loop_clock_not_the_round_count(monkeypatch):
+    """A slow round (the clock jumps) brings the money summary earlier in rounds."""
+    monkeypatch.setenv("ACW_DASHBOARD_URL", URL)
+    Recorder(monkeypatch)
+    sleeps, clock = fake_clock_rounds(monkeypatch, 4)
+    # round 0 normal, round 1 slow, so round 2 is due, round 3 not
+    posts_seen = []
 
-    def collect():
-        o = next(outcomes)
-        if isinstance(o, Exception):
-            raise o
-        return o
-    monkeypatch.setattr(ds, "collect", collect)
-    sent = []
-    monkeypatch.setattr(ds, "send", lambda g, a: sent.append(g))
-    fake_clock_rounds(monkeypatch, 21)  # counts at t, t+10, t+20
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(ds.send_loop())
-    # the count of t is sent until t+10; the failing count at t+10 sends nothing until the good one at t+20
-    assert sent == [{"x": 1}] * 10 + [{"x": 3}]
+    def post(url, body):
+        posts_seen.append(body)
+        if len(posts_seen) == 2:
+            clock.now += ds.MONEY_S
+    monkeypatch.setattr(ds, "post", post)
+    run_loop()
+    assert ["money" in b for b in posts_seen] == [True, False, True, False]
 
 
-def test_a_failing_count_sends_nothing_and_is_logged_once_within_one_interval(monkeypatch, caplog):
-    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
-    runs = []
-
-    def broken():
-        runs.append(1)
-        raise RuntimeError("database is locked")
-    monkeypatch.setattr(ds, "collect", broken)
-    sent = []
-    monkeypatch.setattr(ds, "send", lambda g, a: sent.append(g))
-    sleeps, _ = fake_clock_rounds(monkeypatch, 5)  # one count, then four rounds that do not count
+def test_a_failing_post_is_logged_once_and_the_loop_goes_on(monkeypatch, caplog):
+    monkeypatch.setenv("ACW_DASHBOARD_URL", URL)
+    rec = Recorder(monkeypatch, post_fails=range(100))
+    sleeps, _ = fake_clock_rounds(monkeypatch, 6)
     with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
-        with pytest.raises(asyncio.CancelledError):
-            asyncio.run(ds.send_loop())
-    assert sleeps == [ds.SEND_S] * 5  # the loop went on every round
-    assert len(runs) == 1 and not sent
+        run_loop()
+    assert sleeps == [ds.INTERVAL_S] * 6  # it slept after each failure
+    assert len(rec.posts) == 6 and rec.collects == 6
     records = [r for r in caplog.records if r.name == "acw.dashboard_stats"]
-    assert len(records) == 1 and "database is locked" in caplog.text
+    assert len(records) == 1 and "post 0 broke" in caplog.text
 
 
-def test_a_failing_count_is_logged_once_across_several_intervals(monkeypatch, caplog):
-    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
-    runs = []
-
-    def broken():
-        runs.append(1)
-        raise RuntimeError("database is locked")
-    monkeypatch.setattr(ds, "collect", broken)
-    sent = []
-    monkeypatch.setattr(ds, "send", lambda g, a: sent.append(g))
-    fake_clock_rounds(monkeypatch, 21)  # counts at t, t+10, t+20: all fail
+def test_the_log_is_armed_again_after_a_good_round(monkeypatch, caplog):
+    monkeypatch.setenv("ACW_DASHBOARD_URL", URL)
+    # posts 0, 1 fail; 2 succeeds; 3 and 4 fail again
+    Recorder(monkeypatch, post_fails={0, 1, 3, 4})
+    fake_clock_rounds(monkeypatch, 6)
     with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
-        with pytest.raises(asyncio.CancelledError):
-            asyncio.run(ds.send_loop())
-    assert len(runs) == 3 and not sent
-    records = [r for r in caplog.records if r.name == "acw.dashboard_stats"]
-    assert len(records) == 1
+        run_loop()
+    msgs = [r.exc_info[1].args[0] for r in caplog.records if r.name == "acw.dashboard_stats"]
+    assert msgs == ["post 0 broke", "post 3 broke"]
 
 
-def test_the_log_is_armed_again_after_a_good_count(monkeypatch, caplog):
-    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
-    outcomes = iter([RuntimeError("a"), {"x": 1}, RuntimeError("c")])
-
-    def collect():
-        o = next(outcomes)
-        if isinstance(o, Exception):
-            raise o
-        return o
-    monkeypatch.setattr(ds, "collect", collect)
-    monkeypatch.setattr(ds, "send", lambda g, a: None)
-    fake_clock_rounds(monkeypatch, 21)  # counts at t (fails), t+10 (good), t+20 (fails)
+def test_a_failing_count_is_logged_once_and_sends_nothing_that_round(monkeypatch, caplog):
+    monkeypatch.setenv("ACW_DASHBOARD_URL", URL)
+    rec = Recorder(monkeypatch, collect_fails={0, 1})
+    fake_clock_rounds(monkeypatch, 4)
     with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
-        with pytest.raises(asyncio.CancelledError):
-            asyncio.run(ds.send_loop())
-    assert [r.exc_info[1].args[0] for r in caplog.records if r.name == "acw.dashboard_stats"] == ["a", "c"]
+        run_loop()
+    assert [b["live"]["n"] for _, b in rec.posts] == [2, 3]
+    assert len([r for r in caplog.records if r.name == "acw.dashboard_stats"]) == 1
+    # the money summary was not tried in the rounds whose count failed, so it comes with the first good round
+    assert "money" in rec.posts[0][1] and "money" not in rec.posts[1][1]
+
+
+def test_a_failing_money_summary_is_logged_and_retried_next_round(monkeypatch, caplog):
+    monkeypatch.setenv("ACW_DASHBOARD_URL", URL)
+    rec = Recorder(monkeypatch, money_fails={0, 1})
+    fake_clock_rounds(monkeypatch, 5)
+    with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
+        run_loop()
+    assert rec.moneys == 3  # tried in rounds 0, 1 (failed) and 2 (good), then not again for MONEY_S
+    assert [("money" in b) for _, b in rec.posts] == [True, False, False]  # nothing was posted in the two failed rounds...
+    assert [b["live"]["n"] for _, b in rec.posts] == [2, 3, 4]
+    assert len([r for r in caplog.records if r.name == "acw.dashboard_stats"]) == 1  # ...and the two failures logged once
+
+
+def test_the_real_collect_and_money_are_posted_end_to_end(monkeypatch, gpu, no_proxy):
+    freeze_now = local_ts(2026, 10, 20)
+    freeze(monkeypatch, freeze_now)
+    uid = add_user()
+    add_job(uid, "running")
+    add_payment(uid, "succeeded", 1000, local_ts(2026, 10, 5))
+    with Sink() as sink:
+        monkeypatch.setenv("ACW_DASHBOARD_URL", sink.url)
+        fake_clock_rounds(monkeypatch, 2)
+        run_loop()
+    assert len(sink.requests) == 2
+    first, second = (json.loads(r["body"]) for r in sink.requests)
+    assert first["live"]["job_running_denoising"] == 1 and first["live"]["jobs_running"] == 1
+    assert first["money"]["month"]["money"]["topupsUsd"] == 10.0 and first["money"]["series"]
+    assert set(second) == {"live"}
