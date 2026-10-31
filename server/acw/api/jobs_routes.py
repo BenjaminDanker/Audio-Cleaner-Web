@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import auth, db, edit_preview, edit_store, edit_subtitles, editing, job_resources, job_view, jobs, keycaps, stretch, webhooks
+from .. import auth, db, edit_preview, edit_store, edit_subtitles, editing, job_resources, job_view, jobs, keycaps, security, stretch, webhooks
 from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, client_net, enforce, uploads
@@ -158,6 +158,7 @@ def create(body: CreateJob, request: Request, response: Response, principal: aut
             idempotency=idem,
             timeline=body.timeline,
             max_cost_micros=body.maxCostMicros,
+            local_origin=security.is_local(request.client.host if request.client else None, request.headers),
         )
     except jobs.Replay as r:  # a parallel request with the same key won
         return _replayed({"id": r.job_id, "estCostMicros": r.est_cost_micros}, response)

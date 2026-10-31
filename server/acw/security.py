@@ -74,6 +74,12 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def is_local(client_host: str | None, headers) -> bool:
+    """Sent from this machine itself, not through the tunnel: everything from outside comes through Caddy, which always adds
+    X-Forwarded-For, while a program on this machine talks to 127.0.0.1 directly. (Works for requests and WebSockets alike.)"""
+    return client_host in ("127.0.0.1", "::1") and "x-forwarded-for" not in headers
+
+
 def user_agent(request: Request) -> str:
     return (request.headers.get("user-agent") or "")[:300]
 

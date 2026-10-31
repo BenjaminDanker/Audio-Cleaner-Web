@@ -513,7 +513,8 @@ systemctl --user enable --now acw-mirror.timer >/dev/null 2>&1
 if [ "$BULK_TUNNEL" = 0 ]; then
   say_warn "acw-tunnel-bulk (uploads/downloads on their own SSH connection) is installed but not enabled: after the VPS key allows port 18794, run 'acw-ctl enable --now acw-tunnel-bulk' (docs/operations.md, Bulk transfers)"
 fi
-# Retired units: the owner dashboard (acw-admin.service, 2026-10-31) moved onto the home page.
+# Retired: the owner dashboard (acw-admin.service, 2026-10-31) moved onto the home page; its machine-graph history went with it.
+rm -f "$H/data/samples.sqlite3" "$H/data/samples.sqlite3-wal" "$H/data/samples.sqlite3-shm"
 for old in acw-admin.service; do
   if [ -f "$U/$old" ]; then systemctl --user disable --now "$old" >/dev/null 2>&1 || true; rm -f "$U/$old"; units_changed=1; fi
 done

@@ -2,7 +2,7 @@
 
 The home page shows them: dashboard_stats.py sends this month, last month and the last 30 days to it, and `acw-admin top` and
 `acw-admin problems` (top spenders, failed jobs, money problems, unusual live session ends, alerts) answer its admin side.
-The machine history comes from acw/samples.py (recorded by the monitor every 2 minutes).
+Machine history is the home page's own (it measures the machine itself).
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import math
 import sqlite3
 import time
 
-from . import job_view, samples
+from . import job_view
 from .billing import pricing
 from .config import get_settings
 
@@ -178,7 +178,7 @@ def series(start: int | None = None, end: int | None = None) -> dict:
                            "signups": signups.get(t, 0), "activeUsers": active.get(t, 0), "jobsDone": done.get(t, 0),
                            "jobsFailed": failed.get(t, 0), "liveHours": live.get(t, 0)})
             t += bucket
-        return {"bucket": bucket, "points": points, "machine": samples.series(start, end, bucket)}
+        return {"bucket": bucket, "points": points}
     finally:
         c.close()
 

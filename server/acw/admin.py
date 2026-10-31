@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--channel", choices=("obs-plugin",), help="only this channel")
     p.add_argument("--verify", action="store_true", help="hash every served file against its recorded checksum; no network")
     p.add_argument("--status", action="store_true", help="print what is served and when it was last mirrored; no network")
-    p = sub.add_parser("maintenance", help="only admin accounts' work runs: others' jobs wait in the queue, their new live sessions are refused")
+    p = sub.add_parser("maintenance", help="only work sent from this machine (tests, maintenance) and admin accounts' runs: others' jobs wait, their new live sessions are refused")
     p.add_argument("do", choices=("on", "off", "status"))
     p.add_argument("--reason", default="", help="why (kept in the audit log)")
     p.add_argument("--json", action="store_true")
@@ -177,7 +177,8 @@ def main(argv: list[str] | None = None) -> None:
         held = 0
         if st is not None:
             admins = maintenance.admin_ids()
-            held = sum(1 for r in db.all_rows("SELECT user_id FROM jobs WHERE status = 'queued' AND started_at IS NULL") if r["user_id"] not in admins)
+            held = sum(1 for r in db.all_rows("SELECT user_id FROM jobs WHERE status = 'queued' AND started_at IS NULL AND local_origin = 0")
+                       if r["user_id"] not in admins)
         out = {"on": st is not None, "since": (st or {}).get("since"), "reason": (st or {}).get("reason", ""), "waiting": held}
         print(json.dumps(out) if a.json else ("on since " + time.strftime("%Y-%m-%d %H:%M", time.localtime(out["since"] or 0))
                                               + f" ({out['waiting']} job(s) waiting)" if out["on"] else "off"))

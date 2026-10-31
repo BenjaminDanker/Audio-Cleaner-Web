@@ -278,14 +278,13 @@ last month and the last 30 days to the page, and its admin side runs `acw-admin 
 `acw-admin problems --json` (failed jobs, money problems, unusual live session ends, alerts). The separate owner dashboard
 (`acw-admin.service` on 127.0.0.1:8796, opened over SSH) was retired on 2026-10-31; install.sh removes its unit.
 
-The machine graphs come from `data/samples.sqlite3` (`acw/samples.py`): the monitor records one row every 2 minutes
-(CPU, memory, GPU, disk, queue, live), kept a little over a year. Card fees are an estimate (2.9 % + 30 c); Stripe's
-dashboard has the exact ones.
+Machine graphs are the home page's own. Card fees are an estimate (2.9 % + 30 c); Stripe's dashboard has the exact ones.
 
 ## Maintenance
 
 `acw-admin maintenance on [--reason TEXT]` / `off` / `status` (also a button on the home page's admin side). While it is on,
-only admin accounts (`ACW_ADMIN_EMAILS`) get work done: everyone else's file jobs are still taken and wait in the queue (the
+only work sent from this machine itself (tests and maintenance work: talking to 127.0.0.1 directly, not through the tunnel; a job
+remembers this in `jobs.local_origin`) and admin accounts' work (`ACW_ADMIN_EMAILS`) gets done: everyone else's file jobs are still taken and wait in the queue (the
 site shows them as paused for maintenance) and start when it ends; a job that had already started finishes. New live sessions
 from everyone else are refused with a short message (a live session can't wait); running ones continue. The switch is the
 `maintenance` row of the database's `meta` table, so the web, live and worker processes all see it at once.

@@ -467,6 +467,7 @@ def create_job(
     idempotency: tuple[str, str] | None = None,
     timeline: object | None = None,
     max_cost_micros: int | None = None,
+    local_origin: bool = False,
 ) -> dict:
     settings = get_settings()
     ext = Path(filename).suffix.lower()
@@ -588,10 +589,10 @@ def create_job(
                     ) from e
             c.execute(
                 "INSERT INTO jobs(id, user_id, kind, tier, status, params_json, input_name, input_bytes,"
-                " claimed_seconds, hold_id, est_cost_micros, created_at, expires_at, api_key_id)"
-                " VALUES (?,?,?,?, 'uploading', ?,?,?,?,?,?,?,?,?)",
+                " claimed_seconds, hold_id, est_cost_micros, created_at, expires_at, api_key_id, local_origin)"
+                " VALUES (?,?,?,?, 'uploading', ?,?,?,?,?,?,?,?,?,?)",
                 (job_id, user_id, kind, tier, json.dumps(params), filename[:200], size_bytes,
-                 claimed_seconds, hold_id, est, now, now + UPLOAD_FIRST_BYTE_SECONDS, api_key_id),
+                 claimed_seconds, hold_id, est, now, now + UPLOAD_FIRST_BYTE_SECONDS, api_key_id, 1 if local_origin else 0),
             )
             if callback_url:
                 c.execute(

@@ -1,4 +1,5 @@
-"""Maintenance: while it is on, only admin accounts (ACW_ADMIN_EMAILS) get work done.
+"""Maintenance: while it is on, only work sent from this machine itself (tests and maintenance work: not through the tunnel) and
+admin accounts' work (ACW_ADMIN_EMAILS) gets done.
 
 Everyone else's file jobs are still taken and wait in the queue (shown to them as paused for maintenance) and start when it ends;
 a job that had already started finishes, later stages included. New live sessions from everyone else are refused with a short
@@ -55,16 +56,18 @@ def admin_ids() -> set[str]:
 
 
 def blocks_user(user_id: str) -> bool:
-    """Whether maintenance keeps this account's new work from starting."""
+    """Whether maintenance keeps this account's new work from starting (work sent from this machine is never kept)."""
     return state() is not None and user_id not in admin_ids()
 
 
 def _held(job: dict, admins: set[str]) -> bool:
-    return job.get("status") == "queued" and job.get("started_at") is None and job.get("user_id") not in admins
+    return (job.get("status") == "queued" and job.get("started_at") is None and not job.get("local_origin")
+            and job.get("user_id") not in admins)
 
 
 def runnable(rows: list[dict]) -> list[dict]:
-    """The queued jobs a worker may take now: all of them, or during maintenance the admins' and the ones already started."""
+    """The queued jobs a worker may take now: all of them, or during maintenance the local ones, the admins' and the ones already
+    started."""
     if not rows or state() is None:
         return rows
     admins = admin_ids()
@@ -73,4 +76,4 @@ def runnable(rows: list[dict]) -> list[dict]:
 
 def paused(job: dict) -> bool:
     """A queued job that waits for maintenance to end."""
-    return job.get("status") == "queued" and job.get("started_at") is None and state() is not None and job.get("user_id") not in admin_ids()
+    return state() is not None and _held(job, admin_ids())

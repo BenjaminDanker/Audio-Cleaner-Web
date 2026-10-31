@@ -26,7 +26,7 @@ from dataclasses import replace
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, broker, db, keycaps, maintenance, metrics
+from .. import auth, broker, db, keycaps, maintenance, metrics, security
 from ..billing import ledger, pricing, trust
 from ..config import get_settings
 from ..security import LIMITS, client_net, limiter
@@ -517,7 +517,7 @@ async def stream_ws(ws: WebSocket) -> None:
         # A deploy is waiting for sessions to end (deploy/drain.sh): no new ones start.
         await _refuse(ws, "restarting", "Live audio is restarting for an update. Please try again in a minute.", 60, 1013)
         return
-    if await asyncio.to_thread(maintenance.blocks_user, principal.user_id):
+    if not security.is_local(ws.client.host if ws.client else None, ws.headers) and await asyncio.to_thread(maintenance.blocks_user, principal.user_id):
         await _refuse(ws, "maintenance", maintenance.MESSAGE, 300, 1013)
         return
     if _live.get(principal.user_id, 0) >= MAX_SESSIONS_PER_USER and not await _evict_stale(principal.user_id):

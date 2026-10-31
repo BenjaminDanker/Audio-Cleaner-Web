@@ -291,6 +291,8 @@ MIGRATIONS = [
     ("payments", "tax_transaction", "ALTER TABLE payments ADD COLUMN tax_transaction TEXT"),
     # Metrics (acw.metrics, acw.stats): how long a job waited for its first worker, and how the live frames fared.
     ("jobs", "wait_seconds", "ALTER TABLE jobs ADD COLUMN wait_seconds INTEGER"),
+    # Sent from this machine itself, not through the tunnel (tests and maintenance work): runs during maintenance (acw.maintenance).
+    ("jobs", "local_origin", "ALTER TABLE jobs ADD COLUMN local_origin INTEGER NOT NULL DEFAULT 0"),
     ("stream_sessions", "frames", "ALTER TABLE stream_sessions ADD COLUMN frames INTEGER NOT NULL DEFAULT 0"),
     ("stream_sessions", "late_frames", "ALTER TABLE stream_sessions ADD COLUMN late_frames INTEGER NOT NULL DEFAULT 0"),
     ("stream_sessions", "dropped_frames", "ALTER TABLE stream_sessions ADD COLUMN dropped_frames INTEGER NOT NULL DEFAULT 0"),
