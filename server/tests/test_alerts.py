@@ -279,7 +279,7 @@ def test_check_failure_does_not_stop_the_others(mail, monkeypatch):
     assert any(f.kind == "queue_long" for f in findings) and any(f.kind == "disk_low" for f in findings)
 
 
-# --- the machine samples the monitor records for the dashboard -------------------------------------------------------
+# --- the monitor no longer records machine samples (the owner dashboard's graphs went to the home page) -------------------
 
 def _quiet_run(monkeypatch, tmp_path):
     """What test_run_end_to_end_mails_once_and_resolves sets up: no units, models or sockets of this computer."""
@@ -292,60 +292,14 @@ def _quiet_run(monkeypatch, tmp_path):
     monkeypatch.setattr(monitor, "meminfo", lambda: {"MemAvailable": 20 * gb, "MemTotal": 31 * gb, "SwapTotal": 0, "SwapFree": 0})
 
 
-def _snap():
-    return {
-        "cpu": {"cores": 8, "busy": 2.0}, "memory": {"available": 1, "sliceHeadroom": 2}, "disk": {"free": 3},
-        "live": {"sessions": {"live": 1}, "engine": {"units": 1.0, "capacityUnits": 4.0}},
-        "gpu": {"card": {"down": "none"}}, "jobs": {"running": [], "queued": 2},
-    }
-
-
-def _samples_in_db():
-    import sqlite3
-
-    from acw import samples
-
-    if not samples.path().exists():
-        return []
-    c = sqlite3.connect(samples.path())
-    try:
-        return c.execute("SELECT ts, cpu_busy, jobs_queued FROM samples").fetchall()
-    finally:
-        c.close()
-
-
-def test_run_records_one_sample_per_pass(mail, monkeypatch, tmp_path):
-    from acw import broker
+def test_a_pass_records_no_machine_samples(mail, monkeypatch, tmp_path):
+    from acw.config import get_settings
 
     _quiet_run(monkeypatch, tmp_path)
-    monkeypatch.setattr(broker, "snapshot", _snap)
     findings = monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
-    rows = _samples_in_db()
-    assert len(rows) == 1 and rows[0][1:] == (2.0, 2)  # one row per pass: cpu busy and jobs queued
     assert not any("sample" in f.kind for f in findings)
-    assert mail == []
-
-
-@pytest.mark.parametrize("what", ["snapshot", "record"])
-def test_a_failing_sample_never_becomes_a_finding_or_stops_the_other_checks(mail, monkeypatch, tmp_path, caplog, what):
-    from acw import broker, samples
-
-    _quiet_run(monkeypatch, tmp_path)
-    monkeypatch.setattr(broker, "snapshot", _snap)
-
-    def boom(*a, **kw):
-        raise RuntimeError("disk full")
-
-    monkeypatch.setattr(broker if what == "snapshot" else samples, what, boom)
-    with caplog.at_level("ERROR"):
-        findings = monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
-    kinds = {f.kind for f in findings}
-    assert not any("sample" in k for k in kinds)
-    assert not any(f.bad for f in findings)
-    assert {"queue_long", "disk_low"} <= kinds  # the checks around it still ran
-    assert any("check samples failed" in r.getMessage() for r in caplog.records)
-    assert mail == []
-    assert db.one("SELECT 1 FROM alert_state WHERE kind LIKE '%sample%'") is None
+    assert not list(get_settings().data_dir.glob("samples.sqlite3*"))
+    assert not hasattr(monitor, "samples") and mail == []
 
 
 # --- timer-started services: a clean run resolves the alert its failure opened ----------------------------------------
