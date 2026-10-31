@@ -240,4 +240,8 @@ fn main() {
         }
     }
     log!("stopping");
+    // Leave without the normal exit's cleanup: it runs the speech library's global destructors while a "live-captions" decoder
+    // thread can still be inside it (a segfault on every stop with a caption model loaded). Nothing here needs cleaning up:
+    // the socket file is replaced at the next start and the log is written unbuffered.
+    unsafe { libc::_exit(0) }
 }
