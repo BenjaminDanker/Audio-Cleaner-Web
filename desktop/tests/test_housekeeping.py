@@ -83,7 +83,14 @@ def test_a_job_writes_its_work_files_to_the_scratch_folder(speech_wav, tmp_path,
     monkeypatch.setenv("ACW_DESKTOP_SCRATCH", str(tmp_path / "scratch"))
     seen = []
     real = engine.shutil.rmtree
-    monkeypatch.setattr(engine.shutil, "rmtree", lambda work, *a, **k: seen.append(Path(work).parent) or real(work, *a, **k))
+
+    def record(work, *args, **kwargs):
+        # rmtree is process-wide: a cleanup thread left by an earlier test can remove its own folder meanwhile
+        if Path(work).resolve().is_relative_to(tmp_path.resolve()):
+            seen.append(Path(work).parent)
+        return real(work, *args, **kwargs)
+
+    monkeypatch.setattr(engine.shutil, "rmtree", record)
     out = tmp_path / "out"
     result = engine.process(speech_wav, engine.JobOptions(audio_format="flac"), out_dir=out)
     assert seen == [tmp_path / "scratch"]

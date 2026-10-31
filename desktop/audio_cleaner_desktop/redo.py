@@ -321,7 +321,7 @@ def run(
             if kept_info.get("fallback"):
                 notice = "; ".join(filter(None, [notice, "this computer's own video encoder wasn't available, so the picture was "
                                                          "saved in a simpler format and the file is bigger than usual"]))
-            x = y = None
+            x = y = inputs = None  # (the inputs hold the decoded recording and the reference: Windows can't delete a mapped file)
             _check_cancel(cancel)
             sidecar = sub_tmp is not None and not embed
             final, sub_final = engine.place_result(dest_dir, out_stem, ext, tmp_out, sub_tmp if sidecar else None, sub_kind)
@@ -334,11 +334,11 @@ def run(
             editor_job.remember(job, done, decided)
             job.add_save([final, *([sub_final] if sub_final else [])], made)
         except BaseException as e:
-            x = y = None
+            x = y = inputs = None
             traceback.clear_frames(e.__traceback__)
             raise
         finally:
-            x = y = None
+            x = y = inputs = None
             try:
                 shutil.rmtree(work)
             except FileNotFoundError:

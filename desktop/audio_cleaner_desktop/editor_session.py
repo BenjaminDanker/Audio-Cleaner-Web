@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 
@@ -60,7 +61,10 @@ class Session:
             if progress:
                 progress(1.0)
             return session
-        except BaseException:
+        except BaseException as e:
+            # Windows can't delete a mapped file: let go of the decoded recording here and in the error's frames first
+            inputs = session = None
+            traceback.clear_frames(e.__traceback__)
             editor_job.remove_work(work)
             raise
 
@@ -127,7 +131,9 @@ class PlanSession:
             x = pipeline.decode_for_clean(ff, path, info, engine.MAX_SECONDS, work_dir=work)
             inputs = editor.Inputs(x, copies.source_id_of(copies.fingerprint(path)))
             return cls(path, info, work, inputs, threads)
-        except BaseException:
+        except BaseException as e:
+            x = inputs = None  # (as above)
+            traceback.clear_frames(e.__traceback__)
             editor_job.remove_work(work)
             raise
 
