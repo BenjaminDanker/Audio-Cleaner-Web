@@ -52,7 +52,7 @@ console.log(JSON.stringify(out));
 def js_decide(rows: list[dict]) -> list[dict]:
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "rows.json").write_text(json.dumps(rows))
-        (Path(d) / "decide.mjs").write_text(JS_DECIDE % {"web": str(ROOT / "web")})
+        (Path(d) / "decide.mjs").write_text(JS_DECIDE % {"web": (ROOT / "web").as_uri()})
         out = subprocess.run(["node", str(Path(d) / "decide.mjs"), str(Path(d) / "rows.json")], capture_output=True, text=True, check=True)
     return json.loads(out.stdout)
 

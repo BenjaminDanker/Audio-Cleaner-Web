@@ -46,7 +46,8 @@ def test_close_orphans_closes_an_active_session_nothing_runs():
 
 def test_the_live_route_tunnel_units_and_install_all_point_at_the_live_process():
     """acw-live listens on 8795 (loopback), its tunnel carries it to the VPS's 18795, the VPS sends the live WebSocket
-    there only, and install.sh restarts the live tunnel with the rest. The free tools may fetch models from Hugging Face."""
+    there only, and install.sh restarts the live tunnel with the rest. The free tools may fetch models from Hugging Face,
+    and the human check may load from Cloudflare."""
     deploy = Path(__file__).resolve().parents[2] / "deploy"
     unit = (deploy / "systemd/acw-live.service").read_text()
     assert "acw.live_app:app --host 127.0.0.1 --port 8795" in unit and "0.0.0.0" not in unit
@@ -56,7 +57,13 @@ def test_the_live_route_tunnel_units_and_install_all_point_at_the_live_process()
     live_route = caddy.split("handle @acw_ws {")[1].split("handle ")[0]
     assert re.findall(r"reverse_proxy (\S+)", live_route) == ["127.0.0.1:18795"]
     csp = re.search(r'Content-Security-Policy "([^"]*)"', caddy).group(1)
-    assert re.search(r"connect-src 'self' https://huggingface.co https://\*\.huggingface.co https://\*\.hf.co;", csp)
+    assert re.search(r"connect-src 'self' https://huggingface.co https://\*\.huggingface.co https://\*\.hf.co"
+                     r" https://challenges.cloudflare.com;", csp)
+    directives = {d.split()[0]: d.split()[1:] for d in csp.split(";") if d.strip()}
+    # Turnstile's script and frame are the only third-party origins they allow: script-src names no other host, and
+    # frame-src is exactly the Cloudflare challenge origin.
+    assert [s for s in directives["script-src"] if not s.startswith("'")] == ["https://challenges.cloudflare.com"]
+    assert directives["frame-src"] == ["https://challenges.cloudflare.com"]
     # The new domain serves the API and the site from the root; the old address strips /audio before the same API routes
     # and sends every other /audio page to the new domain.
     assert re.findall(r"^\s+import (\w+)", (sites / "audiocleaner.live.caddy").read_text(), re.M) == ["acw_api", "acw_site", "acw_errors"]

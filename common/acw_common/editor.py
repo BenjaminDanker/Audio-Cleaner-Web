@@ -36,6 +36,7 @@ import math
 import shutil
 import threading
 import uuid
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -718,6 +719,7 @@ class _Render:
         self.work_dir, self.progress, self.cancel = work_dir, progress, cancel
         self.lru = _LRU(cache)
         self.temp: list[Path] = []  # (before the first `alloc`: it records the scratch files it makes here)
+        self.maps: list[weakref.ref] = []  # ... and their memory maps
         self.out = out if out is not None else self.alloc("out")
         self._scale: float | None = None
 
@@ -728,7 +730,9 @@ class _Render:
             return np.zeros(shape, np.float32)
         p = Path(self.work_dir) / f"editor-{name}-{uuid.uuid4().hex[:8]}.npy"
         self.temp.append(p)
-        return np.lib.format.open_memmap(p, mode="w+", dtype=np.float32, shape=shape)
+        m = np.lib.format.open_memmap(p, mode="w+", dtype=np.float32, shape=shape)
+        self.maps.append(weakref.ref(m))
+        return m
 
     def check(self) -> None:
         if self.cancel is not None and self.cancel.is_set():
@@ -897,6 +901,32 @@ class _Render:
 
     # ---- the steps
     def run(self) -> np.ndarray:
+        try:
+            out = self._run()
+        except BaseException:
+            self._drop_temp(close=False)  # (the error's traceback still holds the run's arrays: their maps stay open)
+            raise
+        self._drop_temp(close=True)
+        return out
+
+    def _drop_temp(self, close: bool) -> None:
+        """Delete the scratch files. Windows can't delete a file that is still mapped, and a map lives as long as any array refers
+        to it: after a run every map but the result's is closed first (nothing reads them any more; numpy has no public close).
+        What can't be deleted (the result's own file when it is a scratch file, or a map an error still holds) is left to the
+        work folder's own cleanup."""
+        if close:
+            for r in self.maps:
+                m = r()
+                if m is not None and m is not self.out and getattr(m, "_mmap", None) is not None:
+                    m._mmap.close()
+        self.maps.clear()
+        for p in self.temp:
+            try:
+                p.unlink(missing_ok=True)
+            except PermissionError:
+                pass
+
+    def _run(self) -> np.ndarray:
         lay, inputs = self.lay, self.inputs
         tasks = self.keys.tasks()
         order = {s: i for i, s in enumerate(STEPS)}
@@ -948,8 +978,6 @@ class _Render:
             self.level(E, P)
         if prog:
             prog(1.0)
-        for p in self.temp:
-            p.unlink(missing_ok=True)
         return self.out
 
     def level(self, E: np.ndarray, P: np.ndarray) -> None:

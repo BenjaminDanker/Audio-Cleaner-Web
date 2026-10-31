@@ -232,9 +232,18 @@ jobs:
       - name: Install Python dependencies (every package pinned by hash)
         # The two locks list each package with the sha256 of every file PyPI has for it (packaging/hash_lock.py
         # regenerates them): pip refuses anything that does not match, or that is not listed.
+        # cryptography (from 50) has no Intel-Mac wheel: pip builds it here. Built against Homebrew's OpenSSL it would load
+        # libssl.3.dylib at run time, and the app bundle has only one file of that name, Python's own older one (OpenSSL
+        # 3.0, without SSL_get0_group_name): the frozen app then fails to start. So it is built with OpenSSL linked in
+        # statically, and not from pip's cache (a wheel built earlier the other way would be taken again).
         run: |
           python -m pip install --upgrade pip
-          pip install --require-hashes -r desktop/requirements.lock -r desktop/requirements-build.lock
+          extra=()
+          if [ "${{ matrix.platform }}" = macos-x86_64 ]; then
+            export OPENSSL_STATIC=1 OPENSSL_DIR="$(brew --prefix openssl@3)"
+            extra=(--no-cache-dir)
+          fi
+          pip install "${extra[@]}" --require-hashes -r desktop/requirements.lock -r desktop/requirements-build.lock
 
       - name: Version
         # MAJOR.MINOR from the app, the run number as the last part (a tag desktop-vX.Y.Z: exactly X.Y.Z), written
