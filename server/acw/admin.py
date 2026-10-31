@@ -49,8 +49,19 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("email")
     p.add_argument("usd", type=float)
     p.add_argument("reason")
+    p.add_argument("--json", action="store_true", help="print the new balance as JSON")
+    p = sub.add_parser("take", help="remove credit from an account (support correction); the reason shows in their history")
+    p.add_argument("email")
+    p.add_argument("usd", type=float)
+    p.add_argument("reason")
+    p.add_argument("--json", action="store_true", help="print the new balance as JSON")
     p = sub.add_parser("user")
     p.add_argument("email")
+    p.add_argument("--json", action="store_true", help="the account, its balance, recent ledger and jobs as JSON")
+    p = sub.add_parser("users", help="list accounts (newest first), optionally matching an email fragment")
+    p.add_argument("--search", default="")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("suspend")
     p.add_argument("email")
     p.add_argument("reason")
@@ -96,13 +107,41 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit("amount must be between 0 and 1000 USD")
         ledger.credit(u["id"], int(round(a.usd * 1_000_000)), "grant", "admin", f"grant-{int(time.time() * 1000)}", a.reason[:200])
         db.audit("admin-cli", "grant", user_id=u["id"], detail=f"{a.usd} {a.reason}")
-        print(ledger.balance(u["id"]))
+        print(json.dumps(ledger.balance(u["id"])) if a.json else ledger.balance(u["id"]))
+    elif a.cmd == "take":
+        u = _user(a.email)
+        if not 0 < a.usd <= 1000:
+            sys.exit("amount must be between 0 and 1000 USD")
+        # a negative grant: it comes off what we gave (refund rules subtract grants), never below what is held for running work
+        taken = ledger.debit_available(u["id"], int(round(a.usd * 1_000_000)), "grant", "admin", f"take-{int(time.time() * 1000)}",
+                                       a.reason[:200], allow_partial=True)
+        db.audit("admin-cli", "take", user_id=u["id"], detail=f"{taken / 1_000_000:.2f} of {a.usd} {a.reason}")
+        out = {**ledger.balance(u["id"]), "taken_usd": taken / 1_000_000}
+        print(json.dumps(out) if a.json else out)
     elif a.cmd == "user":
         u = _user(a.email)
-        print({k: u[k] for k in ("id", "email", "status", "is_admin", "created_at", "stripe_customer_id", "auto_reload_enabled")})
-        print(ledger.balance(u["id"]))
-        for r in ledger.history(u["id"], 10):
-            print(r)
+        info = {k: u[k] for k in ("id", "email", "status", "is_admin", "created_at", "stripe_customer_id", "auto_reload_enabled")}
+        if a.json:
+            jobs = [dict(r) for r in db.all_rows(
+                "SELECT id, kind, status, created_at, finished_at, cost_micros, duration_seconds FROM jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+                (u["id"],))]
+            live = [dict(r) for r in db.all_rows(
+                "SELECT id, denoise_tier, caption_tier, status, started_at, seconds, cost_micros FROM stream_sessions WHERE user_id = ? ORDER BY started_at DESC LIMIT 10",
+                (u["id"],))]
+            print(json.dumps({"user": info, "balance": ledger.balance(u["id"]), "ledger": ledger.history(u["id"], 30), "jobs": jobs, "live": live}, default=str))
+        else:
+            print(info)
+            print(ledger.balance(u["id"]))
+            for r in ledger.history(u["id"], 10):
+                print(r)
+    elif a.cmd == "users":
+        like = f"%{a.search.strip().lower()}%"
+        rows = [dict(r) for r in db.all_rows(
+            "SELECT u.email, u.status, u.created_at, u.balance_micros, u.held_micros,"
+            " (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id) AS jobs,"
+            " (SELECT MAX(created_at) FROM jobs j WHERE j.user_id = u.id) AS last_job"
+            " FROM users u WHERE u.status != 'deleted' AND u.email LIKE ? ORDER BY u.created_at DESC LIMIT ?", (like, max(1, min(a.limit, 500))))]
+        print(json.dumps(rows) if a.json else "\n".join(f"{r['email']}  {r['status']}  ${r['balance_micros'] / 1e6:.2f}" for r in rows))
     elif a.cmd == "suspend":
         u = _user(a.email)
         with db.tx() as c:
