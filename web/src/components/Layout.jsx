@@ -70,7 +70,6 @@ function Header() {
           <NavLink to="/app" end>Cleanup</NavLink>
           <NavLink to="/app/live">Live</NavLink>
           {ready && signedIn && <NavLink to="/app/billing">Billing</NavLink>}
-          <Link to={{ pathname: '/', hash: '#pricing' }}>Pricing</Link>
         </nav>
         <div className="header-right">
           {ready && signedIn && balance && (

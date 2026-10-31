@@ -515,9 +515,8 @@ if [ "$BULK_TUNNEL" = 0 ]; then
 fi
 # Retired: the owner dashboard (acw-admin.service, 2026-10-31) moved onto the home page; its machine-graph history went with it.
 rm -f "$H/data/samples.sqlite3" "$H/data/samples.sqlite3-wal" "$H/data/samples.sqlite3-shm"
-for old in acw-admin.service; do
-  if [ -f "$U/$old" ]; then systemctl --user disable --now "$old" >/dev/null 2>&1 || true; rm -f "$U/$old"; units_changed=1; fi
-done
+old=acw-admin.service
+if [ -f "$U/$old" ]; then systemctl --user disable --now "$old" >/dev/null 2>&1 || true; rm -f "$U/$old"; units_changed=1; fi
 [ "$units_changed" = 1 ] && systemctl --user daemon-reload
 # Workers beyond the new count (moved to a smaller machine): stop them.
 for i in $(seq $(( WORKERS + 1 )) 16); do systemctl --user disable --now "acw-worker@$i.service" >/dev/null 2>&1 || true; done

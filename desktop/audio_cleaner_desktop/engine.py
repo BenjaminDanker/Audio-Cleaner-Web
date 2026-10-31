@@ -743,8 +743,8 @@ def process(
             if kept.get("fallback"):
                 notice = "; ".join(filter(None, [notice, "this computer's own video encoder wasn't available, so the "
                                                  "picture was saved in a simpler format and the file is bigger than usual"]))
-            # Windows can't delete a file that is still mapped.
-            x = y = None
+            # Windows can't delete a file that is still mapped: the editor's inputs hold the decoded recording (and the reference) too.
+            x = y = ref = inputs = None
             _check_cancel(cancel)
             sidecar = sub_tmp is not None and not embed
             final, sub_final = place_result(dest_dir, out_stem, ext, tmp_out, sub_tmp if sidecar else None, sub_kind)
@@ -761,7 +761,7 @@ def process(
         except BaseException as e:
             # A cancelled or failed job's traceback still holds the memory-mapped scratch arrays
             # (in the renderer's frames); Windows can't delete a file that is still mapped.
-            x = y = None
+            x = y = ref = inputs = None
             traceback.clear_frames(e.__traceback__)
             if keeper is not None:  # stopped: nothing is kept. Failed: what was made before it failed stays (changing it later may still work)
                 keeper.discard() if isinstance(e, Cancelled) else keeper.finish()
@@ -769,7 +769,7 @@ def process(
                 copies.delete_job_dir(Path(keep_dir).parent, Path(keep_dir).name)
             raise
         finally:
-            x = y = None
+            x = y = ref = inputs = None
             # Usually gone at once. On Windows a memory-mapped file can stay locked until the garbage collector lets
             # go of it: then the retries run in the background, so a stopped job is reported (and restartable) at
             # once. What a crash leaves behind is swept at the next start.
