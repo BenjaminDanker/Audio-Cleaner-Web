@@ -114,10 +114,12 @@ async def send_loop() -> None:
     while True:
         try:
             body = {"live": await asyncio.to_thread(collect)}
-            if loop.time() - money_at >= MONEY_S:
+            with_money = loop.time() - money_at >= MONEY_S
+            if with_money:
                 body["money"] = await asyncio.to_thread(money)
-                money_at = loop.time()
             await asyncio.to_thread(post, url, body)
+            if with_money:
+                money_at = loop.time()  # only once it arrived: after an outage the money comes back on the next round
             failing = False
         except Exception:  # noqa: BLE001
             if not failing:
