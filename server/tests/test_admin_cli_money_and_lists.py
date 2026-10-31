@@ -345,7 +345,6 @@ def test_users_json_and_text_agree_on_the_accounts(capsys):
     assert [l.split("  ")[0] for l in text] == [r["email"] for r in rows]
 
 
-@pytest.mark.xfail(strict=True, reason="product bug: admin.py users builds LIKE from the raw fragment; _ and % act as wildcards")
 def test_users_search_treats_percent_and_underscore_as_plain_characters(capsys):
     """Known product bug (xfail until fixed): the fragment goes into LIKE unescaped, so '_' matches any character and '%' matches anything."""
     user("a_b@example.com", 1)

@@ -46,7 +46,7 @@ AUDIT_ROUTINE = ("login", "user_created", "api_key_created", "api_key_revoked", 
 AUDIT_WITH_MONEY = (
     "tos_accepted", "checkout_started", "auto_reload_enabled", "auto_reload_disabled", "auto_reload_failed",
     "payment_refused_region", "suspended", "suspend", "unsuspend", "refund", "refund_unrecovered",
-    "payment_uncredited", "dispute_unrecovered", "efw_unrecovered", "grant", "account_deleted",
+    "payment_uncredited", "dispute_unrecovered", "efw_unrecovered", "grant", "take", "account_deleted",
 )
 
 _last: float | None = None  # monotonic time of the last sweep (None: not yet since start)

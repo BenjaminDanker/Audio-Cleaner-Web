@@ -135,12 +135,13 @@ def main(argv: list[str] | None = None) -> None:
             for r in ledger.history(u["id"], 10):
                 print(r)
     elif a.cmd == "users":
-        like = f"%{a.search.strip().lower()}%"
+        frag = a.search.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")  # typed text, not wildcards
+        like = f"%{frag}%"
         rows = [dict(r) for r in db.all_rows(
             "SELECT u.email, u.status, u.created_at, u.balance_micros, u.held_micros,"
             " (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id) AS jobs,"
             " (SELECT MAX(created_at) FROM jobs j WHERE j.user_id = u.id) AS last_job"
-            " FROM users u WHERE u.status != 'deleted' AND u.email LIKE ? ORDER BY u.created_at DESC LIMIT ?", (like, max(1, min(a.limit, 500))))]
+            " FROM users u WHERE u.status != 'deleted' AND u.email LIKE ? ESCAPE '\\' ORDER BY u.created_at DESC LIMIT ?", (like, max(1, min(a.limit, 500))))]
         print(json.dumps(rows) if a.json else "\n".join(f"{r['email']}  {r['status']}  ${r['balance_micros'] / 1e6:.2f}" for r in rows))
     elif a.cmd == "suspend":
         u = _user(a.email)
