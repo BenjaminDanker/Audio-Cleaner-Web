@@ -681,7 +681,9 @@ def main() -> int:
     db.init_db()
     findings = run()
     bad = [f.kind for f in findings if f.bad]
-    log.info("monitor: %d checks, problems: %s", len(findings), ", ".join(bad) or "none")
+    # every 2 minutes by the timer: a quiet pass leaves no line (problems are mailed and logged by acw.alerts)
+    if bad:
+        log.info("monitor: %d checks, problems: %s", len(findings), ", ".join(bad))
     return 0
 
 

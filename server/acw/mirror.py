@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -595,8 +596,10 @@ def run_once(cfg: Config | None = None, *, gh: GitHub | None = None, now: float 
                 c["last_run"] = int(now)
                 try:
                     results[channel] = fn(ctx)
+                    same = c.get("result") == results[channel] and not c.get("error")
                     c.update(last_ok=int(now), result=results[channel], error=None)
-                    log.info("%s: %s", channel, results[channel])
+                    # every 10 minutes by the timer: only a change ("published", a recovery) is worth a journal line
+                    (log.debug if same else log.info)("%s: %s", channel, results[channel])
                 except MirrorError as e:
                     results[channel] = f"FAILED: {e}"
                     c.update(error=str(e)[:500], last_error_at=int(now))
@@ -691,6 +694,7 @@ def main(force: bool = False, verify: bool = False, status: bool = False, only: 
         print("\n".join(problems) if problems else "all served files match their checksums")
         return 1 if problems else 0
     results = run_once(force=force, only=only)
-    for channel, text in results.items():
-        print(f"{channel}: {text}")
+    if sys.stdout.isatty():  # someone ran it by hand; the timer's runs are in the journal through the log already
+        for channel, text in results.items():
+            print(f"{channel}: {text}")
     return 1 if any(t.startswith("FAILED") for t in results.values()) else 0
