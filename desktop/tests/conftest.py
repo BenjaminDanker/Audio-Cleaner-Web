@@ -21,11 +21,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from audio_cleaner_desktop import resources  # noqa: E402
 
-# Imported here, on the main thread, before any window exists: the first import of these inside a worker thread (the live sound measuring its
-# Leveling gains) while the main thread runs Qt crashed the interpreter now and then (a segmentation fault while Python collected garbage in that thread).
-import pyloudnorm  # noqa: E402,F401
-import scipy.signal  # noqa: E402,F401
-
 SPEECH_SECONDS = 4  # length of the stand-in used where the dev sample is missing (CI)
 SPEECH_SAMPLE = Path.home() / "audio-cleaner" / "dev" / "live_opus.wav"
 FULL_FFMPEG = Path(os.environ.get("ACW_FULL_FFMPEG", Path.home() / "audio-cleaner" / "bin" / "ffmpeg"))

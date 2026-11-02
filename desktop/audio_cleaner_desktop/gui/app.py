@@ -1,13 +1,14 @@
 """Start the application: logging, style, theme and the main window."""
 from __future__ import annotations
 
+import gc
 import logging
 import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QEvent, Qt, Signal
+from PySide6.QtCore import QDir, QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -62,6 +63,27 @@ class Application(QApplication):
         return super().event(event)
 
 
+class MainThreadCollector(QObject):
+    """Python collects garbage in whichever thread happens to allocate when the count runs over. When that is a worker (reading a
+    file, measuring the Leveling gains) and the garbage holds the window's Qt objects (the widgets of a card that was replaced and the
+    functions connected to them), Qt deletes them outside the main thread and the app crashes (seen in the tests: a segmentation fault
+    while "Garbage-collecting" in a worker). So the automatic collection is off and this timer runs it on the main thread instead, at
+    the thresholds Python itself would use."""
+
+    def __init__(self, parent: QObject) -> None:
+        super().__init__(parent)
+        gc.disable()
+        self._threshold = gc.get_threshold()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.check)
+        self._timer.start(500)
+
+    def check(self) -> None:
+        count, (t0, t1, t2) = gc.get_count(), self._threshold
+        if count[0] > t0:
+            gc.collect(2 if count[1] > t1 and count[2] > t2 else 1 if count[1] > t1 else 0)
+
+
 def create_application(argv: list[str]) -> Application:
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = Application(argv)
@@ -73,6 +95,7 @@ def create_application(argv: list[str]) -> Application:
     app.setWindowIcon(QIcon(str(ICON)))
     app.setStyle("Fusion")
     tips.install(app)
+    app.collector = MainThreadCollector(app)
     return app
 
 
