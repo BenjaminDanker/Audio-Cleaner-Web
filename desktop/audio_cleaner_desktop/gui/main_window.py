@@ -124,6 +124,8 @@ class MainWindow(QMainWindow):
         self.doc: Doc | None = None  # the file in the editor
         self._saving: Worker | None = None  # a change to a finished job is being saved
         self._settings_dialog: SettingsDialog | None = None
+        self._to_probe: list[Doc] = []  # files added by the dozen are read a few at a time (not a thread each, all at once)
+        self._probing: set[Doc] = set()
         self._redo = redo.run  # (what makes a change: tests replace it)
         self.doc_env = doc_env or DocEnv(
             prefs=self.prefs, scratch=lambda: self.history.jobs_root, voice_ready=lambda: resources.voice_model_dir() is not None,
@@ -343,14 +345,33 @@ class MainWindow(QMainWindow):
             if self._missing:
                 item.probed = True
             else:
-                doc.open_file()
+                self._to_probe.append(doc)
             first = first or item
             added += 1
+        self._probe_more()
         if first is not None:
             self.open_item(first.id)
         self._draw_jobs()
         self._check_disk()
         return added
+
+    PROBES_AT_ONCE = 4
+
+    def _probe_more(self) -> None:
+        """Start reading the next waiting files (the one in the editor first), a few at a time."""
+        while self._to_probe and len(self._probing) < self.PROBES_AT_ONCE:
+            doc = self._to_probe.pop(0)
+            if doc.item is None or doc.item.id not in self._items:
+                continue
+            self._probing.add(doc)
+            doc.factsReady.connect(lambda d=doc: self._probed_one(d))
+            doc.unreadable.connect(lambda _m, d=doc: self._probed_one(d))
+            doc.open_file()
+
+    def _probed_one(self, doc: Doc) -> None:
+        self._probing.discard(doc)
+        if not self._closing:
+            self._probe_more()
 
     def _unreadable(self, doc: Doc, message: str) -> None:
         """A file that can't be read: it is not taken in, and it is said so (in the editor when it is the one that was to be shown)."""
@@ -387,6 +408,10 @@ class MainWindow(QMainWindow):
                 old.dispose()
         self.doc = doc
         if doc is not None:
+            if doc in self._to_probe:  # the one in the editor is read first
+                self._to_probe.remove(doc)
+                self._to_probe.insert(0, doc)
+                self._probe_more()
             doc.activate()
             if doc.is_job:
                 doc.open_session()
@@ -460,11 +485,15 @@ class MainWindow(QMainWindow):
         self._items.pop(item_id, None)
         doc, item.doc = item.doc, None
         if doc is not None:
+            self._probing.discard(doc)
+            if doc in self._to_probe:
+                self._to_probe.remove(doc)
             if self.doc is doc:
                 self.doc = None
                 self.studio.set_doc(None)
                 self.jobs.set_current(None)
             doc.dispose()
+        self._probe_more()
         self._draw_jobs()
         self._check_disk()
 

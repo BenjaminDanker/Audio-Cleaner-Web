@@ -104,15 +104,15 @@ def test_the_engines_ffmpeg_does_not_wait_for_its_cancel_watcher_after_every_pro
     import subprocess
     import sys
 
-    from audio_cleaner_desktop import resources
+    from pathlib import Path
 
-    ff = engine._DesktopFFmpeg(resources.ffmpeg_dir(), 1, cancel=threading.Event())
+    ff = engine._DesktopFFmpeg(Path("no-programs-are-run-here"), 1, cancel=threading.Event())
     quick = subprocess.Popen([sys.executable, "-c", "pass"])
     began = time.monotonic()
     for _ in range(20):
         with ff._guard(quick):
             pass
-    assert time.monotonic() - began < 0.5  # (the shared one: 20 x up to 0.1 s)
+    assert time.monotonic() - began < 1.0  # (the shared one: 20 x up to 0.1 s, so 1 to 2 s)
     quick.wait()
     slow = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
@@ -123,7 +123,7 @@ def test_the_engines_ffmpeg_does_not_wait_for_its_cancel_watcher_after_every_pro
         if slow.poll() is None:
             slow.kill()
     # with no cancel event there is no watcher at all
-    plain = engine._DesktopFFmpeg(resources.ffmpeg_dir(), 1)
+    plain = engine._DesktopFFmpeg(Path("no-programs-are-run-here"), 1)
     with plain._guard(quick):
         pass
 

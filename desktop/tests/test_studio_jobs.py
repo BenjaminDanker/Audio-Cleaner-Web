@@ -721,3 +721,29 @@ def test_files_that_wait_can_be_moved_earlier_or_later_in_line(keeper, tmp_path)
     assert wait_until(lambda: all(i.state == "done" for i in w._items.values()), 20)
     started = [e.name for e in sorted(w.history.search(), key=lambda e: e.id)]
     assert started == order  # they were started in the order they were put in
+
+
+def test_files_added_by_the_dozen_are_read_a_few_at_a_time_and_the_one_in_the_editor_first(jw, tmp_path):
+    jw.PROBES_AT_ONCE = 2
+    release = threading.Event()
+    seen = []
+    real = jw.fakes.probe
+
+    def slow(path, ff=None):
+        seen.append(path.name)
+        release.wait(5)
+        return real(path, ff)
+
+    jw.doc_env.probe = slow
+    names = [f"f{n}.wav" for n in range(6)]
+    for n in names:
+        (tmp_path / n).write_bytes(b"x" * 50)
+    jw.add_paths([tmp_path / n for n in names])
+    assert wait_until(lambda: len(seen) == 2, 5) and len(jw._probing) == 2 and len(jw._to_probe) == 4
+    jw.open_item(6)  # another one is asked for: it is next in line
+    assert jw._to_probe[0].name == "f5.wav"
+    release.set()
+    assert wait_until(lambda: all(i.probed for i in jw._items.values()), 10) and sorted(seen) == names
+    assert not jw._probing and not jw._to_probe
+    jw.remove_item(1)
+    assert len(jw._items) == 5
