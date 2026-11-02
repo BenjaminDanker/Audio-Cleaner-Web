@@ -149,6 +149,7 @@ def test_a_run_finishes_on_the_same_screen(window, tmp_path, runner):
     assert window.studio is s and window.doc is doc and s.stack.currentIndex() == 1 and windows_showing() == before
     assert s.start.mode == "files" and s.start.button.text() == "Open the file" and s.start.button.isEnabled()
     assert (tmp_path / "talk-cleaned.wav").read_bytes() == b"cleaned" and doc.entry is not None and doc.entry.status == "done"
+    assert wait_until(lambda: s.notes.count() > 0 and s.notes.itemAt(0).widget() is not None, 5)  # (the note comes with the screen's redraw after the run)
     assert "Saved as talk-cleaned.wav" in s.notes.itemAt(0).widget()._label.text()
     assert list(window.jobs._cards) == [("entry", doc.entry.id)]  # the finished job replaced the waiting one in the column
     assert window.jobs.current == ("entry", doc.entry.id)

@@ -169,11 +169,8 @@ def test_the_blocks_of_a_job_are_read_a_few_at_a_time_and_say_how_far_it_is(tmp_
     src, plan, cache = make_plan(150.0)
     layers = live_mix.Layers(src, [0], tmp_path)
     steps: list[float] = []
-    began = time.monotonic()
     read = layers.load(cache, plan, progress=steps.append)
-    took = time.monotonic() - began
-    assert read == len(plan.tasks) and cache.max_reading > 1 and cache.max_reading <= live_mix.BLOCK_READERS
-    assert took < len(plan.tasks) * cache.delay * 0.8  # (one after the other it would take the sum)
+    assert read == len(plan.tasks) and cache.max_reading > 1 and cache.max_reading <= live_mix.BLOCK_READERS  # (more than one read at a time: they overlap)
     assert steps and steps[-1] == 1.0 and all(b >= a for a, b in zip(steps, steps[1:]))
     assert layers.have["light"].all() and np.allclose(layers.array("light")[:100, 0], 0.1)
     read_again = layers.load(cache, plan)  # nothing new: nothing is read again

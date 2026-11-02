@@ -16,6 +16,7 @@ from studio_helpers import add_file, settle
 
 def type_name(w, text):
     box = w.studio.output.name
+    assert wait_until(lambda: box.isEnabled(), 5), "the name box is still off"  # (it is enabled at the screen's next redraw)
     box.setFocus()
     box.selectAll()
     if text:
@@ -152,6 +153,8 @@ def test_the_usual_name_follows_the_audio_file_type_setting_and_a_typed_name_doe
     (tmp_path / "mine.wav").write_bytes(b"x")
     window.add_paths([tmp_path / "mine.wav"])
     assert wait_until(lambda: window.doc.model is not None, 5)
+    settle(window)
+    assert wait_until(lambda: window.studio.output.name.isEnabled(), 5)
     mine = window.doc
     type_name(window, "mine.ogg")
     window.show_settings()
