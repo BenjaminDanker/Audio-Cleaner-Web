@@ -18,6 +18,7 @@ acw_common.editor (joins that look for a pause, loudness matching of the rebuilt
 """
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import uuid
@@ -29,6 +30,8 @@ import numpy as np
 from acw_common import clarity, editor
 from acw_common.timeline import Timeline
 
+log = logging.getLogger(__name__)
+
 SR = 48_000
 CELL = SR // 10  # availability is tracked per 100 ms
 RAMP_ECHO = int(0.05 * SR)
@@ -38,6 +41,7 @@ EDGE_REBUILD = int(0.25 * SR)
 LEVEL_MAX_DB = 12.0
 LEVEL_BUDGET_S = 60.0  # audio measured for all the leveled parts together (per part: at most 12 s)
 LAYERS = ("echo", "noise", "rebuild", "leveling")
+BLOCK_READERS = 4  # blocks of a job's cache read at the same time
 
 
 def ramp_gate(pos: np.ndarray, a: int, b: int, d: int, n: int) -> np.ndarray:
@@ -83,31 +87,48 @@ class Layers:
         cells = np.clip(pos // CELL, 0, len(self.have[step]) - 1)
         return self.have[step][cells]
 
-    def load(self, cache, plan: "editor.Plan") -> int:
-        """Lay out the blocks of `plan` that the cache has (and forget the ones it no longer has under these keys). Returns how many were read."""
+    def load(self, cache, plan: "editor.Plan", *, cancel: threading.Event | None = None, progress=None, workers: int = BLOCK_READERS) -> int:
+        """Lay out the blocks of `plan` that the cache has (and forget the ones it no longer has under these keys). Returns how many were read.
+        The blocks are read a few at a time (each is a small FLAC file that FFmpeg decodes: one after the other an hour took seconds per ten
+        minutes), and `progress(fraction)` says how far it is; `cancel` stops it (raises Cancelled)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from .engine import Cancelled
+
         for h in self.have.values():
             h[:] = False
-        read = 0
+        wanted = []
         for t in plan.tasks:
             ident = (t.step, t.channel, t.s, t.e)
             if not cache.has(t.key):
                 self.loaded.pop(ident, None)
                 continue
-            if self.loaded.get(ident) != t.key:
-                blk = cache.get(t.key)
-                if blk is None or len(blk) != t.e - t.s:
-                    self.loaded.pop(ident, None)
-                    continue
-                arr = self.array(t.step)
-                if t.step == "rebuild":
-                    cols = list(range(self.channels)) if t.channel == "mid" else [int(t.channel)]
-                    for c in cols:
-                        arr[t.s:t.e, c] = blk
-                else:
-                    arr[t.s:t.e, int(t.channel)] = blk
-                self.loaded[ident] = t.key
-                read += 1
-            self.mark(t.step, t.s, t.e)
+            wanted.append((t, ident))
+        todo = [(t, ident) for t, ident in wanted if self.loaded.get(ident) != t.key]
+        read = 0
+        if todo:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                for i, ((t, ident), blk) in enumerate(zip(todo, pool.map(lambda x: cache.get(x[0].key), todo))):
+                    if cancel is not None and cancel.is_set():
+                        pool.shutdown(wait=True, cancel_futures=True)
+                        raise Cancelled()
+                    if blk is None or len(blk) != t.e - t.s:
+                        self.loaded.pop(ident, None)
+                        continue
+                    arr = self.array(t.step)
+                    if t.step == "rebuild":
+                        cols = list(range(self.channels)) if t.channel == "mid" else [int(t.channel)]
+                        for c in cols:
+                            arr[t.s:t.e, c] = blk
+                    else:
+                        arr[t.s:t.e, int(t.channel)] = blk
+                    self.loaded[ident] = t.key
+                    read += 1
+                    if progress is not None:
+                        progress((i + 1) / len(todo))
+        for t, ident in wanted:
+            if self.loaded.get(ident) == t.key:
+                self.mark(t.step, t.s, t.e)
         return read
 
     def close(self) -> None:
@@ -139,7 +160,9 @@ def _snapshot_of(tl: Timeline, n: int) -> Snapshot:
 class LiveMix:
     """The sound of a timeline for the player. Thread-safe: the timeline and the switches can change while the sound is read."""
 
-    def __init__(self, layers: Layers, timeline: Timeline):
+    def __init__(self, layers: Layers, timeline: Timeline, *, background: bool = False):
+        """`background`: the Leveling gains (measured on what is heard, which takes seconds on a long file, the first time more for loading the
+        loudness meter) are worked out on a thread of their own, so the mix can play and be edited at once; they are applied when they are ready."""
         self.layers = layers
         self.frames, self.channels = layers.n, layers.channels
         self._lock = threading.Lock()
@@ -148,6 +171,10 @@ class LiveMix:
         self._timeline = timeline
         self._snap = Snapshot()
         self._gains: tuple = ()
+        self._background = background
+        self._gains_thread: threading.Thread | None = None
+        self._gains_again = False
+        self._closed = False
         self.set_timeline(timeline)
 
     # -- what the player and the job view use ---------------------------------------------------------------------
@@ -295,6 +322,38 @@ class LiveMix:
 
     # -- Leveling, previewed by loudness -------------------------------------------------------------------------------
     def _level_gains(self) -> None:
+        """Work out the Leveling gains: now, or (with `background`) on a thread that runs one measurement at a time and starts again when
+        something changed while it ran."""
+        if not self._background:
+            self._compute_gains()
+            return
+        with self._lock:
+            if self._gains_thread is not None and self._gains_thread.is_alive():
+                self._gains_again = True
+                return
+            self._gains_thread = threading.Thread(target=self._gains_worker, name="live-level-gains", daemon=True)
+            self._gains_thread.start()
+
+    def _gains_worker(self) -> None:
+        while not self._closed:
+            try:
+                self._compute_gains()
+            except Exception:  # noqa: BLE001 - the mix plays without them
+                log.warning("could not measure the Leveling gains", exc_info=True)
+            with self._lock:
+                if not self._gains_again:
+                    self._gains_thread = None
+                    return
+                self._gains_again = False
+
+    def wait_gains(self, timeout: float = 60.0) -> bool:
+        """Wait until the Leveling gains are worked out (a test, a save that wants them)."""
+        t = self._gains_thread
+        if t is not None:
+            t.join(timeout)
+        return self._gains_thread is None
+
+    def _compute_gains(self) -> None:
         """The gain that brings each leveled part to its loudness target, measured on what is heard there without Leveling."""
         with self._lock:
             snap, hear = self._snap, dict(self._hear)
@@ -307,6 +366,8 @@ class LiveMix:
         per = min(12.0, max(0.5, LEVEL_BUDGET_S / len(parts)))
         out = []
         for a, b, target in parts:
+            if self._closed:
+                return
             if target is None or b - a < int(0.4 * SR):
                 out.append((a, b, 1.0))
                 continue
@@ -336,4 +397,8 @@ class LiveMix:
         return [(a / SR, b / SR, 20.0 * math.log10(g)) for a, b, g in self._gains]
 
     def close(self) -> None:
+        self._closed = True
+        t = self._gains_thread
+        if t is not None and t is not threading.current_thread():
+            t.join(30)  # (it reads the memory maps that are about to go)
         self.layers.close()

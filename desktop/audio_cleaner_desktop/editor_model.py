@@ -1,6 +1,6 @@
-"""What the per-part editor shows and changes, without any widgets: the timeline being edited (the draft), the one the latest result was made
-from, the part that is selected, the suggestions and what was done with them, and, before a file is cleaned, the parts chosen to be
-processed. No Qt in here; gui/part_editor.py draws it and tells it what the user did.
+"""What the editor screen shows and changes, without any widgets: the timeline being edited (the draft), the one the latest result was made
+from, the part that is selected, the suggestions and what was done with them, and Undo and Redo of all that. No Qt in here; gui/studio.py draws it
+(gui/timeline.py, gui/inspector.py) and tells it what the user did.
 
 Every edit goes through `Timeline.paint` / `erase` (acw_common.timeline), so the draft is always a valid timeline: a part painted over old
 ones replaces them, neighbours with the same settings merge.
@@ -12,8 +12,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from acw_common.timeline import DEFAULT_LOUDNESS, LAYERS, Part, Timeline
-
-from . import editor_session
 
 #: The strengths of a part, in the order of the buttons (Off takes the noise removal off the part).
 STRENGTHS = (("off", "Off"), ("gentle", "Gentle"), ("balanced", "Balanced"), ("strong", "Strong"), ("max", "Maximum"))
@@ -94,19 +92,19 @@ class EditModel:
     """The draft timeline and everything around it. `changed` callbacks run after every change (the widgets redraw)."""
 
     def __init__(self, seconds: float, draft: Timeline, done: Timeline | None = None, *, echo_available: bool = False,
-                 plan_mode: bool = False, loudness: float | None = DEFAULT_LOUDNESS):
+                 loudness: float | None = DEFAULT_LOUDNESS):
         self.seconds = float(seconds)
         # the job's loudness target: the one its leveled parts have, else the one given (None keeps the level)
         self._loudness = draft.layers["leveling"][0].settings["loudness_lufs"] if draft.layers["leveling"] else loudness
         self.draft = draft.copy()
         self.done = done.copy() if done is not None else None
         self.echo_available = echo_available
-        self.plan_mode = plan_mode
         self.selection: tuple[float, float] | None = None
         self.suggestions: list[Suggestion] = []
-        self.chosen: list[tuple[float, float]] = []  # plan mode: the parts to process when "Only parts" is on
-        self.only = False
         self.focus: str | None = None  # the suggestion being looked at
+        self.default_noise: dict = {"strength_db": STRENGTH_DB["max"], "remover": "auto"}  # what Noise removal starts as where it was off
+        self._past: list[tuple] = []  # undo / redo: what the draft (and the suggestions) were before each edit
+        self._future: list[tuple] = []
         self._listeners: list[Callable[[], None]] = []
 
     # -- listening ----------------------------------------------------------------------------------------------------
@@ -116,6 +114,50 @@ class EditModel:
     def _changed(self) -> None:
         for fn in list(self._listeners):
             fn()
+
+    # -- undo and redo (the draft, its loudness and what was done with the suggestions) -----------------------------------
+    def _state(self) -> tuple:
+        return (self.draft.copy(), self._loudness, [(s.id, s.state, s.prev) for s in self.suggestions])
+
+    def _remember(self) -> None:
+        """Called before every edit: one step of Undo."""
+        self._past.append(self._state())
+        del self._past[:-100]
+        self._future.clear()
+
+    def _restore_state(self, state: tuple) -> None:
+        draft, loudness, sugg = state
+        self.draft, self._loudness = draft.copy(), loudness
+        for sid, st, prev in sugg:
+            s = self.suggestion(sid)
+            if s is not None:
+                s.state, s.prev = st, prev
+
+    @property
+    def can_undo(self) -> bool:
+        return bool(self._past)
+
+    @property
+    def can_redo(self) -> bool:
+        return bool(self._future)
+
+    def undo_edit(self) -> None:
+        if not self._past:
+            return
+        self._future.append(self._state())
+        self._restore_state(self._past.pop())
+        self._changed()
+
+    def redo_edit(self) -> None:
+        if not self._future:
+            return
+        self._past.append(self._state())
+        self._restore_state(self._future.pop())
+        self._changed()
+
+    def clear_history(self) -> None:
+        self._past.clear()
+        self._future.clear()
 
     # -- the part that is selected --------------------------------------------------------------------------------------
     def select(self, a: float, b: float) -> None:
@@ -217,6 +259,127 @@ class EditModel:
     def loudness(self) -> float | None:
         return self._loudness
 
+    def voice_mode_of(self, a: float, b: float) -> str:
+        """What the voice is on [a, b): "off", "noise" (Noise removal), "rebuild" (Voice rebuild) or "mixed"."""
+        reb = self.switch_of("rebuild", a, b)
+        noise = self.switch_of("noise", a, b)
+        if reb is True:
+            return "rebuild"  # (where it is on it wins over the noise removal)
+        if noise is True and reb is False:
+            return "noise"
+        if noise is False and reb is False:
+            return "off"
+        return "mixed"
+
+    def level_of(self, a: float, b: float) -> str:
+        """Leveling on [a, b): "off", "on" or "mixed"."""
+        on = self.switch_of("leveling", a, b)
+        return "mixed" if on is None else "on" if on else "off"
+
+    def sections(self, layer: str) -> list[dict]:
+        """The whole file as consecutive stretches of one layer: {"start", "end", "on", "label", "pending", "settings"}; the stretches the layer
+        does not cover are "on": False. (The rows of the timeline.)"""
+        out, pos = [], 0.0
+        runs = {(r["start"], r["end"]): r for r in self.runs(layer)}
+        for p in self.draft.layers[layer]:
+            if p.start > pos + 1e-6:
+                out.append({"start": pos, "end": p.start, "on": False, "label": "", "pending": False, "settings": None})
+            r = runs.get((p.start, p.end), {})
+            out.append({"start": p.start, "end": p.end, "on": True, "label": r.get("label", ""), "pending": r.get("pending", False),
+                        "settings": dict(p.settings)})
+            pos = p.end
+        if pos < self.seconds - 1e-6:
+            out.append({"start": pos, "end": self.seconds, "on": False, "label": "", "pending": False, "settings": None})
+        return out
+
+    def voice_sections(self) -> list[dict]:
+        """The whole file as consecutive stretches of the voice: "off", Noise removal ("noise", with its strength and remover) or Voice rebuild
+        ("rebuild": where it is on it wins over the noise removal). {"start", "end", "mode", "label", "pending", "settings"}."""
+        edges = {0.0, self.seconds}
+        for layer in ("noise", "rebuild"):
+            for p in self.draft.layers[layer]:
+                edges.update((p.start, p.end))
+        cuts = sorted(e for e in edges if 0.0 <= e <= self.seconds)
+        out: list[dict] = []
+        for lo, hi in zip(cuts, cuts[1:]):
+            if hi - lo < 1e-6:
+                continue
+            mid = (lo + hi) / 2
+            reb = next((p for p in self.draft.layers["rebuild"] if p.start <= mid < p.end), None)
+            noi = next((p for p in self.draft.layers["noise"] if p.start <= mid < p.end), None)
+            if reb is not None:
+                row = {"mode": "rebuild", "label": "Rebuild", "settings": dict(reb.settings)}
+                pending = self.done is not None and not any(d.start <= lo + 1e-6 and d.end >= hi - 1e-6 for d in self.done.layers["rebuild"])
+            elif noi is not None:
+                key = strength_key(noi.settings["strength_db"])
+                label = "Max" if key == "max" else STRENGTH_NAME.get(key, f"{noi.settings['strength_db']:.0f} dB")  # (the rows say Max, as the web's do)
+                if noi.settings["remover"] != "auto":
+                    label += f" · {dict(REMOVERS)[noi.settings['remover']].split()[0]}"
+                row = {"mode": "noise", "label": label, "settings": dict(noi.settings)}
+                pending = self.done is not None and not any(
+                    d.start <= lo + 1e-6 and d.end >= hi - 1e-6 and d.settings == noi.settings for d in self.done.layers["noise"])
+            else:
+                row = {"mode": "off", "label": "", "settings": None}
+                pending = False
+            row.update(start=lo, end=hi, pending=pending)
+            if out and out[-1]["mode"] == row["mode"] and out[-1]["settings"] == row["settings"] and out[-1]["pending"] == pending:
+                out[-1]["end"] = hi
+            else:
+                out.append(row)
+        return out
+
+    # -- the web's voice choice ---------------------------------------------------------------------------------------------------
+    def set_voice(self, mode: str, a: float | None = None, b: float | None = None) -> None:
+        """Voice on [a, b): "off", "noise" (Noise removal: the strength it had, else `default_noise`) or "rebuild" (Voice rebuild)."""
+        a, b = self._range(a, b)
+        if mode not in ("off", "noise", "rebuild"):
+            raise ValueError(f"unknown voice choice {mode!r}")
+        self._remember()
+        if mode == "rebuild":
+            self.draft.erase("noise", a, b)
+            self.draft.paint("rebuild", a, b)
+        elif mode == "off":
+            self.draft.erase("noise", a, b)
+            self.draft.erase("rebuild", a, b)
+        else:
+            self.draft.erase("rebuild", a, b)
+            pieces, pos = [], a
+            for p in self.parts("noise", a, b):
+                lo, hi = max(a, p.start), min(b, p.end)
+                if lo > pos:
+                    pieces.append((pos, lo, dict(self.default_noise)))
+                pieces.append((lo, hi, dict(p.settings)))
+                pos = hi
+            if pos < b:
+                pieces.append((pos, b, dict(self.default_noise)))
+            for lo, hi, st in pieces:
+                self.draft.paint("noise", lo, hi, st)
+        self._changed()
+
+    def set_level(self, lufs: float | None, on: bool, a: float | None = None, b: float | None = None) -> None:
+        """Leveling on [a, b) at a loudness (every leveled part of the file gets it: it is one choice for the whole file), or Off."""
+        a, b = self._range(a, b)
+        self._remember()
+        if on:
+            self._loudness = lufs
+            for p in list(self.draft.layers["leveling"]):
+                self.draft.paint("leveling", p.start, p.end, {"loudness_lufs": lufs})
+            self.draft.paint("leveling", a, b, {"loudness_lufs": lufs})
+        else:
+            self.draft.erase("leveling", a, b)
+        self._changed()
+
+    def leave_the_rest(self, a: float | None = None, b: float | None = None) -> None:
+        """Only [a, b) is processed: every layer is taken off everything outside it (the rest is left as it is)."""
+        a, b = self._range(a, b)
+        self._remember()
+        for layer in LAYERS:
+            if a > 0:
+                self.draft.erase(layer, 0.0, a)
+            if b < self.seconds:
+                self.draft.erase(layer, b, self.seconds)
+        self._changed()
+
     def runs(self, layer: str) -> list[dict]:
         """The parts of a layer for the lists and the rows: {"start", "end", "label", "pending"}."""
         out = []
@@ -233,6 +396,7 @@ class EditModel:
     def set_strength(self, key: str, a: float | None = None, b: float | None = None) -> None:
         """Noise removal on [a, b) (the selection by default) at a strength, or Off. A part keeps the remover it has; new ones are automatic."""
         a, b = self._range(a, b)
+        self._remember()
         if key == "off":
             self.draft.erase("noise", a, b)
         else:
@@ -252,6 +416,7 @@ class EditModel:
 
     def set_remover(self, remover: str, a: float | None = None, b: float | None = None) -> None:
         a, b = self._range(a, b)
+        self._remember()
         for p in self.parts("noise", a, b):
             lo, hi = max(a, p.start), min(b, p.end)
             self.draft.paint("noise", lo, hi, {"strength_db": p.settings["strength_db"], "remover": remover})
@@ -262,6 +427,7 @@ class EditModel:
         a, b = self._range(a, b)
         if layer == "echo" and on and not self.echo_available:
             return
+        self._remember()
         if on:
             self.draft.paint(layer, a, b, {"loudness_lufs": self._loudness} if layer == "leveling" else None)
         else:
@@ -270,6 +436,7 @@ class EditModel:
 
     def set_loudness(self, lufs: float | None) -> None:
         """The loudness target of the job: every leveled part gets it."""
+        self._remember()
         self._loudness = lufs
         for p in list(self.draft.layers["leveling"]):
             self.draft.paint("leveling", p.start, p.end, {"loudness_lufs": lufs})
@@ -280,6 +447,7 @@ class EditModel:
         a, b = self._range(a, b)
         if self.done is None:
             return
+        self._remember()
         for layer in LAYERS:
             self._restore(layer, self.done.layers[layer], a, b)
         self._changed()
@@ -309,6 +477,7 @@ class EditModel:
         s = self.suggestion(sid)
         if s is None or s.state != "open":
             return
+        self._remember()
         s.prev = {layer: [{"start": p.start, "end": p.end, **p.settings} for p in self.draft.layers[layer] if p.end > s.start and p.start < s.end]
                   for layer in LAYERS}
         if s.rebuild:
@@ -324,6 +493,7 @@ class EditModel:
         s = self.suggestion(sid)
         if s is None or s.state != "applied":
             return
+        self._remember()
         for layer in LAYERS:
             parts = [Part(d["start"], d["end"], {k: v for k, v in d.items() if k not in ("start", "end")}) for d in (s.prev or {}).get(layer, [])]
             self._restore(layer, parts, s.start, s.end)
@@ -333,6 +503,7 @@ class EditModel:
     def dismiss(self, sid: str) -> None:
         s = self.suggestion(sid)
         if s is not None and s.state == "open":
+            self._remember()
             s.state = "dismissed"
             self._changed()
 
@@ -342,43 +513,9 @@ class EditModel:
             self.focus = sid
             self.select(s.start, s.end)
 
-    # -- before a file is cleaned: the parts to process ------------------------------------------------------------------------
-    def choose(self, a: float | None = None, b: float | None = None) -> None:
-        """Add [a, b) (the selection by default) to the parts that are processed when "Only parts" is on."""
-        a, b = self._range(a, b)
-        ranges = sorted([*self.chosen, (a, b)])
-        merged: list[list[float]] = []
-        for lo, hi in ranges:
-            if merged and lo <= merged[-1][1] + 1e-6:
-                merged[-1][1] = max(merged[-1][1], hi)
-            else:
-                merged.append([lo, hi])
-        self.chosen = [(lo, hi) for lo, hi in merged]
-        self.only = True
-        self._changed()
-
-    def unchoose(self, index: int) -> None:
-        if 0 <= index < len(self.chosen):
-            self.chosen.pop(index)
-            if not self.chosen:
-                self.only = False
-            self._changed()
-
-    def set_only(self, on: bool) -> None:
-        self.only = bool(on)
-        self._changed()
-
     def effective(self) -> Timeline:
-        """The timeline to process: the draft, and with "Only parts" nothing but the chosen parts."""
-        if self.plan_mode and self.only:
-            return editor_session.only_parts(self.draft, self.chosen)
+        """The timeline to process: the draft as it is."""
         return self.draft.copy()
-
-    def processed_seconds(self) -> float:
-        """Plan mode: how much of the file is processed."""
-        if self.plan_mode and self.only:
-            return sum(b - a for a, b in self.chosen)
-        return self.seconds
 
     # -- remembering the state of the job --------------------------------------------------------------------------------------
     def snapshot(self) -> dict:

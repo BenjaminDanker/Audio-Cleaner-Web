@@ -1,5 +1,5 @@
 """A job (or a file about to be cleaned) opened in the per-part editor: the recording decoded and laid out for listening, what the editor
-needs to quote and to look for suggestions. No Qt in here; the job view runs `Session.open` / `PlanSession.open` on a worker thread."""
+needs to quote and to look for suggestions. No Qt in here; the editor screen (gui/doc.py) runs `Session.open` / `PlanSession.open` on a worker thread."""
 from __future__ import annotations
 
 import logging
@@ -57,7 +57,7 @@ class Session:
                 editor_job.store_facts(job, inputs, inputs.source, reference=info.audio_tracks >= 2)
             session = cls(job, ff, work, inputs, info, threads)
             tl = editor_job.current_timeline(job, session.seconds)
-            session.prepare(tl)
+            session.prepare(tl, cancel=cancel, progress=(lambda f: progress(0.7 + 0.3 * f)) if progress else None)
             if progress:
                 progress(1.0)
             return session
@@ -68,12 +68,12 @@ class Session:
             editor_job.remove_work(work)
             raise
 
-    def prepare(self, tl: Timeline) -> None:
+    def prepare(self, tl: Timeline, *, cancel: threading.Event | None = None, progress: Progress | None = None) -> None:
         """Lay out the blocks the timeline needs that are in the cache and start the live mix on it."""
         tl = self._for_listening(tl)
         plan = editor.plan(tl, self._facts, self.cache)
-        self.layers.load(self.cache, plan)
-        self.mix = live_mix.LiveMix(self.layers, tl)
+        self.layers.load(self.cache, plan, cancel=cancel, progress=progress)
+        self.mix = live_mix.LiveMix(self.layers, tl, background=True)
 
     def _for_listening(self, tl: Timeline) -> Timeline:
         tl, _ = editor_job.drop_missing_echo(tl, self._facts)
@@ -174,21 +174,4 @@ def baseline_for(options: engine.JobOptions, seconds: float, *, echo: bool, choi
         rebuild=rebuild, leveling={"loudness_lufs": options.loudness_lufs} if options.leveling else False)
 
 
-def only_parts(tl: Timeline, parts: list[tuple[float, float]]) -> Timeline:
-    """The timeline with everything outside `parts` left out: only those parts are processed."""
-    out = tl.copy()
-    edges = sorted((max(0.0, a), min(tl.seconds, b)) for a, b in parts if b > a)
-    for layer in out.layers:
-        keep = []
-        for p in out.layers[layer]:
-            for a, b in edges:
-                lo, hi = max(a, p.start), min(b, p.end)
-                if hi > lo:
-                    keep.append((lo, hi, dict(p.settings)))
-        out.layers[layer] = []
-        for lo, hi, st in keep:
-            out.paint(layer, lo, hi, st)
-    return out
-
-
-__all__ = ["Session", "PlanSession", "baseline_for", "only_parts"]
+__all__ = ["Session", "PlanSession", "baseline_for"]

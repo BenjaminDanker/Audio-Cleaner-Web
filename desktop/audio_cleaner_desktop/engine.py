@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -23,6 +24,7 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -191,9 +193,36 @@ def worker_threads() -> int:
     return max(1, min(4, (os.cpu_count() or 2) - 1))
 
 
+class _DesktopFFmpeg(FFmpeg):
+    """The FFmpeg of the app. With a `cancel` event the shared one starts a watcher thread for every program it runs and waits for that thread
+    to notice the program has ended, which it does every 0.1 s: a loop of short calls (the editor reading the blocks of a job one by one, a run
+    writing its blocks) paid a tenth of a second for each, 13 of the 16 seconds it took to open an hour-long job. Here the watcher is left to end by
+    itself (it does nothing once the program has ended)."""
+
+    @contextmanager
+    def _guard(self, proc: subprocess.Popen):
+        if self.cancel is None:
+            yield
+            return
+        done = threading.Event()
+
+        def watch() -> None:
+            while not done.is_set():
+                if self.cancel.wait(0.1):
+                    if proc.poll() is None:
+                        proc.kill()
+                    return
+
+        threading.Thread(target=watch, daemon=True, name="ffmpeg-cancel-watch").start()
+        try:
+            yield
+        finally:
+            done.set()
+
+
 def ffmpeg(threads: int | None = None, cancel: threading.Event | None = None) -> FFmpeg:
     """The FFmpeg programs; setting `cancel` stops whatever is running at once (raises Cancelled)."""
-    return FFmpeg(resources.ffmpeg_dir(), threads or worker_threads(), cancel=cancel)
+    return _DesktopFFmpeg(resources.ffmpeg_dir(), threads or worker_threads(), cancel=cancel)
 
 
 def probe(path: Path | str, ff: FFmpeg | None = None) -> ProbeResult:
