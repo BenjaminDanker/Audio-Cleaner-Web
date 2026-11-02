@@ -375,8 +375,7 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
   (that one folder and nothing else) before the new one is laid down, so no file of an older version can stay inside it,
   and the component is not skipped for being "the same or an older version". Its postinstall script skips the files
   that are complete, as on Windows. Quit the app before installing.
-* **What an update keeps.** The settings (every option in the settings panel, the window size and position, the tab
-  last used), the history and everything the app downloaded itself are outside the program folder: the settings are in
+* **What an update keeps.** The settings (what was chosen on the screen and in Settings, the window size and position), the history and everything the app downloaded itself are outside the program folder: the settings are in
   the registry (`HKEY_CURRENT_USER\Software\Audio Cleaner`) or the macOS preferences, the history and the app's own
   model downloads in `%LOCALAPPDATA%\Audio Cleaner\Audio Cleaner` or `~/Library/Application Support/Audio Cleaner`.
   The models setup installed stay in `{app}\models` or `/Library/Application Support/Audio Cleaner/models`.
@@ -385,7 +384,43 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
 
 ## Things worth knowing
 
-* **What a result is called and what it becomes** (`engine.py`, `gui/queue_view.py`). Under each file in the list is a name
+* **One window, one screen** (`gui/main_window.py`, `gui/studio.py`; the layout of the website's Cleanup page, `web/src/components/studio/`, in Qt). There is
+  one screen, always the same, and it is never replaced by another window or step. Before a file is chosen the editor is already there: the place to drop a
+  file is in its main pane (where the picture and the timeline go), the settings column shows greyed cards (Voice, Leveling, Subtitles) with the (i) that
+  opens "All the options" (and "Good to know"), and Start is off. Choosing a file (the drop area, File > Add files, a drop anywhere on the window, a file
+  the system hands over) fills the same screen in place.
+  * *Left:* the editor (the picture or the poster of a sound, the file name and facts with "Different file", the Automatic switch and its line, the tools:
+    play, split at the playhead, undo, redo, zoom, select all; the timeline with the rows Voice, Echo removal (a file with a second audio track),
+    Leveling, Subtitles and Music (not there yet), as in the web), and under it the output pane (the name of the result with its file type, the video
+    size, where it is saved, what is saved by itself). The output pane stretches so the column ends level with the settings.
+  * *Right:* the settings for the part that is chosen (heading "Whole file · 0:11" or the part), the cards Voice (Off, Noise removal with strength and
+    remover, Voice rebuild), Echo removal, Leveling (Off, Podcast, YouTube, Broadcast, Keep) and Subtitles (Off / On on this computer, language, SRT / VTT / TXT /
+    Into the video). Parts are chosen by dragging on the timeline (or clicking a section, or a pin); there is no separate Start / End card.
+  * *Under both columns:* the start row (not pinned to the window): Details (what will be done, with a rough time; nothing is billed) or Your files, or the
+    progress with "Cancel job", then the button: Start, Processing, Save changes, or Open the file (the desktop's "Download again").
+  * *Jobs:* a column beside the editor (under it when the window is narrow): the files waiting and running with their progress, and every finished or
+    failed job, newest first, searchable, sortable, paged. Opening one shows it in the same editor: the result, the parts it was made with, the live
+    sound (Listen to Original / Cleaned and the speakers of the rows); change a part or a setting and "Save changes" makes a new file next to the
+    last one (`redo.py`). "Delete this job" is in Your files.
+  * *Dialogs* are only for what the web also shows as one: "All the options" (the (i); also Help), Settings (File > Settings: where results are saved, the
+    usual type of audio files, files at once, updates, the model downloads), About, and the questions that protect something (stop cleaning, delete a
+    job, replace a file). Everything about a file is on the screen. Files added together: the first is in the editor, the rest wait in the jobs column
+    ("Not started") with their own settings; "Start all" in the column's menu starts them.
+  * *Fast to open.* Nothing is read on the window's thread and nothing is decoded in full before the screen shows (`gui/doc.py`, `quick_look.py`): the file's
+    facts (a probe), the waveform (streamed at 8 kHz in one channel: an hour in about 2 s, drawn as it fills), and what Automatic picks (about a minute of
+    the file read from a few stretches, the same ones `pipeline.measure_windows` uses on the whole recording) arrive as they are ready, with visible
+    progress. A finished job shows at once from what it kept (its facts, waveform and timeline); its live sound (the recording decoded and its blocks
+    laid out, `editor_session.Session`) is made in the background (an hour: about 3 to 6 s; it was 15 s before the screen showed anything), and
+    playing and editing do not wait for it. The app's FFmpeg (`engine._DesktopFFmpeg`) does not wait for its cancel watcher after every program: reading
+    a job's 120 blocks cost 13 s of that. The moments worth a look (suggestions) need the whole recording decoded: by themselves only for up to 20
+    minutes (and Automatic on, or a job), otherwise "Look for them".
+  * *Where the old parts went.* The Clean tab's queue is the jobs column; "Choose parts..." (plan dialog) is the timeline of the same screen ("Only parts"
+    is "Leave the rest as it is" on a chosen part); the Jobs tab and the job view are the same editor; "Fix a moment" is the timeline and settings of
+    the job in that editor; the Settings card is split: what is about a file (Automatic, strength, background noise, Leveling, loudness, echo, Voice
+    rebuild, subtitles and language, file type, video size) is on the screen and what you chose for a whole file is what the next file starts with
+    (not what Automatic picked), the rest is in the Settings dialog.
+
+* **What a result is called and what it becomes** (`engine.py`, `gui/output_pane.py`, `gui/studio.py`). The output pane under the editor has a name
   box that starts with the usual name (`<name>-cleaned.<ending>`) and a list of the types that file can become, joined
   to its right. The ending in the box and the list always agree: typing `.mp3` selects MP3, choosing a type in the list
   rewrites the ending (an ending that is only part of a name, like `v1.2`, gets the new one added). A name that can't be
@@ -419,8 +454,8 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     one (which goes to the Recycle Bin / Trash, as before); under another name or type it is a new file and the old one
     stays.
   * *Command line*: `--output-name NAME` (one file), `--format EXT` (the type of every result; the usual name), `--video-size`.
-* **Jobs, saved copies and "Change and save again"** (the Jobs tab, `gui/history_view.py` and `gui/job_view.py`; the same idea as the website's
-  kept copies, `docs/architecture.md`, but on the user's own disk with no time limit). The Jobs tab is the old History: one row per
+* **Jobs, saved copies and "Change and save again"** (the jobs column, `gui/jobs_column.py`, and the editor, `gui/studio.py`; the same idea as the website's
+  kept copies, `docs/architecture.md`, but on the user's own disk with no time limit). The jobs column is the old History: one card per
   cleaned or failed file, newest first (or oldest, by name, by disk used, by length), searchable by name, folder, results, message and
   the settings in words ("Gentle", "leveled") and as stored, a page of 50 at a time with no cap (`HistoryStore.search(limit, offset,
   sort)`). A row opens the job.
@@ -435,15 +470,15 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     rebuilt voice about the same; the transcript a few kB; `input.flac` (echo removal only) about 0.36 GB per hour. A job
     that rebuilt the voice and was never changed holds only the rebuilt voice. The page shows each job's size and the total (the
     `copies_bytes` column, counted again at start-up by `HistoryStore.reconcile`). **Jobs made with the per-part editor keep `blocks/` instead of
-    these three files (see "Fix a moment" below); the numbers above are for older jobs and the blocks take about the same.**
+    these three files (see "The per-part editor" below); the numbers above are for older jobs and the blocks take about the same.**
   * *The original.* The job remembers its path and a fingerprint: size, modified time and a hash of 16 parts of the file (`copies.fingerprint`).
     Before anything is done with a copy it is checked (`copies.check_original`): same size and modified time is accepted without reading;
     a different modified time only if the parts hash the same (a copy put back); anything else is "changed", and a missing file is "moved".
     The decoded original must also be as long as the copies (`JobCopies.samples`). When the original is moved or changed the editor
     and every change but the subtitle files are unavailable with the reason in plain words; for a moved file "Find the original..."
     accepts the file it was moved to when it is the same file.
-  * *Change and save again* (`redo.py`): the sound is changed in the editor (below, "Fix a moment"; the whole file is one part), the file type,
-    name and subtitle files in the Save card. The sound is the editor's timeline rendered from the job's blocks: only the blocks it does not
+  * *Change and save again* (`redo.py`): the sound is changed in the editor (below; the whole file is one part), the file type,
+    name and subtitle files in the output pane and the Subtitles card. The sound is the editor's timeline rendered from the job's blocks: only the blocks it does not
     have are made, so a new strength or Leveling needs no model and Voice rebuild on one part rebuilds only that part. Subtitles the job never made, or in another language, listen to the original
     again; other kinds of subtitle file come from the saved transcript, and "Save only the subtitles" needs neither the original nor a model.
     Blocks a change makes stay in the job, so the next change is cheap. A new result is never written over a file: it goes next
@@ -453,11 +488,11 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     (`copies.delete_job_dir` only removes a folder with a name this app gives, directly in the jobs folder, and a link as a link). A job whose
     copies cannot be removed (a file in use) stays in the list. Old entries (from before this) and failed or stopped jobs: an old entry has no
     folder and just shows and deletes; a stopped job keeps nothing; a job that failed after some blocks were made keeps them and can be
-    saved again from the job view; a copy that cannot be written (disk full) never fails the job, the notice says it can't be changed later.
+    saved again from the editor; a copy that cannot be written (disk full) never fails the job, the notice says it can't be changed later.
     Folders nothing points to are swept after a day.
-* **Fix a moment: the per-part editor** (the same core as the website's, `common/acw_common/{timeline,editor,blocks,suggest}.py`; the
-  desktop's side is `editor_job.py`, `editor_session.py`, `editor_model.py`, `live_mix.py` (no Qt) and `gui/{job_editor,part_editor,wave_strip,plan_dialog}.py`).
-  Local processing is free, so the bar shows time, not price.
+* **The per-part editor** (the timeline and the settings of the screen above; the same core as the website's, `common/acw_common/{timeline,editor,blocks,suggest}.py`; the
+  desktop's side is `editor_job.py`, `editor_session.py`, `editor_model.py`, `live_mix.py`, `quick_look.py` (no Qt) and `gui/{doc,studio,timeline,inspector,top_pane}.py`).
+  Local processing is free, so the start row shows time, not price.
   * *The block cache replaces the whole copies.* A job made now keeps `blocks/` (24-bit FLAC, `blocks.FlacCache`: what each step made, block by
     block: the noise removal at full strength, the rebuilt voice, the echo-free recording) instead of `noise.flac`, `rebuilt.flac` and `input.flac`.
     A normal run fills it (`engine.process` renders the timeline its choices stand for, `Timeline.from_clean_options`, with
@@ -470,13 +505,14 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     are cut into blocks (`editor_job.migrate`, the same samples, nothing removed until every block is written) and the old files are removed. A
     job whose copies can't become blocks (it removed echo but did not keep the echo-free recording) starts an empty block cache, and what a change
     needs is made from the original.
-  * *The editor* (design "Moments", `/acw-editor-designs/c-moments`, with "Show all layers" from the timeline design): the player, a strip under it
-    (ruler with a pin for each suggestion, the waveform, the playhead, the selected part with two handles; click moves the playhead, drag across the
-    waveform or a row chooses a part), "Hear" chips (Noise removal, Voice rebuild, Echo removal when the file has a second track, Leveling) and
-    the Moment, Part, Change panel. Part settings: strength Off / Gentle / Balanced / Strong / Maximum, the remover (automatic / light / heavy),
-    Voice rebuild on or off (it wins where both are on, and the panel says so), Leveling on or off with one loudness target for the job, echo removal
-    on or off. All edits are `Timeline.paint` / `erase`, so the draft is always a valid timeline. "Which one should I pick?" (`labels.WHICH_TEXT`)
-    says in plain words how noise reduction and Rebuild the voice differ; the settings, the part panel and the notes on a result use the same words.
+  * *The editor* (the screen above): the timeline (ruler with a pin for each suggestion, the waveform with the chosen part's two handles and the
+    playhead, one row each for Voice, Echo removal, Leveling, Subtitles and Music; click moves the playhead, drag across the waveform or a row chooses a
+    part, click a section chooses it; "Split at playhead" divides a section so both pieces can be chosen; zoom; undo and redo of every edit) and the
+    cards. Part settings: Voice Off / Noise removal (strength Gentle / Balanced / Strong / Max, remover Auto / Light / Heavy) / Voice rebuild (exclusive:
+    where it is on it wins over the noise removal), Echo removal on or off, Leveling Off / Podcast / YouTube / Broadcast / Keep with one loudness for the
+    whole file. A job's rows have a speaker each (hear the file with that layer or without it). All edits are `Timeline.paint` / `erase`, so the draft is
+    always a valid timeline. "Which one should I pick?" (`labels.WHICH_TEXT`, in All the options) says in plain words how noise reduction and Rebuild the voice
+    differ; the cards, the tooltips and the notes on a result use the same words.
   * *Live sound* (`live_mix.LiveMix`, played by `gui/live_audio.LivePlayer`: pull mode, `QAudioSink`, 16-bit, 100 ms buffer, an unbuffered
     `QIODevice` so Qt does not read ahead, so a change is heard within the next 100 ms; "Original" plays the same stream at the same place): the recording and what each step made are laid out sample
     for sample in scratch files (read from the cache), and every piece the sound card asks for is mixed from the timeline: noise removal per part
@@ -484,20 +520,16 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     noise removal is not heard), echo removal with 50 ms ramps, Leveling by loudness (each leveled part is brought to the target, at most 12 dB;
     the compressor and limiter come with the saved file). A part whose blocks are not in the cache yet is heard without that change, and the strip
     says so. The saved file is made by `editor.render` (joins that look for a pause, loudness matching, the whole of Leveling), not by this mix.
-  * *Quote and Save.* The bar says "No changes yet", "Changes: nothing to process" (only blocks that are there are used) or "Process changes · about
-    40 s" (`editor.plan` over the facts the job kept; `editor_job.CPU_COSTS` turns the plan's compute seconds into wall-clock seconds on one core
-    of an ordinary computer: the light remover and Leveling as measured, the heavy remover 1.8 x the light one, Voice rebuild about 30 x, divided by
-    the threads). Save runs `redo.run` with a timeline: the original is decoded, only the missing blocks are made (cancelable, with progress), the
-    timeline is rendered, and the result is a new file next to the last one (the naming and Replace rules above). Subtitles,
-    file type and name stay in the card below.
-  * *Suggestions* (`suggest.suggest`): found in the background when a job is opened for the first time (up to 20 minutes of audio; a longer
-    recording has a "Find moments to fix" button), cancelable, kept in `job.json`. Each is a card with the apply button, Show me, Dismiss, and Undo
-    after it was applied (the parts it replaced are put back, whatever was edited since).
-  * *Choose parts* (plan mode): a waiting file's row has "Choose parts..." which opens the same editor on the file as it is (the waveform and
-    suggestions; nothing is processed, so only the recording is heard). The settings of the file are the whole-file defaults (when "Automatic best
-    settings" is on they are decided by listening, as a run would); "Only parts" processes only the parts chosen with "Only this part". The bar says
-    "Whole file · about 3 min" or "Chosen parts · about 40 s". "Use these parts" gives the queue a timeline (`Job.timeline`), which
-    `engine.process(..., timeline=...)` runs: only the parts are processed and the rest is left as it is; the settings are fixed when it is chosen.
+  * *Quote and Save.* The button says "Open the file" (nothing changed), or "Save changes" with "about 40 s" when something has to be made
+    (`editor.plan` over the facts the job kept, so nothing is decoded to say it; `editor_job.CPU_COSTS` turns the plan's compute seconds into wall-clock
+    seconds on one core of an ordinary computer: the light remover and Leveling as measured, the heavy remover 1.8 x the light one, Voice rebuild about
+    30 x, divided by the threads); "Details" lists the steps. For a file that has not run, Details gives a rough figure from the same costs times what each
+    layer covers. Save runs `redo.run` with a timeline: the original is decoded, only the missing blocks are made (cancelable, with progress), the
+    timeline is rendered, and the result is a new file next to the last one (the naming and Replace rules above); the same screen shows it.
+  * *Suggestions* (`suggest.suggest`): the pins on the ruler, the count next to the Automatic switch, and a card on top of the settings when the part
+    that is chosen is one. Found in the background (a job: when it is opened for the first time; a file that has not run: with Automatic on) up to 20
+    minutes of audio; a longer recording has a "Look for them" link; cancelable, kept in `job.json` for a job. Each has Apply and a dismiss button, and
+    Undo (the editor's own, with everything else) after it was applied.
   * *Command line.* `--timeline FILE` (one input file): a JSON file in `acw_common.timeline` format, for example
     `{"version": 1, "layers": {"noise": [{"start": 10, "end": 40, "strength_db": 24, "remover": "auto"}], "rebuild": [{"start": 41, "end": 44}],
     "leveling": [{"start": 0, "end": 120, "loudness_lufs": -16}]}}`. Times are seconds (clamped to the file), `strength_db` is 12 / 24 / 40 / 100 (or

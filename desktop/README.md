@@ -11,9 +11,11 @@ nothing but a normal web request with the app version).
 
 - `audio_cleaner_desktop/engine.py` cleans one file (no Qt; used by the window and the command line)
 - `audio_cleaner_desktop/copies.py`, `blend.py`, `redo.py` the saved copies of a job, the strength blend, change-and-save-again (no Qt)
-- `audio_cleaner_desktop/editor_job.py`, `editor_session.py`, `editor_model.py`, `live_mix.py` the per-part editor ("Fix a moment" and "Choose parts"): a job's block
-  cache, quotes, saving a timeline, suggestions, the live mix per part (no Qt)
-- `audio_cleaner_desktop/gui/` the window: queue, settings, preview, the Jobs tab (list, job view, the editor, live sound), About
+- `audio_cleaner_desktop/editor_job.py`, `editor_session.py`, `editor_model.py`, `live_mix.py`, `quick_look.py` the per-part editor: a job's block
+  cache, quotes, saving a timeline, suggestions, the live mix per part, the quick waveform and measurement that let a long file show at once (no Qt)
+- `audio_cleaner_desktop/gui/` the window: one screen shaped like the website's Cleanup page (`studio.py`: the editor with its timeline, the settings
+  column, the output pane and the start row; `doc.py`: what it shows for a file, a run or a finished job), the jobs column beside it, All the options,
+  Settings, About
 - `audio_cleaner_desktop/cli.py` the `--cli` and `--selftest` modes
 - `vendor/` native pieces for running from source (git-ignored, filled by the packaging scripts):
   `native/{libdf, ffmpeg, ffprobe}`, `licenses/`, and for tests and runs from source (never bundled) the noise models in
@@ -57,9 +59,11 @@ A timeline file says what to do to which part of one recording (the format of `c
 Times are seconds. Layers: `echo` (needs the file's second audio track), `noise` (`strength_db` 12 Gentle, 24 Balanced, 40 Strong, 100 Maximum, or the
 names; `remover` `auto`, `light`, `heavy`), `rebuild` (where it is on, it wins over the noise removal), `leveling` (`loudness_lufs` -70..0 or `null`).
 What a layer does not cover is left as it is. With `--timeline`, `--strength`, `--noise`, `--echo-track`, `--rebuild-voice`, `--no-leveling` and
-`--loudness` are not used. In the window the same editor is "Fix a moment" in a job and "Choose parts" under a waiting file.
+`--loudness` are not used. In the window the same editor is the timeline of the one screen: drag across it to choose a part.
 
 ## Tests
+
+`desktop/tests/screenshots.py` takes offscreen screenshots of the screen (empty, a file, a part chosen, a run, the result, narrow, dark) with the real engine.
 
 ```sh
 QT_QPA_PLATFORM=offscreen PYTHONPATH=desktop:common python -m pytest -q desktop/tests common/tests
