@@ -4,9 +4,12 @@
 //
 // - what this browser can make is asked of the browser (WebCodecs), never assumed: outputCaps() / listOutputs()
 // - the picture is copied as it is whenever the new container can hold it and the size stays the same; otherwise it is
-//   re-encoded (H.264, or VP9 for WebM; VP9 stands in when the browser cannot write H.264)
+//   re-encoded (H.264, or VP9 for WebM; VP9 stands in for MKV when the browser cannot write H.264)
 // - MP3 has no encoder in browsers: a small LAME build (@mediabunny/mp3-encoder, its own file, downloaded only when
 //   somebody saves an MP3) does it; FLAC is written by our own encoder (flac.js)
+// - AAC (M4A, and the sound of MP4, MOV and MKV) is written by FFmpeg's AAC encoder (@mediabunny/aac-encoder, its own file,
+//   downloaded the first time), the one our server uses, in every browser: Firefox and Chrome on Linux have none of their own,
+//   and the others' own encoders differ by system
 // - frames are streamed through mediabunny, so a long video is never held decoded in memory; only the finished (small)
 //   output file is kept until it is saved
 
@@ -115,9 +118,11 @@ export function scaledDims(width, height, px) {
 /* ------------------------------------------------------------------------------------------------ what this browser can do */
 
 // Which audio codec each video file type gets for the cleaned sound (first one the browser can write), and which
-// picture codecs are used when the picture has to be encoded again (first one the browser can write).
-const AUDIO_PREFS = { mp4: ['aac', 'opus'], mov: ['aac', 'pcm-s16'], mkv: ['aac', 'opus', 'mp3', 'pcm-s16'], webm: ['opus'] };
-const VIDEO_PREFS = { mp4: ['avc', 'vp9'], mov: ['avc'], mkv: ['avc', 'vp9', 'vp8'], webm: ['vp9', 'vp8'] };
+// picture codecs are used when the picture has to be encoded again (first one the browser can write). An MP4 gets only AAC and
+// H.264, like a MOV: Opus or VP9 in an MP4 don't play on a Mac or an iPhone ("not supported"). AAC can always be written
+// (ensureAac); a picture that has to be made again where the browser can't write H.264 is made on our side.
+const AUDIO_PREFS = { mp4: ['aac'], mov: ['aac', 'pcm-s16'], mkv: ['aac', 'opus', 'mp3', 'pcm-s16'], webm: ['opus'] };
+const VIDEO_PREFS = { mp4: ['avc'], mov: ['avc'], mkv: ['avc', 'vp9', 'vp8'], webm: ['vp9', 'vp8'] };
 
 const wasmOk = () => typeof WebAssembly !== 'undefined' && typeof Worker !== 'undefined';
 
@@ -140,6 +145,23 @@ export function ensureMp3() {
   return mp3Ready;
 }
 
+let aacReady = null;
+/** Makes AAC writing available (downloads the encoder file the first time; see the top of this file). Resolves true when it can be used. */
+export function ensureAac() {
+  if (!aacReady) {
+    aacReady = (async () => {
+      if (!wasmOk()) return !!(await (await loadMediabunny()).canEncodeAudio('aac'));
+      const { registerAacEncoder } = await import('@mediabunny/aac-encoder');
+      registerAacEncoder(); // (a registered encoder is used before the browser's own)
+      return true;
+    })().catch(() => {
+      aacReady = null;
+      return false;
+    });
+  }
+  return aacReady;
+}
+
 let capsPromise = null;
 /** What the browser can encode: {audio: {opus, aac, mp3}, video: {avc, vp9, vp8}}. Asked once. */
 export function outputCaps() {
@@ -159,7 +181,7 @@ export function outputCaps() {
         safe(() => mb.canEncodeAudio('opus', a)), safe(() => mb.canEncodeAudio('aac', a)),
         safe(() => mb.canEncodeVideo('avc', v)), safe(() => mb.canEncodeVideo('vp9', v)), safe(() => mb.canEncodeVideo('vp8', v)),
       ]);
-      return { audio: { opus, aac, mp3: wasmOk() }, video: { avc, vp9, vp8 } };
+      return { audio: { opus, aac: aac || wasmOk(), mp3: wasmOk() }, video: { avc, vp9, vp8 } };
     })();
   }
   return capsPromise;
@@ -493,6 +515,7 @@ async function asWav(mb, source, { signal, onProgress }) {
 async function addCleanSound(mb, output, source, codecs, { signal, onProgress, copyOk = codecs }) {
   const format = output.format;
   const allowed = codecs.filter((c) => format.getSupportedAudioCodecs().includes(c));
+  if (allowed.includes('aac')) await ensureAac();
   if (source.pcm) {
     const quality = new mb.Quality({ bitrate: 192000 });
     const codec = await mb.getFirstEncodableAudioCodec(allowed, { numberOfChannels: source.pcm.channels, sampleRate: source.pcm.sampleRate, quality });
@@ -723,7 +746,6 @@ export async function buildMedia({ format, size = 'same', videoFile = null, info
     if (signal?.aborted) throw abortError();
     await output.finalize();
     const mkNote = [];
-    if (sound.codec === 'opus' && (format === 'mp4' || format === 'mov')) mkNote.push('The sound is stored as Opus in the MP4 file. Modern browsers and VLC play it; some older video editors do not.');
     if (sound.codec === 'pcm-s16') mkNote.push('The sound is stored uncompressed (PCM), so the file is a little bigger.');
     if (pictureNote) mkNote.unshift(pictureNote);
     const made = await store.result();

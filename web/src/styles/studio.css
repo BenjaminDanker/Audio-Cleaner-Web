@@ -174,7 +174,9 @@
 .studio .ctl .bseg { display: flex; width: 100%; }
 .studio .ctl .bseg button { flex: 1 1 auto; padding-inline: 5px; }
 .studio .sr .bseg { width: 100%; }
-.studio .select { width: 100%; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); min-height: 36px; font-size: 0.9rem; }
+.studio .select { width: 100%; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--border); background-color: var(--surface); min-height: 36px; font-size: 0.9rem; }
+/* the file type joined to the name box (global.css .namefmt): square where they meet, room for its arrow */
+.studio .namefmt .select { border-top-left-radius: 0; border-bottom-left-radius: 0; padding-right: 32px; background-color: var(--surface-2); }
 .studio .select:disabled { opacity: 0.5; }
 .studio .trs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
 .studio .trs .select { flex: 1 1 150px; width: auto; }

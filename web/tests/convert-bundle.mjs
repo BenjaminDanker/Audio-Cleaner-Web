@@ -21,6 +21,11 @@ const STUB = `
   export const WebMOutputFormat = fmt(['vp8', 'vp9', 'av1']);
 `;
 
+// @mediabunny/aac-encoder stood in for: registering it is counted (globalThis.__AAC_REGISTERED), so a test can see that AAC was made available once.
+const AAC_STUB = `
+  export const registerAacEncoder = () => { globalThis.__AAC_REGISTERED = (globalThis.__AAC_REGISTERED || 0) + 1; };
+`;
+
 let text = null;
 let copies = 0;
 
@@ -39,6 +44,8 @@ export async function loadConvert(abilities = {}) {
         setup(b) {
           b.onResolve({ filter: /^(mediabunny|@mediabunny\/mp3-encoder)$/ }, (a) => ({ path: a.path, namespace: 'stub' }));
           b.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: STUB, loader: 'js' }));
+          b.onResolve({ filter: /^@mediabunny\/aac-encoder$/ }, (a) => ({ path: a.path, namespace: 'stub-aac' }));
+          b.onLoad({ filter: /.*/, namespace: 'stub-aac' }, () => ({ contents: AAC_STUB, loader: 'js' }));
         },
       }],
     });

@@ -1,9 +1,11 @@
 // The output picker (src/media/convert.js, src/components/OutputPicker.jsx): the file type and the name of a result, made in the
-// browser. Audio -> WAV / FLAC / MP3 / Ogg (and M4A where this browser can encode AAC), video -> sound only, a sound file -> a video
+// browser. Audio -> WAV / FLAC / MP3 / Ogg / M4A (AAC is written by FFmpeg's encoder in WebAssembly in every browser, fetched the first time it is
+// needed; this Chromium has no AAC encoder of its own), video -> sound only, a sound file -> a video
 // with a black picture, a video kept as it is (MKV) or made smaller (MP4 at 480p), the name and the type list following each
 // other, the name a paid job is saved under; every result comes down by itself, and Save changes brings the new type. Another file type or
 // video size is a feature of its own: with nothing else chosen it is free, runs in the browser (a card named File conversion) and gives the file
-// in the new type or size with its own sound; a video type this browser can't make for a video is offered as made on our side.
+// in the new type or size with its own sound; a video type this browser can't make for a video is offered as made on our side. An MP4 made in the
+// browser has AAC sound and an H.264 picture only (Opus or VP9 in an MP4 don't open on a Mac or an iPhone).
 // The choices live in the editor's output pane (OutputFields). The files that come out are looked at with ffprobe. An encoder the
 // headless Chromium lacks is reported as a skip.
 // Needs the local backend (port 8792), `npm run build` output and the fixtures. Usage: node tests/convert.mjs
@@ -100,7 +102,7 @@ await check('audio: the name starts as <name>-cleaned.<type> in the output pane,
   if ((await formField('out-name').inputValue()) !== 'noisy-cleaned.wav') throw new Error('default name');
   const vals = await optionValues(formField);
   for (const need of ['wav', 'flac', 'mp3', 'ogg']) if (!vals.includes(need)) throw new Error(`${need} missing from ${vals}`);
-  if (vals.includes('m4a') !== enc.aac) throw new Error(`m4a listed=${vals.includes('m4a')} but AAC encoder=${enc.aac}`);
+  if (!vals.includes('m4a')) throw new Error(`m4a missing from ${vals} (AAC is written by the WebAssembly encoder when the browser has none: its own AAC encoder is ${enc.aac})`);
   await formField('out-name').fill('my talk.mp3');
   if ((await formField('out-format').inputValue()) !== 'mp3') throw new Error('typing .mp3 did not switch the list');
   await formField('out-format').selectOption('flac');
@@ -136,9 +138,10 @@ await check('free cleanup of a sound file: the chosen file comes down by itself 
   return files[0].replace(/\s+/g, ' ');
 });
 
-await check('audio to each type: WAV, FLAC, MP3 (its encoder is fetched only now), Ogg (Opus), M4A where AAC can be encoded; each file has the right codec and length', async () => {
+await check('audio to each type: WAV, FLAC, MP3 (its encoder is fetched only now), Ogg (Opus), M4A (AAC, written by the WebAssembly encoder, fetched only now); each file has the right codec and length', async () => {
   const fetched = [];
-  const onReq = (rq) => { const u = new URL(rq.url()); if (/mp3-encoder/.test(u.pathname)) fetched.push(u.pathname.split('/').pop()); };
+  const aacFetched = [];
+  const onReq = (rq) => { const u = new URL(rq.url()); if (/mp3-encoder/.test(u.pathname)) fetched.push(u.pathname.split('/').pop()); if (/aac-encoder/.test(u.pathname)) aacFetched.push(u.pathname.split('/').pop()); };
   page.on('request', onReq);
   const out = [];
   for (const [name, format, codec] of [['chosen name.wav', null, 'pcm_s16le'], [null, 'flac', 'flac'], ['speech.mp3', null, 'mp3'], ['speech.ogg', null, 'opus']]) {
@@ -148,15 +151,15 @@ await check('audio to each type: WAV, FLAC, MP3 (its encoder is fetched only now
     if (Math.abs(i.dur - 10.6) > 0.6) throw new Error(`${r.name}: duration ${i.dur}`);
     out.push(`${r.name} ${codec}`);
   }
-  page.off('request', onReq);
   if (!fetched.length) throw new Error('MP3 encoder was not fetched');
-  if (enc.aac) {
-    const r = await saveAs('speech.m4a');
-    if (probe(r.p).a.codec_name !== 'aac') throw new Error('m4a is not AAC');
-    out.push(`${r.name} aac`);
-  } else if (await openOutput().then(() => optionValues(field)).then((v) => v.includes('m4a'))) {
-    throw new Error('m4a offered without an AAC encoder');
-  }
+  if (aacFetched.length) throw new Error('the AAC encoder was fetched before any AAC was written: ' + aacFetched);
+  const r = await saveAs('speech.m4a');
+  page.off('request', onReq);
+  const m4a = probe(r.p);
+  if (m4a.a.codec_name !== 'aac' || m4a.v) throw new Error(`m4a: ${m4a.a?.codec_name}${m4a.v ? ' with a picture' : ''}`);
+  if (Math.abs(m4a.dur - 10.6) > 0.6) throw new Error(`m4a duration ${m4a.dur}`);
+  if (!aacFetched.length) throw new Error('the AAC encoder was not fetched for the M4A');
+  out.push(`${r.name} aac (encoder file ${aacFetched[0]}, own AAC encoder: ${enc.aac})`);
   return out.join(', ');
 });
 
@@ -184,13 +187,66 @@ await check('video kept as it is: MKV copies the picture unchanged (H.264 stays 
   return `${r.name} ${i.v.codec_name} ${i.v.width}x${i.v.height} + ${i.a.codec_name}; note: ${r.note}`;
 });
 
+await check('an MP4 made in the browser has AAC sound and the picture copied as it is (H.264), never Opus: the video comes down as one MP4, and the note does not talk about Opus', async () => {
+  await prepare('test.mp4');
+  await startFree();
+  if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'test-cleaned.mp4') throw new Error('downloaded by itself: ' + downloads.map((d) => d.suggestedFilename()));
+  const p = join(FILES, 'conv-aac-h264.mp4');
+  await downloads[0].saveAs(p);
+  const src = probe(join(FILES, 'test.mp4'));
+  const got = probe(p);
+  if (got.a?.codec_name !== 'aac') throw new Error(`sound ${got.a?.codec_name}`);
+  if (got.v?.codec_name !== 'h264' || got.v.codec_name !== src.v.codec_name || `${got.v.width}x${got.v.height}` !== `${src.v.width}x${src.v.height}`) throw new Error(`picture ${src.v.codec_name} ${src.v.width}x${src.v.height} -> ${got.v?.codec_name} ${got.v?.width}x${got.v?.height}`);
+  if (Math.abs(got.dur - src.dur) > 0.8) throw new Error(`duration ${src.dur} -> ${got.dur}`);
+  const note = await madeNote();
+  if (!/copied as it is/.test(note) || /opus/i.test(note)) throw new Error(`note: ${note}`);
+  // MKV takes AAC first as well
+  const mkv = await saveAs(null, { format: 'mkv' });
+  if (probe(mkv.p).a.codec_name !== 'aac') throw new Error(`MKV sound ${probe(mkv.p).a.codec_name}`);
+  return `mp4 ${got.v.codec_name} ${got.v.width}x${got.v.height} + ${got.a.codec_name}, ${got.dur.toFixed(1)} s; MKV sound aac; note: ${note}`;
+});
+
+await check('a browser that cannot write H.264 (its VideoEncoder says no to avc1): an MP4 at a new size is offered as made on our side (never VP9 inside an MP4), MKV at that size is still made here; the size "same" copies the picture as before', async () => {
+  if (!existsSync(big)) return 'SKIP (no 720p fixture: ffmpeg missing)';
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx.addInitScript(() => {
+    const was = VideoEncoder.isConfigSupported.bind(VideoEncoder);
+    VideoEncoder.isConfigSupported = async (c) => (String(c?.codec).startsWith('avc1') ? { supported: false, config: c } : was(c));
+  });
+  const p = await ctx.newPage();
+  try {
+    await signIn(p, EMAIL);
+    await p.goto(`${BASE}/app`);
+    await dropFile(p, big);
+    await outputReady(p);
+    const of = (id) => p.locator(`[data-testid=output-pane] [data-testid=${id}]`);
+    const sizeLabels = () => of('out-size').locator('option').evaluateAll((os) => Object.fromEntries(os.map((o) => [o.value, o.textContent])));
+    if ((await of('out-format').inputValue()) !== 'mp4') throw new Error('the video\'s own type should be the start: ' + (await of('out-format').inputValue()));
+    const groups = await of('out-format').evaluate((sel) => [...sel.querySelectorAll('optgroup')].map((g) => ({ label: g.label, values: [...g.querySelectorAll('option')].map((o) => o.value) })));
+    const here = groups.find((g) => g.label === 'Video');
+    if (!here || !here.values.includes('mp4') || !here.values.includes('mkv')) throw new Error('an H.264 picture is copied into MP4 and MKV: ' + JSON.stringify(groups));
+    const sizesLoaded = () => p.waitForFunction(() => document.querySelector('[data-testid=output-pane] [data-testid=out-size] option[value="480"]'), null, { timeout: 10000 }); // (the sizes of a type are asked of the browser first)
+    await sizesLoaded();
+    const mp4 = await sizeLabels();
+    if (!/made on our side/.test(mp4['480'] || '') || /made on our side/.test(mp4.same || '')) throw new Error('MP4 sizes: ' + JSON.stringify(mp4));
+    await of('out-format').selectOption('mkv');
+    await sizesLoaded();
+    const mkv = await sizeLabels();
+    if (/made on our side/.test(mkv['480'] || '')) throw new Error('MKV sizes: ' + JSON.stringify(mkv));
+    return `MP4: 480 "${mp4['480']}"; MKV: 480 "${mkv['480']}"`;
+  } finally {
+    await ctx.close();
+  }
+});
+
 await check('video made smaller: a 1280x720 video at 480p is encoded again with the shape kept (H.264 in an MP4)', async () => {
   if (!existsSync(big)) return 'SKIP (no 720p fixture: ffmpeg missing)';
-  if (!enc.avc && !enc.vp9) return 'SKIP (this Chromium can write neither H.264 nor VP9)';
+  if (!enc.avc) return 'SKIP (this Chromium can\'t write H.264, so an MP4 at a new size is made on our side)';
   await runFree('conv720.mp4');
   const r = await saveAs(null, { format: 'mp4', size: '480' });
   const i = probe(r.p);
   if (i.v.height !== 480) throw new Error(`height ${i.v.height}`);
+  if (i.v.codec_name !== 'h264' || i.a?.codec_name !== 'aac') throw new Error(`an MP4 should be H.264 + AAC: ${i.v.codec_name} + ${i.a?.codec_name}`);
   if (Math.abs(i.v.width / i.v.height - 16 / 9) > 0.02) throw new Error(`shape ${i.v.width}x${i.v.height}`);
   if (!/encoded again/.test(r.note)) throw new Error(`note: ${r.note}`);
   return `${r.name} ${i.v.codec_name} ${i.v.width}x${i.v.height}, ${i.a.codec_name}; ${r.note}`;
@@ -249,7 +305,7 @@ await check('file type alone: with the file\'s own type and size Start says what
 
 await check('video size alone: a 720p video at 480p is made again in the browser with the shape kept, for free, with nothing else chosen; a sound file in another type is the same', async () => {
   const out = [];
-  if (existsSync(big) && (enc.avc || enc.vp9)) {
+  if (existsSync(big) && enc.avc) {
     await prepareConversion('conv720.mp4');
     await field('out-size').selectOption('480');
     await startReady();
@@ -261,9 +317,9 @@ await check('video size alone: a 720p video at 480p is made again in the browser
     const p = join(FILES, 'conv-only-size.mp4');
     await downloads[0].saveAs(p);
     const i = probe(p);
-    if (i.v.height !== 480 || Math.abs(i.v.width / i.v.height - 16 / 9) > 0.02 || !i.a) throw new Error(`${i.v.width}x${i.v.height} sound ${i.a?.codec_name}`);
+    if (i.v.height !== 480 || Math.abs(i.v.width / i.v.height - 16 / 9) > 0.02 || i.a?.codec_name !== 'aac' || i.v.codec_name !== 'h264') throw new Error(`${i.v.width}x${i.v.height} ${i.v.codec_name}, sound ${i.a?.codec_name}`);
     out.push(`${i.v.codec_name} ${i.v.width}x${i.v.height}`);
-  } else out.push('size skipped (no 720p fixture, or this Chromium can write neither H.264 nor VP9)');
+  } else out.push('size skipped (no 720p fixture, or this Chromium can\'t write H.264)');
   await prepareConversion('noisy.wav');
   await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).waitFor({ timeout: 5000 });
   await field('out-format').selectOption('flac');

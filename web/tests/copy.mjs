@@ -194,7 +194,13 @@ await check('legal: every licence in the list links to a real licence text (not 
   await page.goto(`${BASE}/licenses`);
   if (!(await page.locator('[data-testid=licenses] a[href^="https://creativecommons.org/licenses/by/4.0/"]').count())) throw new Error('no link to the CC BY 4.0 licence');
   const main = await page.locator('main').innerText();
-  for (const need of ['mediabunny', 'React', 'React Router', 'Vite', 'Rust crates', 'sherpa-onnx', 'CC BY 4.0']) if (!main.includes(need)) throw new Error('missing ' + need);
+  for (const need of ['mediabunny', 'React', 'React Router', 'Vite', 'Rust crates', 'sherpa-onnx', 'CC BY 4.0', '@mediabunny/aac-encoder', 'FFmpeg AAC encoder']) if (!main.includes(need)) throw new Error('missing ' + need);
+  // the AAC encoder (written in every browser, downloaded the first time): its MPL-2.0 text, and FFmpeg's LGPL text with the notice saying where the source is
+  for (const [file, want] of [['mediabunny-aac-encoder-LICENSE.txt', /Mozilla Public License/], ['ffmpeg-aac-COPYING.LGPLv2.1.txt', /GNU LESSER GENERAL PUBLIC LICENSE/i], ['ffmpeg-aac-NOTICE.txt', /ffmpeg\.org[\s\S]*aac-encoder/]]) {
+    if (!seen.some((h) => h.endsWith(`/licenses/${file}`))) throw new Error(`the licence page does not link ${file}`);
+    const body = await (await page.request.get(`${BASE}/licenses/${file}`)).text();
+    if (!want.test(body)) throw new Error(`${file}: ${body.slice(0, 80)}`);
+  }
   if (!/models .*are downloaded by your browser from Hugging Face/.test(main) || /dfn\//.test(main)) throw new Error('the page does not say the free tools\' models come from Hugging Face');
   return `${seen.length} licence files`;
 });

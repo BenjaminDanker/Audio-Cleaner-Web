@@ -395,7 +395,7 @@ await check('signed out: another file type or video size with nothing else chose
 await check('signed out: a new picture size alone converts in the browser too (a 720p video at 480p, the shape kept), and a sound file in another type is the same free conversion', async () => {
   const enc = await page.evaluate(async () => {
     const ok = async (c) => { try { return !!(await VideoEncoder.isConfigSupported(c)).supported; } catch { return false; } };
-    return (await ok({ codec: 'avc1.42001f', width: 640, height: 360, bitrate: 1e6 })) || (await ok({ codec: 'vp09.00.10.08', width: 640, height: 360, bitrate: 1e6 }));
+    return await ok({ codec: 'avc1.42001f', width: 640, height: 360, bitrate: 1e6 }); // (an MP4 is H.264 only: where it can't be written the new size is made on our side)
   }).catch(() => false);
   const out = [];
   if (enc) {
@@ -416,10 +416,10 @@ await check('signed out: a new picture size alone converts in the browser too (a
     const p = join(GEN, 'small.mp4');
     await downloads[0].saveAs(p);
     const got = probeOf(p);
-    if (got.v.height !== 480 || Math.abs(got.v.width / got.v.height - 16 / 9) > 0.02 || !got.a) throw new Error(`${got.v.width}x${got.v.height} ${got.a?.codec_name}`);
+    if (got.v.height !== 480 || Math.abs(got.v.width / got.v.height - 16 / 9) > 0.02 || got.v.codec_name !== 'h264' || got.a?.codec_name !== 'aac') throw new Error(`${got.v.width}x${got.v.height} ${got.v.codec_name} ${got.a?.codec_name}`);
     onlyPublic('during the resize');
     out.push(`${got.v.width}x${got.v.height}`);
-  } else out.push('size skipped (this Chromium can write neither H.264 nor VP9)');
+  } else out.push('size skipped (this Chromium can\'t write H.264)');
   calls.length = 0; downloads.length = 0;
   await page.goto(`${BASE}/app`);
   await dropFile(page, NOISY);

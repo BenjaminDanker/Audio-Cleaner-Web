@@ -115,6 +115,11 @@ export const COMPONENTS = [
     texts: [{ label: 'Mozilla Public License 2.0', file: 'mediabunny-mp3-encoder-LICENSE.txt', from: 'node_modules/@mediabunny/mp3-encoder/LICENSE' }],
   },
   {
+    name: '@mediabunny/aac-encoder', by: 'Vanilagy and contributors', license: 'MPL-2.0', pkg: '@mediabunny/aac-encoder', url: 'https://github.com/Vanilagy/mediabunny/tree/main/packages/aac-encoder',
+    what: 'Writes AAC sound in your browser (M4A files, and the sound of MP4, MOV and MKV videos). It is a separate file your browser downloads the first time it writes AAC. Used unmodified; its source is available at the link.',
+    texts: [{ label: 'Mozilla Public License 2.0', file: 'mediabunny-aac-encoder-LICENSE.txt', from: 'node_modules/@mediabunny/aac-encoder/LICENSE' }],
+  },
+  {
     name: 'Transformers.js', by: 'Hugging Face', license: 'Apache-2.0', pkg: '@huggingface/transformers', url: 'https://github.com/huggingface/transformers.js',
     what: 'Runs the subtitle model in your browser for the free subtitles, with its tokenizer (@huggingface/tokenizers, Apache-2.0) and template library (@huggingface/jinja, MIT). Downloaded only when you choose free subtitles.',
     texts: [
@@ -134,6 +139,14 @@ export const COMPONENTS = [
     texts: [
       { label: 'Notice: source code and how to replace it', file: 'lame-NOTICE.txt', from: 'licenses-src/lame-NOTICE.txt' },
       { label: 'GNU Lesser General Public License 2.1', file: 'lame-COPYING.LGPLv2.1.txt', from: 'licenses-src/ffmpeg-COPYING.LGPLv2.1' },
+    ],
+  },
+  {
+    name: 'FFmpeg AAC encoder', by: 'The FFmpeg developers', license: 'LGPL-2.1-or-later', url: 'https://ffmpeg.org/',
+    what: 'The AAC encoder inside @mediabunny/aac-encoder, compiled to WebAssembly (only the AAC encoder of FFmpeg). Unmodified; where to get the source and how to replace it are in the notice.',
+    texts: [
+      { label: 'Notice: source code and how to replace it', file: 'ffmpeg-aac-NOTICE.txt', from: 'licenses-src/ffmpeg-aac-NOTICE.txt' },
+      { label: 'GNU Lesser General Public License 2.1', file: 'ffmpeg-aac-COPYING.LGPLv2.1.txt', from: 'licenses-src/ffmpeg-COPYING.LGPLv2.1' },
     ],
   },
   {

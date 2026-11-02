@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.0",
+    "@mediabunny/aac-encoder": "1.61.3",
     "@mediabunny/mp3-encoder": "1.61.3",
     "mediabunny": "^1.61.3",
     "react": "^18.3.1",
