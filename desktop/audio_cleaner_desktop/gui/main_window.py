@@ -1,4 +1,6 @@
-"""The main window: Clean tab (queue, settings, preview) and Jobs tab (the list of jobs, each openable)."""
+"""The main window: one window, one screen. The editor (gui/studio.py) is always there: before a file is chosen it shows where to drop one, choosing a
+file fills it in, Start runs it and the same screen shows the result. The jobs (the files waiting and running, and every finished job) are a column
+beside it, or under it when the window is narrow; opening one shows it in the same editor."""
 from __future__ import annotations
 
 import logging
@@ -10,37 +12,39 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QSettings, QStandardPaths, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QRunnable, QSettings, QStandardPaths, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QScrollArea, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QBoxLayout, QFileDialog, QFrame, QLineEdit, QMainWindow, QMessageBox, QScrollArea, QSystemTrayIcon, QVBoxLayout,
+    QWidget,
 )
 
 from acw_common.ffmpeg import MediaError
 
-from .. import __version__, config, copies, editor_session, engine, models, resources, sysinfo
+from .. import __version__, config, copies, engine, models, redo, resources, sysinfo
 from ..updater import UpdateController
-from . import media, queue_view, shell, tips
+from . import media, shell, tips
 from .about import AboutDialog
+from .doc import Doc, DocEnv
 from .history import DONE, FAILED, Entry, HistoryStore
-from .history_view import HistoryPage, format_spent, settings_dict
-from .job_view import JobEnv
-from .plan_dialog import PlanDialog
-from .player import PreviewPane
+from .info_dialog import InfoDialog
+from .items import CANCELLED, DONE as ITEM_DONE, FAILED as ITEM_FAILED, RUNNING, WAITING, FileItem, format_size
+from .jobs_column import JobsColumn, format_spent
 from .preferences import Preferences
-from .queue_view import CANCELLED, DONE as ITEM_DONE, FAILED as ITEM_FAILED, RUNNING, WAITING, FileItem, FileRow, QueueView
-from .settings_panel import STRENGTH_LABELS, SettingsPanel
+from .settings_dialog import SettingsDialog
 from .speech_model import SpeechModelDownloader, size_text
+from .studio import Studio
 from .theme import set_property
 from .widgets import Banner
 from .worker import Job, JobQueue
+from .workers import Worker
+from ..labels import STRENGTH_LABELS, settings_dict
 
 log = logging.getLogger(__name__)
 
-SETTINGS_SHARE = 0.34  # of the window width
-SETTINGS_MIN_WIDTH = 340
-SETTINGS_MAX_WIDTH = 520
+JOBS_BESIDE = 1180  # below this width the jobs go under the editor
+NARROW = 900  # below this much room the settings go under the editor too
+JOBS_WIDTH = 300
 SCRATCH_SAFETY = engine.SCRATCH_SAFETY
 MODEL_UPDATE_DELAY_MS = 6000  # a model whose catalog entry changed is fetched this long after the window opens
 SWEEP_DELAY_MS = 3000  # leftovers of an earlier run are swept this long after the window opens
@@ -59,9 +63,6 @@ def log_dir() -> Path:
     return path
 
 
-class _ProbeSignals(QObject):
-    done = Signal(int, object, str)  # id, ProbeResult | None, error message
-
 
 class _SweepTask(QRunnable):
     """Removes the scratch files an earlier run left behind (it crashed or was killed), off the window's thread."""
@@ -79,28 +80,6 @@ class _SweepTask(QRunnable):
             log.exception("sweeping leftovers failed")
 
 
-class _ProbeTask(QRunnable):
-    """Reads a file's length and kind in the background so the list can show them."""
-
-    def __init__(self, item_id: int, path: Path):
-        super().__init__()
-        self.signals = _ProbeSignals()
-        self._id, self._path = item_id, path
-
-    def run(self) -> None:
-        try:
-            result, error = engine.probe(self._path), ""
-        except MediaError as e:
-            result, error = None, str(e)
-        except Exception:  # noqa: BLE001 - never let a bad file kill the pool thread
-            log.exception("probing %s failed", self._path)
-            result, error = None, "This file could not be read."
-        self.signals.done.emit(self._id, result, error)
-
-
-def _subtitle_file(paths: list[Path]) -> Path | None:
-    """The .srt/.vtt among a result's files (subtitles inside a video are read from the video itself)."""
-    return next((p for p in paths[1:] if p.suffix.lower() in (".srt", ".vtt") and p.exists()), None)
 
 
 def _plural(n: int, one: str, many: str) -> str:
@@ -116,10 +95,11 @@ class MainWindow(QMainWindow):
         history_path: Path | None = None,
         runner=engine.process,
         updater: UpdateController | None = None,
+        doc_env: DocEnv | None = None,
     ):
         super().__init__()
         self.setWindowTitle(config.APP_NAME)
-        self.setMinimumSize(900, 520)
+        self.setMinimumSize(640, 520)
         self.setAcceptDrops(True)
         self._qs = settings if settings is not None else QSettings()
         self.prefs = Preferences(self._qs)
@@ -140,8 +120,15 @@ class MainWindow(QMainWindow):
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(2)
         self._awake = sysinfo.SleepInhibitor()
-        self._history_stale = False
         self._closing = False
+        self.doc: Doc | None = None  # the file in the editor
+        self._saving: Worker | None = None  # a change to a finished job is being saved
+        self._settings_dialog: SettingsDialog | None = None
+        self._redo = redo.run  # (what makes a change: tests replace it)
+        self.doc_env = doc_env or DocEnv(
+            prefs=self.prefs, scratch=lambda: self.history.jobs_root, voice_ready=lambda: resources.voice_model_dir() is not None,
+            speech_ready=lambda: resources.speech_ready(), noise_ready=lambda: resources.noise_ready())
+        self._jobs_timer = QTimer(self, singleShot=True, interval=0, timeout=self._draw_jobs)
 
         self._build_menus()
         self._build_ui()
@@ -150,16 +137,9 @@ class MainWindow(QMainWindow):
         if geometry:
             self.restoreGeometry(geometry)
         else:
-            self.resize(1080, 720)
-        self._fit_settings()
-        queued = self.add_paths(files)
-        self._refresh_state()
-        try:  # open on the tab the app was closed on, unless files were just given (they are on the Clean tab)
-            tab = int(self._qs.value("tab", 0))
-        except (TypeError, ValueError):
-            tab = 0
-        if not queued and 0 < tab < self.tabs.count():
-            self.tabs.setCurrentIndex(tab)
+            self.resize(1440, 900)
+        self.add_paths(files)
+        self._draw_jobs()
         QTimer.singleShot(SWEEP_DELAY_MS, self._sweep_leftovers)
 
     # -- construction -------------------------------------------------------
@@ -169,48 +149,34 @@ class MainWindow(QMainWindow):
         self._act_add = QAction("&Add files...", self, shortcut=QKeySequence.StandardKey.Open)
         self._act_add.setStatusTip("Choose video or audio files")
         self._act_folder = QAction("Add &folder...", self, shortcut=QKeySequence("Ctrl+Shift+O"))
+        self._act_settings = QAction("&Settings...", self, shortcut=QKeySequence("Ctrl+,"), menuRole=QAction.MenuRole.PreferencesRole)
         quit_action = QAction("&Quit", self, shortcut=QKeySequence.StandardKey.Quit, menuRole=QAction.MenuRole.QuitRole)
         quit_action.triggered.connect(self.close)
         file_menu.addActions([self._act_add, self._act_folder])
         file_menu.addSeparator()
+        file_menu.addAction(self._act_settings)
+        file_menu.addSeparator()
         file_menu.addAction(quit_action)
 
         help_menu = self.menuBar().addMenu("&Help")
+        options = QAction("All the &options", self)
+        options.triggered.connect(self.show_options)
         about = QAction(f"&About {config.APP_NAME}", self, menuRole=QAction.MenuRole.AboutRole)
         about.triggered.connect(lambda: AboutDialog(self, updates_on=self.prefs.check_updates).exec())
         logs = QAction("Open &log folder", self)
         logs.triggered.connect(lambda: shell.open_path(log_dir()))
-        help_menu.addActions([about, logs])
+        help_menu.addActions([options, about, logs])
 
     def _build_ui(self) -> None:
-        root = QWidget()
-        outer = QVBoxLayout(root)
-        outer.setContentsMargins(24, 12, 24, 10)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.page = QWidget()
+        self.page.setObjectName("Page")
+        outer = QVBoxLayout(self.page)
+        outer.setContentsMargins(16, 16, 16, 10)
         outer.setSpacing(8)
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(False)
-        outer.addWidget(self.tabs, 1)
-
-        self.tabs.addTab(self._build_clean_tab(), "Clean")
-        self.history_page = HistoryPage(self.history, env=JobEnv(
-            voice_ready=lambda: resources.voice_model_dir() is not None, speech_ready=resources.speech_ready,
-            noise_ready=resources.noise_ready, scratch=lambda: self.history.jobs_root,
-        ))
-        self.tabs.addTab(self.history_page, "Jobs")
-
-        footer = QHBoxLayout()
-        version = QLabel(f"Version {__version__}")
-        version.setObjectName("Small")
-        footer.addStretch(1)
-        footer.addWidget(version)
-        outer.addLayout(footer)
-        self.setCentralWidget(root)
-
-    def _build_clean_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 16, 0, 0)
-        layout.setSpacing(12)
 
         self.banner_missing = Banner()
         self.banner_disk = Banner()
@@ -218,44 +184,17 @@ class MainWindow(QMainWindow):
         self.banner_models.action.connect(self._models_action)
         self.banner_update = Banner()
         self.banner_update.action.connect(self._update_action)
+        self.banner_files = Banner()
         self._model_queue: list[SpeechModelDownloader] = []
         self._auto_models = False  # the queue is an update the app started by itself (quiet when it fails)
         self._noise_only = False  # the queue is just the (required) noise removal models, see fetch_noise_models
-        layout.addWidget(self.banner_missing)
-        layout.addWidget(self.banner_disk)
-        layout.addWidget(self.banner_models)
-        layout.addWidget(self.banner_update)
+        for banner in (self.banner_missing, self.banner_disk, self.banner_models, self.banner_update, self.banner_files):
+            outer.addWidget(banner)
         if self._missing:
             self.banner_missing.show_message(
                 "Audio Cleaner is missing some of its own files (" + ", ".join(self._missing) + "). "
                 "Please install it again.", "error",
             )
-
-        body = QHBoxLayout()
-        body.setSpacing(16)
-        layout.addLayout(body, 1)
-
-        left = QVBoxLayout()
-        left.setSpacing(12)
-        self.queue_card = QFrame()
-        self.queue_card.setObjectName("Card")
-        card = QVBoxLayout(self.queue_card)
-        card.setContentsMargins(10, 10, 10, 6)
-        card.setSpacing(4)
-        self.drop_zone = queue_view.DropZone()
-        self.view = QueueView()
-        card.addWidget(self.drop_zone, 1)
-        card.addWidget(self.view, 1)
-        self.tip = QLabel("Tip: change the ending or pick a format to save as something else, e.g. .mp3 for just the sound.")
-        self.tip.setObjectName("Small")
-        self.tip.setWordWrap(True)
-        self.tip.setContentsMargins(6, 0, 6, 2)
-        self.tip.hide()
-        card.addWidget(self.tip)
-        left.addWidget(self.queue_card, 1)
-        self.preview: PreviewPane | None = None  # created on first use, so QtMultimedia only loads when needed
-        self._left = left
-        body.addLayout(left, 1)
 
         self.noise_download = SpeechModelDownloader(self, resources.NOISE_MODEL)
         self.speech_download = SpeechModelDownloader(self)
@@ -265,54 +204,55 @@ class MainWindow(QMainWindow):
             dl.progress.connect(lambda done, total, dl=dl: self._model_queue and self._model_queue[0] is dl
                                 and self._show_model_progress(done, total))
         self._fetch_missing_noise_models()
-        self.settings_panel = SettingsPanel(
-            self.prefs, self.speech_download, voice_downloader=self.voice_download,
-            updater=self.updater,
-        )
-        self._settings_scroll = scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(self.settings_panel)
-        scroll.viewport().setAutoFillBackground(False)
-        body.addWidget(scroll)
 
-        bottom = QHBoxLayout()
-        bottom.setSpacing(12)
-        status = QVBoxLayout()
-        status.setSpacing(6)
-        self.status = QLabel()
-        self.status.setObjectName("Muted")
-        self.overall = QProgressBar()
-        self.overall.setRange(0, 1000)
-        self.overall.setTextVisible(False)
-        self.overall.setToolTip("Progress of all the files together")
-        status.addWidget(self.status)
-        status.addWidget(self.overall)
-        bottom.addLayout(status, 1)
-        self.clear_button = QPushButton("Clear finished")
-        self.clear_button.setToolTip("Take the finished, failed and cancelled files off the list. The files themselves stay.")
-        bottom.addWidget(self.clear_button)
-        self.primary = QPushButton()
-        self.primary.setObjectName("Primary")
-        self.primary.setMinimumWidth(170)
-        bottom.addWidget(self.primary)
-        layout.addLayout(bottom)
+        self.body = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.body.setSpacing(14)
+        self.studio = Studio(self.prefs, self.speech_download, self.voice_download)
+        self.studio.problems = self._problems
+        self.studio.out_dir = self.prefs.output_dir
+        self.jobs = JobsColumn(self.history, lambda: list(self._items.values()), lambda: self._queued)
+        self.jobs.setFixedWidth(JOBS_WIDTH)
+        self.body.addWidget(self.studio, 1, Qt.AlignmentFlag.AlignTop)
+        self.body.addWidget(self.jobs, 0, Qt.AlignmentFlag.AlignTop)
+        outer.addLayout(self.body)
+        outer.addStretch(1)
+        from PySide6.QtWidgets import QLabel
 
-        self.setTabOrder(self.drop_zone, self.view)
-        self.setTabOrder(self.view, scroll)
-        return page
+        version = QLabel(f"Version {__version__}")
+        version.setObjectName("Small")
+        version.setAlignment(Qt.AlignmentFlag.AlignRight)
+        outer.addWidget(version)
+        self.scroll.setWidget(self.page)
+        self.setCentralWidget(self.scroll)
 
     def _wire(self) -> None:
         self._act_add.triggered.connect(self.choose_files)
         self._act_folder.triggered.connect(self.choose_folder)
-        self.drop_zone.addFiles.connect(self.choose_files)
-        self.drop_zone.addFolder.connect(self.choose_folder)
-        self.primary.clicked.connect(self._primary_clicked)
-        self.clear_button.clicked.connect(self.clear_finished)
-        self.settings_panel.changed.connect(self._settings_changed)
-        self.tabs.currentChanged.connect(self._tab_changed)
+        self._act_settings.triggered.connect(self.show_settings)
         self.updater.readyChanged.connect(self._update_ready)
+        s = self.studio
+        s.chooseFiles.connect(self.choose_files)
+        s.chooseFolder.connect(self.choose_folder)
+        s.differentFile.connect(self.different_file)
+        s.primaryClicked.connect(self.primary)
+        s.cancelClicked.connect(self.cancel_current)
+        s.deleteRequested.connect(self.delete_current)
+        s.changeFolder.connect(self._change_folder)
+        s.nextToOriginal.connect(self._next_to_original)
+        s.infoRequested.connect(self.show_options)
+        s.outputChanged.connect(self._check_disk)
+        s.findOriginal.connect(self.find_original)
+        s.subtitlesOnly.connect(self.save_subtitles_only)
+        j = self.jobs
+        j.openItem.connect(self.open_item)
+        j.openEntry.connect(self.open_entry)
+        j.removeItem.connect(self.remove_item)
+        j.stopItem.connect(self._stop_item)
+        j.moveItem.connect(self._move)
+        j.deleteEntry.connect(self.delete_entry)
+        j.deleteAll.connect(self.delete_all)
+        j.startAll.connect(self.start_all)
+        j.stopAll.connect(self.request_cancel_all)
 
         q = self.queue
         q.itemStarted.connect(self._on_started)
@@ -323,24 +263,42 @@ class MainWindow(QMainWindow):
         q.idle.connect(self._on_idle)
 
         for keys in ("Ctrl+Return", "Ctrl+Enter"):
-            QShortcut(QKeySequence(keys), self, activated=self.start)
+            QShortcut(QKeySequence(keys), self, activated=self.primary)
         QShortcut(QKeySequence("Esc"), self, activated=self._escape)
 
     def _escape(self) -> None:
-        """Esc stops the cleaning, unless it is meant for something else: closing a help text, or clearing the
-        History search."""
-        if tips.is_showing() or self.tabs.currentIndex() != 0:
+        """Esc stops the cleaning, unless it is meant for something else: closing a help text, or clearing the search."""
+        if tips.is_showing():
             return
         focus = QApplication.focusWidget()
-        if isinstance(focus, QLineEdit):  # Esc in a name box only leaves the box
+        if isinstance(focus, QLineEdit):  # Esc in a name box or the search only leaves the box
             focus.clearFocus()
             return
         self.request_cancel_all()
 
-    def _tab_changed(self, index: int) -> None:
-        if index == 1 and self._history_stale:
-            self._history_stale = False
-            self.history_page.refresh()
+    # -- dialogs ----------------------------------------------------------------
+
+    def show_options(self) -> None:
+        InfoDialog(self).exec()
+
+    def show_settings(self) -> None:
+        if self._settings_dialog is None:
+            self._settings_dialog = SettingsDialog(self.prefs, self.speech_download, self.voice_download, self.updater, self)
+            self._settings_dialog.changed.connect(self._settings_changed)
+        self._settings_dialog.show()
+        self._settings_dialog.raise_()
+        self._settings_dialog.activateWindow()
+
+    def _change_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Choose where to save the cleaned files", self.prefs.output_folder or self.prefs.last_input_folder)
+        if folder:
+            self.prefs.output_folder = folder
+            self.prefs.output_mode = "folder"
+            self._settings_changed()
+
+    def _next_to_original(self) -> None:
+        self.prefs.output_mode = "next"
+        self._settings_changed()
 
     # -- adding files ---------------------------------------------------------
 
@@ -360,259 +318,323 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, config.APP_NAME, "There are no video or audio files in that folder.")
 
     def add_paths(self, paths: Iterable[str | Path]) -> int:
-        """Queue files (folders are searched). Returns how many were added."""
-        known = {i.path for i in self._items.values() if i.state in (WAITING, RUNNING)}
-        finished = {i.path: i for i in self._items.values() if i.state in (ITEM_DONE, ITEM_FAILED, CANCELLED)}
-        added = 0
+        """Take files in (folders are searched): the first one is in the editor at once, in place, and the rest wait in the jobs. Returns how many
+        files were taken in (one that is already in the list is shown instead, and counts as taken)."""
+        known = {i.path: i for i in self._items.values() if i.state in (WAITING, RUNNING, CANCELLED)}
+        added, first = 0, None
         for path in media.expand(paths):
-            if path in known:
-                continue
-            if path in finished:  # already in the list: clean it again in its own row instead of adding a twin
-                self._requeue(finished.pop(path))
+            item = known.get(path)
+            if item is not None:  # already in the list: it is shown instead of adding a twin
+                if item.state == CANCELLED:
+                    item.state = WAITING
+                first = first or item
                 added += 1
                 continue
             item = FileItem(self._next_id, path, has_video=path.suffix.lower() in media.VIDEO_EXTENSIONS)
             item.source = engine.Source(item.has_video, path.suffix.lower())  # a guess, until the file is read
-            item.out_name = self._default_name(item)
+            item.out_name = engine.default_output_name(path, item.source, self.prefs.job_options())
             self._next_id += 1
             self._items[item.id] = item
-            row = FileRow(item)
-            row.nameEdited.connect(self._name_typed)
-            row.endingPicked.connect(self._ending_picked)
-            row.nameDone.connect(self._name_done)
-            row.removeRequested.connect(self.remove_item)
-            row.cancelRequested.connect(self._stop_item)
-            row.previewRequested.connect(self.show_preview)
-            row.revealRequested.connect(self._reveal)
-            row.againRequested.connect(self.clean_again)
-            row.partsRequested.connect(self.choose_parts)
-            row.moveRequested.connect(self._move)
-            self.view.add(row)
+            doc = Doc(self.doc_env, path, item=item, parent=self)
+            doc.out_name = item.out_name
+            doc.unreadable.connect(lambda message, d=doc: self._unreadable(d, message))
+            doc.factsReady.connect(self._draw_jobs)
+            item.doc = doc
             if self._missing:
                 item.probed = True
-                row.refresh()
             else:
-                task = _ProbeTask(item.id, path)
-                task.signals.done.connect(self._on_probed)
-                self._pool.start(task)
-            if self.queue.active:
-                self._enqueue(item)
+                doc.open_file()
+            first = first or item
             added += 1
-        self._refresh_state()
+        if first is not None:
+            self.open_item(first.id)
+        self._draw_jobs()
+        self._check_disk()
         return added
 
-    def _requeue(self, item: FileItem) -> None:
-        """Put a finished, failed or cancelled row back in line (with the settings at the time it starts)."""
-        # The new result takes the place of the old one only under the same name: another name is a new file.
-        same_name = item.out_name == item.made_name
-        item.replaces = {p: st for p, st in item.made.items() if p in item.outputs} if same_name else {}
-        item.state, item.progress, item.message, item.outputs = WAITING, 0.0, "", []
-        self._refresh_row(item)
-        if self.queue.active:
-            self._enqueue(item)
-
-    def clean_again(self, item_id: int) -> None:
-        """Clean one finished row again with the current settings, right away (a running one: restart it)."""
-        item = self._items.get(item_id)
-        if item is not None and item.state == RUNNING:
-            item.restart = True
-            self.queue.cancel(item_id)
-            self._mark_stopping(item_id)
-            self._refresh_state()
+    def _unreadable(self, doc: Doc, message: str) -> None:
+        """A file that can't be read: it is not taken in, and it is said so (in the editor when it is the one that was to be shown)."""
+        item = doc.item
+        if item is None or self._closing:
             return
-        if item is None or item.state not in (ITEM_DONE, ITEM_FAILED, CANCELLED) or self._missing:
+        text = f"{doc.name}: {message}"
+        was_current = self.doc is doc
+        self.remove_item(item.id)
+        if was_current:
+            self.studio.show_problem(text)
+        else:
+            self.banner_files.show_message(text, "warn")
+
+    # -- the editor shows a file ------------------------------------------------
+
+    def _key_of(self, doc: Doc | None) -> tuple[str, int] | None:
+        if doc is None:
+            return None
+        if doc.entry is not None:
+            return ("entry", doc.entry.id)
+        return ("item", doc.item.id) if doc.item is not None else None
+
+    def _show(self, doc: Doc | None) -> None:
+        """Put this file in the editor, in place (no new window, no page change). None: the empty screen."""
+        old = self.doc
+        if old is doc:
+            self.studio.set_doc(doc)
+            self.jobs.set_current(self._key_of(doc))
             return
-        if not self.noise_download.ready:
-            self._ask_for_model(self.noise_download)
+        if old is not None:
+            old.release()
+            if old.item is None:  # a job opened from the list: nothing else holds it
+                old.dispose()
+        self.doc = doc
+        if doc is not None:
+            doc.activate()
+            if doc.is_job:
+                doc.open_session()
+        self.studio.show_problem("")
+        self.studio.set_doc(doc)
+        self.jobs.set_current(self._key_of(doc))
+
+    def open_item(self, item_id: int) -> None:
+        item = self._items.get(item_id)
+        if item is not None and item.doc is not None:
+            self._show(item.doc)
+
+    def open_entry(self, entry_id: int) -> None:
+        """A job of the list in the editor: the result, its settings and the parts, in the same window; the sound is made ready in the background."""
+        for item in self._items.values():
+            if item.entry_id == entry_id and item.doc is not None and item.doc.entry is not None:
+                self._show(item.doc)
+                return
+        entry = self.history.get(entry_id)
+        if entry is None:
             return
-        self._requeue(item)
-        if not self.queue.active:
-            self._batch_started = time.monotonic()
-            self._batch_done = self._batch_failed = 0
-            if self._enqueue(item):
-                self.queue.start()
-        self._refresh_state()
+        job = None
+        if entry.job_dir:
+            folder = copies.job_dir(self.history.jobs_root, entry.job_dir)
+            loaded = copies.JobCopies.load(folder) if folder is not None else None
+            job = loaded if loaded is not None and loaded else None
+        check = job.check_original() if job is not None else copies.OriginalCheck("missing")
+        doc = Doc.for_job(self.doc_env, entry, job, check, parent=self)
+        doc.stage = "done"
+        if entry.status != DONE:
+            doc.note, doc.note_kind = entry.message or "This job failed.", "error"
+        self._show(doc)
 
-    def choose_parts(self, item_id: int) -> None:
-        """Open "Choose parts" for a file that is waiting: the per-part editor in plan mode. What is chosen is cleaned with the file."""
-        item = self._items.get(item_id)
-        if item is None or item.state != WAITING or item.id in self._queued:
+    def different_file(self) -> None:
+        """"Different file": the file leaves the editor (one that was not started is taken off the list; a job stays there)."""
+        doc = self.doc
+        if doc is None:
             return
-        dialog = PlanDialog(item.path, item.path.name, item.has_video, self.prefs.job_options(), state=item.plan_state,
-                            scratch=self.history.jobs_root, parent=self, open_plan=self._open_plan)
-        dialog.exec()
-        if dialog.result() != dialog.DialogCode.Accepted:
+        if doc.item is not None and doc.item.state in (WAITING, CANCELLED, ITEM_FAILED) and doc.entry is None and doc.item.id not in self._queued:
+            self.remove_item(doc.item.id)
+        else:
+            self._show(None)
+
+    def find_original(self) -> None:
+        """The original was moved or renamed: point at it (it is only accepted if it is the same file)."""
+        doc = self.doc
+        if doc is None or doc.job is None or doc.entry is None:
             return
-        item.timeline, item.plan_state, item.parts_note = dialog.timeline(), dialog.state(), dialog.summary()
-        self._refresh_row(item)
-
-    _open_plan = staticmethod(editor_session.PlanSession.open)
-
-    def _take_place_of_previous(self, item: FileItem, paths: list[Path]) -> tuple[list[Path], bool]:
-        """After "Clean again": give each new file the name of the earlier result of the same type, once that
-        earlier file is safely in the Recycle Bin / Trash. Files that were changed since, or that can't be
-        moved to the bin, are left alone and the new file keeps its own name. When the results now go to another
-        folder, the earlier ones stay where they are. An earlier subtitle file the new run did not write again
-        goes to the bin with the earlier result it belonged to."""
-        replaced = False
-        out = []
-        for new in paths:
-            target = next((p for p in item.replaces if p.suffix.lower() == new.suffix.lower()), None)
-            if target is not None and target.parent == new.parent:
-                item.replaces.pop(target)
-                if self._unchanged(item, target) and target != new and shell.move_to_trash(target):
-                    replaced = True  # the earlier version is safe in the bin, whatever happens to the name
-                    try:
-                        os.replace(new, target)
-                        new = target
-                    except OSError:
-                        log.warning("could not rename %s to %s", new, target, exc_info=True)
-            out.append(new)
-        if replaced:
-            for stale in [p for p in item.replaces if p.suffix.lower() in (".srt", ".vtt", ".txt")]:
-                if self._unchanged(item, stale):
-                    shell.move_to_trash(stale)
-        item.replaces = {}
-        return out, replaced
-
-    @staticmethod
-    def _unchanged(item: FileItem, path: Path) -> bool:
-        try:
-            st = path.stat()
-            return (st.st_size, st.st_mtime_ns) == item.made.get(path)
-        except OSError:
-            return False
-
-    def _enqueue(self, item: FileItem, first: bool = False) -> bool:
-        """Put a file in line. False (and the reason shown in its row) when the name can't be used."""
-        if self._name_problem(item):
-            item.name_hint = True
-            self._refresh_row(item)
-            return False
-        item.options = self.prefs.job_options()
-        self._queued.add(item.id)
-        item.keep_dir = copies.plan_job_dir(self.history.jobs_root)  # where this run keeps the copies that let its result be changed later
-        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir(), output_name=item.out_name, keep_dir=item.keep_dir,
-                           timeline=item.timeline), first=first)
-        return True
-
-    # -- what the result is called ------------------------------------------------
-
-    def _default_name(self, item: FileItem) -> str:
-        return engine.default_output_name(item.path, item.source, self.prefs.job_options())
-
-    @staticmethod
-    def _name_problem(item: FileItem) -> str:
-        return engine.check_output_name(item.out_name, item.source)[1] if item.source is not None else ""
-
-    def _name_typed(self, item_id: int, text: str) -> None:
-        item = self._items.get(item_id)
-        if item is not None:
-            item.out_name = text
-            self._name_changed(item)
-
-    def _ending_picked(self, item_id: int, ending: str) -> None:
-        item = self._items.get(item_id)
-        if item is not None:
-            item.out_name = engine.with_ending(item.out_name or self._default_name(item), ending)
-            item.name_hint = False
-            self._name_changed(item)
-
-    def _name_done(self, item_id: int) -> None:
-        """The name box was left: if the name can't be used, say why."""
-        item = self._items.get(item_id)
-        if item is not None and self._name_problem(item):
-            item.name_hint = True
-            self._refresh_row(item)
-
-    def _name_changed(self, item: FileItem) -> None:
-        item.out_custom = item.out_name.strip() != self._default_name(item)
-        problem = self._name_problem(item)
-        if not problem:
-            item.name_hint = False
-        if item.state == WAITING:
-            if item.id in self._queued:  # already in line (a batch is running): follow the name, or wait for a good one
-                if problem:
-                    self.queue.remove(item.id)
-                    self._queued.discard(item.id)
-                else:
-                    self.queue.set_output_name(item.id, item.out_name)
-            elif not problem and self.queue.active:
-                self._enqueue(item)
-        self._refresh_row(item)
-        self._refresh_state()
-
-    @Slot(int, object, str)
-    def _on_probed(self, item_id: int, result, error: str) -> None:
-        item = self._items.get(item_id)
-        if item is None:
+        path, _ = QFileDialog.getOpenFileName(self, "Find the original file", str(doc.job.original_path.parent))
+        if not path:
             return
-        item.probed = True
-        if result is not None:
-            item.duration, item.has_video, item.channels = result.duration, result.has_video, result.audio_channels
-            item.source = engine.Source.of(result, item.path)
-            if not item.out_custom:
-                item.out_name = self._default_name(item)
-        elif item.state == WAITING:
-            self._queued.discard(item_id)
-            self.queue.remove(item_id)
-            item.state, item.message, item.source = ITEM_FAILED, error, None
-            self._record(item, FAILED, error, [])
-        self._refresh_row(item)
-        self._refresh_state()
+        check = doc.job.relocate(Path(path))
+        if not check.ok:
+            doc.note, doc.note_kind = check.text, "warn"
+            doc.changed.emit()
+            return
+        self.history.set_source(doc.entry.id, str(Path(path)))
+        doc.path = Path(path)
+        doc.original = doc.job.check_original()
+        doc.note, doc.note_kind = "Found it. This job can be changed and saved again.", "info"
+        doc.session_state = "none"
+        doc.open_session()
+        doc.changed.emit()
+
+    def remove_item(self, item_id: int) -> None:
+        item = self._items.get(item_id)
+        if item is None or item.state == RUNNING:
+            return
+        self.queue.remove(item_id)
+        self._queued.discard(item_id)
+        self._items.pop(item_id, None)
+        doc, item.doc = item.doc, None
+        if doc is not None:
+            if self.doc is doc:
+                self.doc = None
+                self.studio.set_doc(None)
+                self.jobs.set_current(None)
+            doc.dispose()
+        self._draw_jobs()
+        self._check_disk()
+
+    def clear_finished(self) -> None:
+        """Take the cancelled files off the list (the finished ones are jobs: they stay until they are deleted)."""
+        for item in [i for i in self._items.values() if i.state in (CANCELLED,)]:
+            self.remove_item(item.id)
+
+    # -- what stops a start ---------------------------------------------------------
+
+    def _problems(self, doc: Doc) -> list[str]:
+        """What stops this file from being started (or its changes from being saved), in words: shown over the editor, and the button waits."""
+        out: list[str] = []
+        if self._missing:
+            out.append("Audio Cleaner is missing some of its own files, so it can't clean anything until it is installed again.")
+        if doc.model is None:
+            return out
+        if doc.is_job and doc.job is None:
+            out.append("This job has no saved copies. It was cleaned before Audio Cleaner kept them, or they were removed. You can still listen to it and "
+                       "delete it, but it can't be changed and saved again; clean the original again to get that.")
+            return out
+        needs_run = doc.stage == "ready" or doc.changed_sound or doc.changed_output
+        if not needs_run:
+            return out
+        if doc.stage == "ready" and not self.noise_download.ready:
+            out.append("Noise removal needs its models, which aren't downloaded yet (23 MB, once). They download by themselves: start when it is done.")
+        if doc.subtitles != "off" and not self.speech_download.ready and (doc.stage == "ready" or doc.changed_output or doc.changed_sound):
+            out.append("Subtitles need the speech model (a one-time download of 1.6 GB). Download it under Subtitles, or turn them off.")
+        tl = doc.model.draft
+        if tl.layers["rebuild"] and not self.voice_download.ready and (doc.stage == "ready" or doc.changed_sound):
+            out.append("Voice rebuild needs its model (a one-time download of 0.5 GB). Download it under Voice, or choose Noise removal.")
+        source = doc.facts.source() if doc.facts is not None else None
+        if source is not None and doc.out_name:
+            problem = engine.check_output_name(doc.out_name, source)[1]
+            if problem:
+                out.append(problem)
+        elif not doc.out_name and doc.facts is not None:
+            out.append("Type a name for the result.")
+        if doc.is_job and doc.job is not None:
+            plan = redo.plan(doc.job, self._wanted(doc), doc.original, source=source, voice_model=self.voice_download.ready,
+                             speech_model=self.speech_download.ready, noise_models=self.noise_download.ready)
+            for p in plan.problems:
+                if p not in out:
+                    out.append(p)
+        return out
 
     # -- starting and stopping -----------------------------------------------
 
-    def start(self) -> None:
-        if self._missing or self.queue.busy:
+    def primary(self) -> None:
+        """The button of the start row: Start a file that has not been started, Save changes to a result, or open the result."""
+        doc = self.doc
+        if doc is None or doc.model is None:
             return
-        if not self.noise_download.ready and not self._ask_for_model(self.noise_download):
-            return
-        if self.prefs.subtitles != "off" and not self.speech_download.ready and not self._ask_for_model(self.speech_download):
-            return
-        if self.prefs.job_options().rebuild_voice and not self.voice_download.ready and not self._ask_for_model(self.voice_download):
-            return
-        self._batch_started = time.monotonic()
-        self._batch_done = self._batch_failed = 0
-        for row in self.view.rows():
-            if row.item.state == WAITING:
-                self._enqueue(row.item)
-        if self.queue.busy:  # files whose name can't be used are left out (their rows say why)
-            self.queue.start()
-        self._refresh_state()
+        if doc.stage == "ready" and doc.item is not None:
+            self.start_item(doc.item)
+        elif doc.stage == "done":
+            if doc.changed_sound or doc.changed_output:
+                self.save_changes(doc)
+            else:
+                self.open_result(doc)
 
-    def _ask_for_model(self, downloader: SpeechModelDownloader) -> bool:
-        """A model that a setting needs is not here: setup downloads them, so this only happens when that
-        download failed (offline during setup) or the app was not installed by setup. Offers to download it now;
-        returns False (nothing is started now)."""
-        noise = downloader is self.noise_download
-        voice = downloader is self.voice_download
-        what = ("The noise removal models" if noise else
-                "The model that rebuilds the voice" if voice else "The speech model for subtitles")
-        way_out = "" if noise else (f", or {'turn Rebuild the voice off' if voice else 'turn subtitles off'} to clean the files right away")
-        if downloader.running:
-            QMessageBox.information(
-                self, config.APP_NAME,
-                f"{what} {'are' if noise else 'is'} still downloading (the progress is shown at the top). Start again when "
-                f"{'they are' if noise else 'it is'} done{way_out.replace(' right away', ' now')}.",
-            )
+    def start(self) -> None:
+        """Start the file in the editor (the same as the Start button)."""
+        self.primary()
+
+    def start_all(self) -> None:
+        """Start every file that is waiting, each with its own choices."""
+        for item in [i for i in self._items.values() if i.state == WAITING and i.id not in self._queued]:
+            self.start_item(item)
+
+    def start_item(self, item: FileItem) -> bool:
+        doc = item.doc
+        if self._missing or doc is None or doc.model is None or item.state == RUNNING or item.id in self._queued:
             return False
-        if noise:
-            text = (f"{what} are not installed, probably because the download during setup did not work. Audio Cleaner "
-                    f"cannot remove noise without them. Download them now ({size_text(downloader.model.size)})?\n\n"
-                    "You can start cleaning when it is done.")
-        else:
-            text = (f"{what} was not installed, probably because the download during setup did not work. Download it now "
-                    f"({size_text(downloader.model.size)})?\n\nYou can start cleaning when it is done{way_out}.")
-        box = QMessageBox(
-            QMessageBox.Icon.Question, config.APP_NAME, text,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self,
-        )
-        box.button(QMessageBox.StandardButton.Yes).setText("Download")
-        box.button(QMessageBox.StandardButton.No).setText("Not now")
-        if box.exec() == QMessageBox.StandardButton.Yes:
-            self.fetch_noise_models() if noise else self.fetch_models()
-        return False
+        if self._problems(doc):
+            return False
+        if item.state in (CANCELLED, ITEM_FAILED):
+            item.state, item.progress, item.message = WAITING, 0.0, ""
+        if not self.queue.busy:
+            self._batch_started = time.monotonic()
+            self._batch_done = self._batch_failed = 0
+        item.out_name = doc.out_name
+        item.options, item.timeline = doc.run_plan()
+        self._queued.add(item.id)
+        item.keep_dir = copies.plan_job_dir(self.history.jobs_root)  # where this run keeps the copies that let its result be changed later
+        doc.stage, doc.run_fraction, doc.saving = "processing", 0.0, False
+        doc.run_text = "In line: it starts when the files before it are done" if self.queue.busy else "Getting started…"
+        doc.note = ""
+        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir(), output_name=item.out_name, keep_dir=item.keep_dir,
+                           timeline=item.timeline))
+        if not self.queue.active:
+            self.queue.start()
+        doc.changed.emit()
+        self._draw_jobs()
+        return True
+
+    def request_cancel_all(self) -> None:
+        if not self.queue.busy:
+            return
+        if self._confirm("Stop cleaning?", "Files that are still being cleaned will be discarded. Finished files are kept."):
+            self.queue.cancel_all()
+            for item_id in self.queue.running_ids():
+                self._mark_stopping(item_id)
+            self._draw_jobs()
+
+    def cancel_current(self) -> None:
+        """"Cancel job" in the start row: stop the file that runs (or is in line), or the change that is being saved."""
+        doc = self.doc
+        if doc is None:
+            return
+        if self._saving is not None and doc.saving:
+            self._saving.cancel.set()
+            doc.run_text = "Stopping…"
+            doc.changed.emit()
+            return
+        item = doc.item
+        if item is None:
+            return
+        if item.state == RUNNING:
+            self._stop_item(item.id)
+        elif item.id in self._queued:
+            self.queue.remove(item.id)
+            self._queued.discard(item.id)
+            if item.keep_dir is not None:
+                copies.delete_job_dir(item.keep_dir.parent, item.keep_dir.name)
+                item.keep_dir = None
+            doc.stage, doc.run_fraction = "ready", None
+            doc.changed.emit()
+            self._draw_jobs()
+
+    def _stop_item(self, item_id: int) -> None:
+        self.queue.cancel(item_id)
+        self._mark_stopping(item_id)
+        self._draw_jobs()
+
+    def _mark_stopping(self, item_id: int) -> None:
+        """Say so at once: a file finishes its current step before it stops."""
+        item = self._items.get(item_id)
+        if item is not None and item.state == RUNNING:
+            item.stopping = True
+            if item.doc is not None:
+                item.doc.run_text = "Stopping… a file finishes the step it is on first"
+                item.doc.changed.emit()
+            self._draw_jobs()
+
+    def _move(self, item_id: int, delta: int) -> None:
+        """A file that waits goes earlier or later in line (among the ones that wait; the queue follows for the ones already in it)."""
+        ids = [i.id for i in self._items.values() if i.state == WAITING]
+        if item_id not in ids:
+            return
+        k = ids.index(item_id)
+        j = k + delta
+        if not 0 <= j < len(ids):
+            return
+        order = list(self._items)
+        slots = [order.index(i) for i in ids]
+        ids[k], ids[j] = ids[j], ids[k]
+        for slot, i in zip(slots, ids):
+            order[slot] = i
+        self._items = {i: self._items[i] for i in order}
+        if item_id in self.queue.pending_ids():
+            self.queue.move(item_id, delta)
+        self._draw_jobs()
+
+    def _confirm(self, title: str, text: str) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Question, title, text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    # -- models ------------------------------------------------------------------
 
     def _downloaders(self) -> tuple[SpeechModelDownloader, ...]:
         return self.noise_download, self.speech_download, self.voice_download
@@ -745,99 +767,49 @@ class MainWindow(QMainWindow):
             self._auto_models = False
             self._noise_only = False
             self._clean_old_models()
-        self._refresh_state()
+        self._models_changed()
 
-    def _primary_clicked(self) -> None:
-        if self.queue.busy:
-            self.request_cancel_all()
-        else:
-            self.start()
-
-    def request_cancel_all(self) -> None:
-        if not self.queue.busy:
-            return
-        if self._confirm("Stop cleaning?", "Files that are still being cleaned will be discarded. Finished files are kept."):
-            self.queue.cancel_all()
-            for item_id in self.queue.running_ids():
-                self._mark_stopping(item_id)
-            self._refresh_state()
-
-    def _stop_item(self, item_id: int) -> None:
-        self.queue.cancel(item_id)
-        self._mark_stopping(item_id)
-        self._refresh_state()
-
-    def _mark_stopping(self, item_id: int) -> None:
-        """Say so at once: a file finishes its current step before it stops."""
-        item = self._items.get(item_id)
-        if item is not None and item.state == RUNNING:
-            item.stopping = True
-            self._refresh_row(item)
-
-    def _confirm(self, title: str, text: str) -> bool:
-        box = QMessageBox(QMessageBox.Icon.Question, title, text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
-        box.setDefaultButton(QMessageBox.StandardButton.No)
-        return box.exec() == QMessageBox.StandardButton.Yes
-
-    def remove_item(self, item_id: int) -> None:
-        item = self._items.get(item_id)
-        if item is None or item.state == RUNNING:
-            return
-        self.queue.remove(item_id)
-        self._queued.discard(item_id)
-        self._items.pop(item_id, None)
-        self.view.remove(item_id)
-        self._refresh_state()
-
-    def clear_finished(self) -> None:
-        for item in [i for i in self._items.values() if i.state in (ITEM_DONE, ITEM_FAILED, CANCELLED)]:
-            self.remove_item(item.id)
-
-    def _move(self, item_id: int, delta: int) -> None:
-        if self.view.move_among_waiting(item_id, delta) and item_id in self.queue.pending_ids():
-            self.queue.move(item_id, delta)
 
     # -- queue events ---------------------------------------------------------
+
+    def _progress_text(self, item: FileItem) -> str:
+        if item.stopping:
+            return "Stopping… a file finishes the step it is on first"
+        text = f"Cleaning {int(item.progress * 100)}%"
+        elapsed = time.monotonic() - item.started_at
+        if item.progress > 0.05 and elapsed > 5:
+            text += f" · about {format_spent(elapsed * (1 - item.progress) / item.progress)} left"
+        return text
 
     def _on_started(self, item_id: int) -> None:
         item = self._items.get(item_id)
         if item is not None:
             item.state, item.progress, item.started_at, item.stopping = RUNNING, 0.0, time.monotonic(), False
-            item.outdated = False
             item.job_name = item.out_name
             self._awake.acquire()
-            self._refresh_row(item)
-            self._refresh_state()
+            if item.doc is not None:
+                item.doc.stage, item.doc.run_fraction, item.doc.run_text = "processing", 0.0, "Getting started…"
+                item.doc.changed.emit()
+            self._draw_jobs()
 
     def _on_progress(self, item_id: int, fraction: float) -> None:
         item = self._items.get(item_id)
         if item is not None:
             item.progress = fraction
-            self._refresh_row(item)
-            self._update_overall()
+            if item.doc is not None:
+                item.doc.run_fraction, item.doc.run_text = fraction, self._progress_text(item)
+                item.doc.progressed.emit()
+            self.jobs.update_progress(item)
 
     def _on_finished(self, item_id: int, result: engine.JobResult) -> None:
         item = self._items.get(item_id)
         self._queued.discard(item_id)
         if item is None:
             return
-        previewing = self.preview is not None and self.preview.isVisible() and self.preview.key == item_id
-        if previewing and item.replaces:
-            self.preview.release()
-        paths, replaced = self._take_place_of_previous(item, result.paths) if item.replaces else (result.paths, False)
+        paths = result.paths
         item.state, item.progress, item.outputs, item.stopping = ITEM_DONE, 1.0, paths, False
         item.duration, item.has_video = result.duration, result.has_video
-        item.made_name = item.job_name
-        item.made = {}
-        for p in paths:
-            try:
-                st = p.stat()
-                item.made[p] = (st.st_size, st.st_mtime_ns)
-            except OSError:
-                pass
         notes = []
-        if replaced:
-            notes.append(f"the earlier version is in the {shell.TRASH_NAME}")
         if item.options and item.options.subtitles != "off" and result.subtitles is None and not result.embedded:
             notes.append("no speech found for subtitles")
         item.picked_strength, item.picked_rebuild = result.strength, result.rebuilt
@@ -847,11 +819,28 @@ class MainWindow(QMainWindow):
             notes.append(result.notice)
         item.message = "; ".join(notes)
         self._batch_done += 1
-        self._record(item, DONE, "", [str(p) for p in paths], kept_dir=result.kept_dir)
-        self._refresh_row(item)
-        if previewing:
-            self.preview.show_files(item.id, item.path, paths[0], item.has_video, item.path.name, _subtitle_file(paths))
-        self._refresh_state()
+        entry_id = self._record(item, DONE, "", [str(p) for p in paths], kept_dir=result.kept_dir, made=result.made)
+        item.entry_id = entry_id
+        doc = item.doc
+        if doc is not None:
+            entry = self.history.get(entry_id)
+            job = self._load_job(entry)
+            check = job.check_original() if job is not None else copies.OriginalCheck("missing")
+            doc.finished(entry, job, check)
+            doc.stage, doc.run_fraction, doc.saving, doc.run_text = "done", None, False, ""
+            doc.note = "Saved as " + " and ".join(p.name for p in paths) + (f" ({item.message})" if item.message else "") + "."
+            doc.note_kind = "info"
+            if self.doc is doc:
+                doc.open_session()
+            doc.changed.emit()
+        self._draw_jobs()
+
+    def _load_job(self, entry: Entry | None) -> copies.JobCopies | None:
+        if entry is None or not entry.job_dir:
+            return None
+        folder = copies.job_dir(self.history.jobs_root, entry.job_dir)
+        job = copies.JobCopies.load(folder) if folder is not None else None
+        return job if job is not None and job else None
 
     def _on_failed(self, item_id: int, message: str) -> None:
         item = self._items.get(item_id)
@@ -861,8 +850,11 @@ class MainWindow(QMainWindow):
         item.state, item.message, item.stopping = ITEM_FAILED, message, False
         self._batch_failed += 1
         self._record(item, FAILED, message, [], kept_dir=self._copies_left(item))
-        self._refresh_row(item)
-        self._refresh_state()
+        if item.doc is not None:
+            item.doc.stage, item.doc.run_fraction = "ready", None
+            item.doc.note, item.doc.note_kind = message, "error"
+            item.doc.changed.emit()
+        self._draw_jobs()
 
     def _copies_left(self, item: FileItem) -> Path | None:
         """A job that failed keeps the copies it had made before it failed (the result can still be saved from them); a folder with
@@ -883,25 +875,24 @@ class MainWindow(QMainWindow):
             if item.keep_dir is not None:  # stopped: nothing is kept
                 copies.delete_job_dir(item.keep_dir.parent, item.keep_dir.name)
                 item.keep_dir = None
-            restart = item.restart
-            item.state, item.progress, item.stopping, item.restart, item.outdated = CANCELLED, 0.0, False, False, False
-            if restart and not self._missing:  # "Restart with the new settings": straight back in, first in line
-                item.state = WAITING
-                if self._enqueue(item, first=True) and not self.queue.active:
-                    self.queue.start()
-            self._refresh_row(item)
-            self._refresh_state()
+            item.state, item.progress, item.stopping = CANCELLED, 0.0, False
+            if item.doc is not None:
+                item.doc.stage, item.doc.run_fraction = "ready", None
+                item.doc.note, item.doc.note_kind = "Stopped. Nothing was saved.", "info"
+                item.doc.changed.emit()
+            self._draw_jobs()
 
     def _on_idle(self) -> None:
         self._awake.release()
         engine.release_memory()  # an idle app does not keep the models in memory
-        self._refresh_state()
         if self._restart_when_idle:
             QTimer.singleShot(0, self._restart_for_update)
         done, failed = self._batch_done, self._batch_failed
         if (done or failed) and not self.isActiveWindow():
             text = _plural(done, "file", "files") + " cleaned" + (f", {failed} failed" if failed else "")
             self._notify(config.APP_NAME, text)
+        self._draw_jobs()
+
 
     def _notify(self, title: str, text: str) -> None:
         QApplication.alert(self, 0)
@@ -913,23 +904,225 @@ class MainWindow(QMainWindow):
         self._tray.showMessage(title, text, self.windowIcon(), 8000)
         QTimer.singleShot(12000, self._tray.hide)
 
-    def _record(self, item: FileItem, status: str, message: str, outputs: list[str], kept_dir: Path | None = None) -> None:
+
+    def _record(self, item: FileItem, status: str, message: str, outputs: list[str], kept_dir: Path | None = None, made: dict | None = None) -> int:
         options = item.options or self.prefs.job_options()
         elapsed = time.monotonic() - item.started_at if item.started_at else 0.0
         item.keep_dir = None
-        self.history.add(Entry(
+        settings = {**settings_dict(options)}
+        if item.timeline is not None and made is not None:  # a run of the timeline as it stood: told with what it did
+            settings.update({"leveling": made.get("leveling", True), "loudness": made.get("loudness", "podcast"),
+                             "rebuild_voice": bool(made.get("rebuilt")), "strength_db": made.get("atten_lim_db"),
+                             "noise": made.get("noise") if made.get("noise") in ("light", "heavy") else "auto", "echo_track": bool(made.get("echo"))})
+            if made.get("parts"):
+                settings["parts"] = True
+        if status == DONE and item.picked_strength:
+            settings["picked_strength"] = item.picked_strength
+        if status == DONE and item.picked_rebuild:
+            settings["picked_rebuild"] = item.picked_rebuild
+        return self.history.add(Entry(
             name=item.path.name, source=str(item.path), duration=item.duration, has_video=item.has_video,
-            settings={**settings_dict(options), **({"parts": True} if item.timeline is not None else {}),
-                      **({"picked_strength": item.picked_strength}
-                                                    if status == DONE and item.picked_strength else {}),
-                      **({"picked_rebuild": item.picked_rebuild} if status == DONE and item.picked_rebuild else {})},
-            seconds_taken=elapsed, outputs=outputs, status=status, message=message,
+            settings=settings, seconds_taken=elapsed, outputs=outputs, status=status, message=message,
             job_dir=kept_dir.name if kept_dir is not None else "", copies_bytes=copies.scan_bytes(kept_dir) if kept_dir is not None else 0,
         ))
-        if self.tabs.currentIndex() == 1:
-            self.history_page.refresh()
+
+    # -- saving a change to a finished job ----------------------------------------------------------------------
+
+    def _wanted(self, doc: Doc) -> redo.Wanted:
+        return redo.Wanted(subtitles=doc.subtitles, language=doc.language if doc.language in engine.LANGUAGES else "auto", video_size=doc.video_size,
+                           output_name=doc.out_name.strip(), timeline=doc.model.effective().to_json() if doc.model is not None else None)
+
+    def ask_replace(self, name: str) -> str:
+        """A file with the chosen name is next to the old result: "replace" (the old one goes to the bin), "new" (another name) or "cancel"."""
+        box = QMessageBox(QMessageBox.Icon.Question, "A file with that name exists",
+                          f"{name} already exists. Replace it with the new file?\n\nThe old one goes to the {shell.TRASH_NAME}, so you can bring it back.",
+                          QMessageBox.StandardButton.NoButton, self)
+        replace = box.addButton("Replace it", QMessageBox.ButtonRole.DestructiveRole)
+        new = box.addButton("Keep both", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        return "replace" if clicked is replace else "new" if clicked is new else "cancel"
+
+    def save_changes(self, doc: Doc, *, run=None) -> None:
+        """"Save changes": make the result for the draft and the choices as they are, from the job's saved copies, as a new file, in the same editor."""
+        job, entry = doc.job, doc.entry
+        run = run or self._redo
+        if job is None or entry is None or self._saving is not None or self._problems(doc):
+            return
+        wanted = self._wanted(doc)
+        target = redo.result_dir(job) / wanted.output_name
+        replace = None
+        if target.exists():
+            answer = self.ask_replace(wanted.output_name)
+            if answer == "cancel":
+                return
+            replace = target if answer == "replace" else None
+        if replace is not None:
+            self.studio.release_player()  # the file that goes to the bin may be the one the player has open
+        worker = Worker(lambda cancel, progress: run(job, wanted, progress=progress, cancel=cancel, replace=replace, trash=shell.move_to_trash), self)
+        worker.progress.connect(lambda f: self._save_progress(doc, f))
+        worker.done.connect(lambda result: self._saved(doc, result))
+        worker.failed.connect(lambda m: self._save_over(doc, m, "error"))
+        worker.stopped.connect(lambda: self._save_over(doc, "Stopped. Nothing was saved.", "info"))
+        self._saving = worker
+        doc.stage, doc.saving, doc.run_fraction, doc.run_text, doc.note = "processing", True, 0.0, "Making the parts that changed…", ""
+        doc.changed.emit()
+        worker.start()
+
+    def _save_progress(self, doc: Doc, fraction: float) -> None:
+        doc.run_fraction, doc.run_text = fraction, f"Saving {int(fraction * 100)}%"
+        doc.progressed.emit()
+
+    def _finish_save(self, doc: Doc) -> None:
+        worker, self._saving = self._saving, None
+        if worker is not None:
+            worker.wait()
+            worker.deleteLater()
+        doc.stage, doc.saving, doc.run_fraction, doc.run_text = "done", False, None, ""
+
+    def _save_over(self, doc: Doc, text: str, kind: str) -> None:
+        self._finish_save(doc)
+        doc.note, doc.note_kind = text, kind
+        doc.changed.emit()
+
+    def _saved(self, doc: Doc, result: engine.JobResult) -> None:
+        self._finish_save(doc)
+        entry, job = doc.entry, doc.job
+        fresh = copies.JobCopies.load(job.dir)  # the job file was changed by the thread: read it again
+        job = fresh if fresh is not None else job
+        made = result.made or {}
+        settings = {**entry.settings, "leveling": made.get("leveling", True), "loudness": made.get("loudness", "podcast"),
+                    "subtitles": made.get("subtitles", "off"), "rebuild_voice": bool(made.get("rebuilt")), "strength_db": made.get("atten_lim_db")}
+        settings.pop("picked_strength", None)
+        settings.pop("picked_rebuild", None)
+        if made.get("parts"):
+            settings["parts"] = True
         else:
-            self._history_stale = True  # drawn when the tab is opened
+            settings.pop("parts", None)
+        self.history.set_job_result(entry.id, [str(p) for p in result.paths], settings, job.dir.name, job.bytes())
+        doc.original = job.check_original()
+        doc.saved(self.history.get(entry.id), job)
+        doc.note, doc.note_kind = f"Saved {result.output.name}" + (f" ({result.notice})" if result.notice else "") + ".", "info"
+        doc.changed.emit()
+        self._draw_jobs()
+
+    def save_subtitles_only(self, doc: Doc | None = None) -> None:
+        """The subtitle file of a job from the transcript it saved: needs neither the original nor a model."""
+        doc = doc or self.doc
+        job, entry = (doc.job, doc.entry) if doc is not None else (None, None)
+        if job is None or entry is None or doc.subtitles not in redo.TEXT_KINDS or self._saving is not None:
+            return
+        last = redo.last_result(job)
+        folder = redo.result_dir(job)
+        stem = engine.split_name(last.name)[0] if last is not None else job.original_path.stem + "-cleaned"
+        try:
+            path = redo.save_subtitles(job, doc.subtitles, folder, stem)
+        except (MediaError, OSError) as e:
+            doc.note, doc.note_kind = str(e), "error"
+            doc.changed.emit()
+            return
+        job.add_save([path], {**job.made, "subtitles": doc.subtitles})
+        self.history.set_job_result(entry.id, [*entry.outputs, str(path)], entry.settings, job.dir.name, job.bytes())
+        doc.entry = self.history.get(entry.id)
+        doc.note, doc.note_kind = f"Saved {path.name}.", "info"
+        doc.changed.emit()
+        self._draw_jobs()
+
+    def open_result(self, doc: Doc) -> None:
+        """"Download again" of this app: the file, in the player the computer uses for it."""
+        files = doc.result_paths()
+        main = next((p for p in files if p.suffix.lower() not in (".srt", ".vtt", ".txt") and p.exists()), None) or next((p for p in files if p.exists()), None)
+        if main is None or not shell.open_path(main):
+            doc.note, doc.note_kind = "This file has been moved or deleted.", "warn"
+            doc.changed.emit()
+
+    # -- deleting -------------------------------------------------------------------------------------------------
+
+    def _stayed(self, ids: list[int]) -> None:
+        if ids:
+            QMessageBox.warning(self, "Delete", "Some saved copies could not be removed (a file may be in use). The job stays in the list; try again later.")
+
+    def delete_current(self) -> None:
+        if self.doc is not None and self.doc.entry is not None:
+            self.delete_entry(self.doc.entry.id)
+
+    def delete_entry(self, entry_id: int) -> None:
+        """Delete one job after asking: its saved copies and its place in the list; never the original or the cleaned files."""
+        entry = self.history.get(entry_id)
+        if entry is None:
+            return
+        if self._saving is not None and self.doc is not None and self.doc.entry is not None and self.doc.entry.id == entry_id:
+            return  # a change is being saved from its copies
+        if entry.job_dir:
+            text = (f"Delete \"{entry.name}\"?\n\nIts saved copies ({format_size(entry.copies_bytes)}) and its place in this list are deleted, so it can't "
+                    "be changed and saved again. Your original and the cleaned files are not touched.")
+        else:
+            text = f"Remove \"{entry.name}\" from the list?\n\nYour original and the cleaned files are not touched."
+        if not self._confirm("Delete job", text):
+            return
+        for item in self._items.values():
+            if item.entry_id == entry_id:
+                item.entry_id = 0
+        if self.doc is not None and self.doc.entry is not None and self.doc.entry.id == entry_id:
+            gone = self.doc
+            self._show(None)
+            if gone.item is not None:
+                self._items.pop(gone.item.id, None)
+                gone.dispose()
+        stayed = self.history.delete([entry_id])
+        self._draw_jobs()
+        self._stayed(stayed)
+
+    def delete_all(self) -> None:
+        c = self.history.copies_total()
+        n = self.history.count()
+        what = f" and the {format_size(c.bytes)} of saved copies" if c.jobs else ""
+        if not self._confirm("Delete all jobs", f"Delete all {n} job{'s' if n != 1 else ''}{what}?\n\nYour originals and cleaned files are not touched, "
+                                                "but the jobs can't be changed and saved again."):
+            return
+        if self._saving is not None:
+            return
+        if self.doc is not None and self.doc.entry is not None:
+            gone = self.doc
+            self._show(None)
+            if gone.item is not None:
+                self._items.pop(gone.item.id, None)
+                gone.dispose()
+        for item in [i for i in self._items.values() if i.state in (ITEM_DONE, ITEM_FAILED)]:
+            self._items.pop(item.id, None)
+            if item.doc is not None:
+                item.doc.dispose()
+        stayed = self.history.clear()
+        self._draw_jobs()
+        self._stayed(stayed)
+
+    # -- state ------------------------------------------------------------------
+
+    def _settings_changed(self) -> None:
+        self.queue.set_parallel(self.prefs.parallel)
+        for item in self._items.values():
+            if item.state == WAITING and not item.out_custom and item.source is not None and item.doc is not None:
+                item.out_name = engine.default_output_name(item.path, item.source, self.prefs.job_options())  # the usual name follows the type of audio files
+                item.doc.out_name = item.out_name
+                item.doc.changed.emit()
+        if self.doc is not None:
+            self.studio._schedule()
+        self._check_disk()
+
+    def _models_changed(self) -> None:
+        """A model arrived (or did not): what needs it can start (or says so)."""
+        if self.doc is not None:
+            self.studio._schedule()
+            self.studio.inspector._refresh_models()
+
+    def _draw_jobs(self) -> None:
+        if self._closing:
+            return
+        self.jobs.current = self._key_of(self.doc)
+        self.jobs.refresh()
+        self.studio._schedule() if self.doc is not None else None
+        self._check_disk()
 
     # -- updates --------------------------------------------------------------------------------------------
 
@@ -971,109 +1164,6 @@ class MainWindow(QMainWindow):
         self.close()
         if not self._closing:  # closing was refused: stay as we were
             self.updater.relaunch = False
-
-    # -- preview / reveal -----------------------------------------------------
-
-    def show_preview(self, item_id: int) -> None:
-        item = self._items.get(item_id)
-        if item is None:
-            return
-        cleaned = item.outputs[0] if item.state == ITEM_DONE and item.outputs and item.outputs[0].exists() else None
-        if self.preview is None:
-            self.preview = PreviewPane()
-            self._left.addWidget(self.preview)
-        self.preview.show_files(item.id, item.path, cleaned, item.has_video, item.path.name, _subtitle_file(item.outputs))
-        self.preview.show()
-
-    def _reveal(self, item_id: int) -> None:
-        item = self._items.get(item_id)
-        if item is not None and item.outputs:
-            shell.reveal_in_folder(item.outputs[0])
-
-    # -- state ------------------------------------------------------------------
-
-    def _settings_changed(self) -> None:
-        self.queue.set_parallel(self.prefs.parallel)
-        # Files still waiting are cleaned with the settings as they are now; a file being cleaned offers to
-        # restart with them (its row's "again" button).
-        options = self.prefs.job_options()
-        self.queue.update_pending(options, self.prefs.output_dir())
-        for item in self._items.values():
-            if item.state != RUNNING and not item.out_custom and item.source is not None:
-                item.out_name = self._default_name(item)  # the usual name follows the settings (the type of audio files)
-                if item.state == WAITING and item.id in self._queued:
-                    self.queue.set_output_name(item.id, item.out_name)
-                self._refresh_row(item)
-            if item.state == WAITING:
-                item.options = options
-            elif item.state == RUNNING:
-                outdated = item.options is not None and item.options != options
-                if outdated != item.outdated:
-                    item.outdated = outdated
-                    self._refresh_row(item)
-        self._refresh_state()
-
-    def _refresh_row(self, item: FileItem) -> None:
-        row = self.view.row(item.id)
-        if row is not None:
-            row.refresh()
-
-    def _refresh_state(self) -> None:
-        busy = self.queue.busy
-        has_files = len(self.view) > 0
-        self.drop_zone.set_compact(has_files)
-        self.view.setVisible(has_files)
-        waiting = len([i for i in self._items.values() if i.state == WAITING])
-        finished = any(i.state in (ITEM_DONE, ITEM_FAILED, CANCELLED) for i in self._items.values())
-        self.clear_button.setEnabled(finished)
-        self.tip.setVisible(has_files)
-
-        if busy:
-            stopping = not self.queue.pending_ids() and all(
-                self._items[i].stopping for i in self.queue.running_ids() if i in self._items
-            )
-            self.primary.setText("Stopping..." if stopping else "Cancel all")
-            set_property(self.primary, "mode", "cancel")
-            self.primary.setToolTip("Stop cleaning. Files that are finished are kept (Esc)")
-            self.primary.setEnabled(not stopping)
-        else:
-            self.primary.setText("Clean " + _plural(waiting, "file", "files") if waiting else "Clean")
-            set_property(self.primary, "mode", "")
-            self.primary.setToolTip("Start cleaning the files in the list (Ctrl+Enter)")
-            self.primary.setEnabled(waiting > 0 and not self._missing)
-        self._update_overall()
-        self._check_disk()
-
-    def _update_overall(self) -> None:
-        items = [i for i in self._items.values() if i.state in (WAITING, RUNNING, ITEM_DONE)]
-        running = [i for i in items if i.state == RUNNING]
-        total = sum(max(i.duration, 1.0) for i in items)
-        progress = (
-            sum(max(i.duration, 1.0) * (1.0 if i.state == ITEM_DONE else i.progress if i.state == RUNNING else 0.0) for i in items)
-            / total if total else 0.0
-        )
-        busy = self.queue.busy
-        self.overall.setVisible(busy)
-        self.overall.setValue(int(progress * 1000))
-        done = len([i for i in items if i.state == ITEM_DONE])
-        if busy:
-            text = f"{done} of {len(items)} done"
-            if running:
-                text += f"  ·  {len(running)} cleaning"
-            elapsed = time.monotonic() - self._batch_started
-            if progress > 0.05 and elapsed > 5:
-                text += f"  ·  about {format_spent(elapsed * (1 - progress) / progress)} left"
-            self.status.setText(text)
-        elif self._batch_done or self._batch_failed:
-            text = _plural(self._batch_done, "file", "files") + " cleaned"
-            self.status.setText(text + (f", {self._batch_failed} failed" if self._batch_failed else ""))
-        else:
-            waiting = len([i for i in items if i.state == WAITING])
-            stuck = len([i for i in items if i.state == WAITING and self._name_problem(i)])
-            text = f"{_plural(waiting, 'file', 'files')} ready" if waiting else "Add some files to get started"
-            if stuck:
-                text += f", {stuck} can't start until the name is fixed" if stuck > 1 else ", 1 can't start until its name is fixed"
-            self.status.setText(text)
 
     def _check_disk(self) -> None:
         text = self._disk_warning()
@@ -1121,63 +1211,52 @@ class MainWindow(QMainWindow):
         except OSError:
             return None
 
-    # -- window events ------------------------------------------------------------
 
-    def _fit_settings(self) -> None:
-        """Settings take about a third of the window, and always as much as their content needs."""
-        needed = self.settings_panel.minimumSizeHint().width() + self._settings_scroll.verticalScrollBar().sizeHint().width() + 4
-        width = min(max(SETTINGS_MIN_WIDTH, int(self.width() * SETTINGS_SHARE)), SETTINGS_MAX_WIDTH)
-        self._settings_scroll.setFixedWidth(max(width, needed))
+    # -- window events ------------------------------------------------------------
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._fit_settings()
+        self._reflow()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        if not getattr(self, "_grown", False):
-            self._grown = True
-            QTimer.singleShot(0, self._grow_to_fit_settings)
+        self._reflow()
 
-    def _grow_to_fit_settings(self) -> None:
-        """Make the window just tall enough that the settings need no scroll bar (fonts and display scaling
-        differ between computers, so this is measured, not fixed), as far as the screen allows."""
-        missing = self.settings_panel.full_height() - self._settings_scroll.viewport().height()
-        if missing <= 0 or self.isMaximized() or self.isFullScreen():
-            return
-        screen = self.screen().availableGeometry()
-        frame = self.frameGeometry().height() - self.height()
-        height = min(self.height() + missing + 2, screen.height() - frame)
-        if height <= self.height():
-            return
-        self.resize(self.width(), height)
-        top = self.frameGeometry().top()
-        if top + height + frame > screen.bottom():
-            self.move(self.x(), max(screen.top(), screen.bottom() - height - frame))
+    def _reflow(self) -> None:
+        """Wide: the jobs are a column beside the editor. Narrow: they are under it."""
+        width = self.scroll.viewport().width() if hasattr(self, "scroll") else self.width()
+        beside = width >= JOBS_BESIDE
+        room = width - 32 - ((JOBS_WIDTH + 14) if beside else 0)  # what the editor and the settings have between them
+        self.studio.set_narrow(room < NARROW)
+        want = QBoxLayout.Direction.LeftToRight if beside else QBoxLayout.Direction.TopToBottom
+        if self.body.direction() != want:
+            self.body.setDirection(want)
+            self.jobs.setMinimumWidth(JOBS_WIDTH if beside else 0)
+            self.jobs.setMaximumWidth(JOBS_WIDTH if beside else 16777215)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-            set_property(self.queue_card, "drop", True)
+            set_property(self.studio.drop, "over", True)
 
     def dragLeaveEvent(self, event) -> None:  # noqa: N802
-        set_property(self.queue_card, "drop", False)
+        set_property(self.studio.drop, "over", False)
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
-        set_property(self.queue_card, "drop", False)
+        set_property(self.studio.drop, "over", False)
         paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
         if paths:
             event.acceptProposedAction()
             self.add_paths(paths)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self.queue.busy and not self._confirm(
+        if (self.queue.busy or self._saving is not None) and not self._confirm(
             "Quit Audio Cleaner?", "Files are still being cleaned. If you quit now, they will be discarded."
         ):
             event.ignore()
             return
         self._closing = True
-        self._pool.clear()  # probes still waiting in line are not needed any more
+        self._pool.clear()
         self.updater.cancel()  # a download resumes from where it stopped next time
         for dl in self._downloaders():
             dl.cancel()  # resumes from where it stopped next time
@@ -1191,11 +1270,17 @@ class MainWindow(QMainWindow):
             dl.wait(0.5)
         self._pool.waitForDone(QUIT_WAIT_MS)
         self._awake.release()
-        if self.preview is not None:
-            self.preview.stop()
-        stopped = self.history_page.shutdown(QUIT_WAIT_MS) and stopped  # a save in the job view stops; its scratch files go
+        if self._saving is not None:  # a save stops; its scratch files go
+            self._saving.cancel.set()
+            stopped = self._saving.wait(QUIT_WAIT_MS) and stopped
+        # (what runs for each file stops, and the live sound deletes its scratch files)
+        docs = [i.doc for i in self._items.values() if i.doc is not None]
+        if self.doc is not None and self.doc not in docs:
+            docs.append(self.doc)
+        for doc in docs:
+            doc.dispose()
+        self.studio.shutdown()
         self._qs.setValue("geometry", self.saveGeometry())
-        self._qs.setValue("tab", self.tabs.currentIndex())
         self._qs.sync()
         self.history.close()
         self.updater.install_on_close()  # Windows: setup for a downloaded update starts now and outlives the app
@@ -1209,7 +1294,7 @@ class MainWindow(QMainWindow):
     def _sweep_leftovers(self) -> None:
         if self._closing:
             return
-        folders = [*self.history.recent_folders(), self.history.jobs_root]  # (the job view's scratch files are in the jobs folder)
+        folders = [*self.history.recent_folders(), self.history.jobs_root]  # (the live sound's scratch files are in the jobs folder)
         protect = {i.keep_dir.name for i in self._items.values() if i.keep_dir is not None}
         try:
             self.history.reconcile(protect=protect)  # the sizes of the saved copies, and folders nothing in the list points to

@@ -11,7 +11,7 @@ import pytest
 
 from acw_common import pipeline
 from acw_common.timeline import Timeline
-from audio_cleaner_desktop import editor_job, engine, live_mix, quick_look
+from audio_cleaner_desktop import engine, live_mix, quick_look
 
 from conftest import bundled_ffmpeg, run_ffmpeg
 

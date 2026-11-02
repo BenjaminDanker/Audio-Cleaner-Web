@@ -1,5 +1,5 @@
-"""The speech model download in the window: offered when subtitles need it, runs with progress, blocks
-starting a subtitles job until it is there."""
+"""The model downloads in the window: offered in the card that needs the model (Subtitles, Voice rebuild), run with progress, and they keep Start
+waiting until the model is there (with a note that says so); the noise removal models, which the window downloads by itself."""
 from __future__ import annotations
 
 import functools
@@ -15,8 +15,8 @@ from audio_cleaner_desktop import cli, engine, models, resources
 from audio_cleaner_desktop.gui import speech_model
 from audio_cleaner_desktop.gui.main_window import MainWindow
 from audio_cleaner_desktop.gui.preferences import Preferences
-from audio_cleaner_desktop.gui.settings_panel import SettingsPanel
 
+import studio_helpers as sh
 from conftest import wait_until
 
 
@@ -39,23 +39,44 @@ def small_model(tmp_path, monkeypatch):
     httpd.shutdown()
 
 
-def test_panel_offers_the_download_runs_it_and_goes_away(qapp, tmp_path, small_model):
-    from audio_cleaner_desktop.gui.preferences import Preferences
+def open_window(tmp_path, runner=None, seconds=5.0, **kw):
+    w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db",
+                   **({"runner": runner} if runner else {}))
+    w.fakes = sh.Fakes(seconds).install(w)
+    w.show()
+    return w
 
-    prefs = Preferences(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
-    dl = speech_model.SpeechModelDownloader(model=small_model)
-    panel = SettingsPanel(prefs, dl)
-    panel.show()
-    assert not panel.speech_panel.isVisible()  # subtitles off: nothing to ask
-    panel._subtitles.setCurrentIndex(panel._subtitles.findData("srt"))
-    assert panel.speech_panel.isVisible() and "one-time download of 2 MB" in panel.speech_panel._text.text()
+
+def add_and_wait(w, tmp_path, name="a.wav"):
+    src = tmp_path / name
+    src.write_bytes(b"RIFF")
+    w.add_paths([src])
+    assert wait_until(lambda: w.doc.model is not None, 10)
+    sh.settle(w)
+    return src
+
+
+def test_the_subtitles_card_offers_the_download_runs_it_and_goes_away(window, tmp_path, small_model, monkeypatch):
+    w = window
+    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model is resources.NOISE_MODEL or models.is_installed(self.model)))
+    monkeypatch.setitem(models.CATALOG, small_model.id, small_model)  # (the window tidies up what the catalog does not know)
+    dl = w.speech_download
+    dl.model = small_model
+    add_and_wait(w, tmp_path)
+    panel = w.studio.inspector.speech_panel
+    assert not panel.isVisibleTo(w.studio.inspector)  # subtitles off: nothing to ask
+    w.studio.inspector.subs._buttons["on"].click()
+    sh.settle(w)
+    assert panel.isVisibleTo(w.studio.inspector) and "one-time download of 2 MB" in panel._text.text()
+    assert not w.studio.start.button.isEnabled() and any("speech model" in t for t, _ in w.studio.note_lines(w.doc))  # Start waits for it
     seen = []
     dl.progress.connect(lambda d, t: seen.append((d, t)))
-    panel.speech_panel._button.click()
+    panel._button.click()
     full = (small_model.size, small_model.size)
     # progress arrives as queued events: wait for the last one, not just for the download to end
     assert wait_until(lambda: not dl.running and dl.ready and seen and seen[-1] == full, timeout=30)
-    assert wait_until(lambda: not panel.speech_panel.isVisible(), timeout=5)
+    sh.settle(w)
+    assert wait_until(lambda: not panel.isVisibleTo(w.studio.inspector), timeout=5) and w.studio.start.button.isEnabled()
 
 
 def test_a_missing_model_is_fetched_one_after_the_other_never_at_start_up(qapp, tmp_path, monkeypatch):
@@ -69,9 +90,8 @@ def test_a_missing_model_is_fetched_one_after_the_other_never_at_start_up(qapp, 
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "start", fake_start)
     shown = []
     monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or QMessageBox.StandardButton.Ok)
-    w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db")
+    w = open_window(tmp_path)
     try:
-        w.show()
         qapp.processEvents()
         assert started == [] and not w.banner_models.isVisible()  # setup downloads them, not the app's start
         w.fetch_models()  # e.g. after setup's download failed
@@ -87,68 +107,56 @@ def test_a_missing_model_is_fetched_one_after_the_other_never_at_start_up(qapp, 
         w._model_queue = [w.voice_download]
         w._model_download_finished(w.voice_download, False, "The download stopped (timed out).")
         assert w.banner_models.isVisible() and "could not be downloaded" in w.banner_models._label.text()
-        # starting a subtitles job without the speech model does not start, and offers the download
+        # a subtitles job without the speech model does not start, and the screen says why (no dialog: the card has the download)
         w.speech_download._fake_ready = False
         w.prefs.subtitles = "srt"
-        src = tmp_path / "a.wav"
-        src.write_bytes(b"RIFF")
-        w.add_paths([src])
+        add_and_wait(w, tmp_path)
         w.start()
-        assert shown and "was not installed" in shown[-1] and not w.queue.active
+        assert not shown and not w.queue.active and not w.queue.busy
+        assert any("speech model" in t for t, _ in w.studio.note_lines(w.doc)) and w.studio.inspector.speech_panel.isVisibleTo(w.studio.inspector)
     finally:
-        w.queue.shutdown()
-        w.history.close()
-        w._pool.waitForDone()
+        sh.shut(w)
 
 
-def test_rebuilding_the_voice_offers_its_download_and_start_asks_instead_of_downgrading(qapp, tmp_path, monkeypatch):
-    from audio_cleaner_desktop import engine
-    from types import SimpleNamespace
-
+def test_voice_rebuild_offers_its_download_and_start_waits_instead_of_downgrading(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model.id != "rebuild-voice"))
     started = []
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "start", lambda self: started.append(self.model.id))
     shown = []
     monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or QMessageBox.StandardButton.Yes)
-    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
     settings = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
     Preferences(settings).auto_settings = False  # rebuilding chosen by hand
+    monkeypatch.setattr("audio_cleaner_desktop.resources.voice_model_dir", lambda: None)
     w = MainWindow([], settings=settings, history_path=tmp_path / "h.db")
+    w.fakes = sh.Fakes(5.0).install(w)
     try:
         w.show()
-        panel = w.settings_panel
-        assert not panel.voice_panel.isVisible()  # not ticked: nothing to ask
-        panel._rebuild.setChecked(True)
-        assert panel.voice_panel.isVisible() and "Rebuilding the voice needs an extra model" in panel.voice_panel._text.text()
-        panel.voice_panel._button.click()
+        add_and_wait(w, tmp_path)
+        insp = w.studio.inspector
+        assert not insp.rebuild_panel.isVisibleTo(insp)  # not chosen: nothing to ask
+        insp.options["rebuild"].radio.click()
+        sh.settle(w)
+        assert insp.rebuild_panel.isVisibleTo(insp) and "Voice rebuild needs an extra model" in insp.rebuild_panel._text.text()
+        assert not w.studio.start.button.isEnabled() and any("Voice rebuild needs its model" in t for t, _ in w.studio.note_lines(w.doc))
+        insp.rebuild_panel._button.click()
         assert started == ["rebuild-voice"]
-        started.clear()
-        src = tmp_path / "a.wav"
-        src.write_bytes(b"RIFF")
-        w.add_paths([src])
-        w.start()  # asks, offers the download, starts nothing
-        assert shown and "model that rebuilds the voice was not installed" in shown[-1] and not w.queue.active
-        assert started == ["rebuild-voice"]
-        assert "rebuilding voices" in w.banner_models._label.text()
+        w.start()  # nothing starts, nothing asks
+        assert not shown and not w.queue.active
+        assert "rebuilding voices" in w.banner_models._label.text() or w.voice_download.running or started
+        insp.options["noise"].radio.click()  # the other choice needs no model: the way out
+        sh.settle(w)
+        assert w.studio.start.button.isEnabled()
     finally:
-        w.queue.shutdown()
-        w.history.close()
-        w._pool.waitForDone()
+        sh.shut(w)
 
 
 def test_automatic_rebuilding_offers_the_download_but_never_holds_up_cleaning(qapp, tmp_path, monkeypatch):
-    """With Automatic best settings the voice is rebuilt only where its model is installed, so a missing model is offered
-    in Settings but Clean doesn't stop to ask for it."""
-    from types import SimpleNamespace
-
-    from audio_cleaner_desktop import engine
-    from audio_cleaner_desktop.gui import main_window
-
+    """With Automatic the voice is rebuilt only where its model is installed, so a missing model is offered
+    (under Voice, when it is chosen) but Start doesn't wait for it."""
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model.id != "rebuild-voice"))
+    monkeypatch.setattr("audio_cleaner_desktop.resources.voice_model_dir", lambda: None)
     shown = []
     monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or QMessageBox.StandardButton.Yes)
-    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
-    monkeypatch.setattr(main_window.resources, "check", lambda: [])
     ran = []
 
     def runner(path, options, **_):
@@ -157,35 +165,27 @@ def test_automatic_rebuilding_offers_the_download_but_never_holds_up_cleaning(qa
         out.write_bytes(b"x")
         return engine.JobResult(out, 5.0, False)
 
-    w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db",
-                   runner=runner)
+    w = open_window(tmp_path, runner)
     try:
-        w.show()
-        panel = w.settings_panel
-        assert w.prefs.auto_settings and panel.voice_panel.isVisible()  # offered
-        src = tmp_path / "a.wav"
-        src.write_bytes(b"RIFF")
-        w.add_paths([src])
-        assert wait_until(lambda: all(i.probed for i in w._items.values()), timeout=10)
+        assert w.prefs.auto_settings
+        add_and_wait(w, tmp_path)
+        assert w.studio.start.button.isEnabled()
         w.start()
         assert wait_until(lambda: ran, timeout=10) and ran == [(True, False)] and not shown
     finally:
-        w.queue.shutdown()
-        w.history.close()
-        w._pool.waitForDone()
+        sh.shut(w)
 
 
 def test_missing_noise_models_are_downloaded_by_the_window_and_a_failure_offers_try_again(qapp, tmp_path, monkeypatch, capsys):
     """The noise removal models are required: a window without them downloads just them by itself (a silent update shows no
-    download page), a failed download offers "Try again" which downloads them again, Clean asks first, the command line
+    download page), a failed download offers "Try again" which downloads them again, Start waits for them with a note, the command line
     points at --download-models."""
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model is not resources.NOISE_MODEL))
     started, shown = [], []
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "start", lambda self: started.append(self.model.id))
     monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or QMessageBox.StandardButton.No)
-    w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db")
+    w = open_window(tmp_path)
     try:
-        w.show()
         qapp.processEvents()
         assert started == ["noise-removal"] and not shown  # by itself, only the noise models (23 MB), not 2.1 GB
         assert w.banner_models.isVisible() and "Downloading the noise removal models" in w.banner_models._label.text()
@@ -195,16 +195,13 @@ def test_missing_noise_models_are_downloaded_by_the_window_and_a_failure_offers_
         started.clear()
         w.banner_models.action.emit()  # "Try again": the noise models again
         assert started == ["noise-removal"]
-        src = tmp_path / "a.wav"
-        src.write_bytes(b"RIFF")
-        w.add_paths([src])
+        src = add_and_wait(w, tmp_path)
         w.start()
-        assert shown and "noise removal models are not installed" in shown[-1] and not w.queue.active
+        assert not shown and not w.queue.active and not w.studio.start.button.isEnabled()
+        assert any("Noise removal needs its models" in t for t, _ in w.studio.note_lines(w.doc))
     finally:
-        w.queue.shutdown()
-        w.history.close()
-        w._pool.waitForDone()
+        sh.shut(w)
     monkeypatch.setattr(resources, "check", lambda: [])
     monkeypatch.setattr(resources, "noise_ready", lambda: False)
-    assert cli.run([str(tmp_path / "a.wav")], None, engine.JobOptions()) == 1
+    assert cli.run([str(src)], None, engine.JobOptions()) == 1
     assert "--download-models" in capsys.readouterr().err

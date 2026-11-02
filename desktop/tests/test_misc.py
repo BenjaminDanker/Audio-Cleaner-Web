@@ -10,7 +10,7 @@ from PySide6.QtCore import QSettings
 from audio_cleaner_desktop import sysinfo
 from audio_cleaner_desktop.gui import media
 from audio_cleaner_desktop.gui.history import DONE, FAILED, Entry, HistoryStore
-from audio_cleaner_desktop.gui.history_view import describe_settings
+from audio_cleaner_desktop.labels import describe_settings
 from audio_cleaner_desktop.gui.preferences import Preferences
 
 
@@ -133,7 +133,7 @@ def test_history_says_which_strength_was_picked():
 
 def test_history_keeps_the_automatic_choices():
     from audio_cleaner_desktop import engine
-    from audio_cleaner_desktop.gui.history_view import settings_dict
+    from audio_cleaner_desktop.labels import settings_dict
 
     s = settings_dict(engine.JobOptions(strength="auto", auto_rebuild=True))
     assert (s["strength"], s["noise"], s["auto_rebuild"], s["rebuild_voice"]) == ("auto", "auto", True, False)

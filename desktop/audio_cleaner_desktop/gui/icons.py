@@ -117,7 +117,93 @@ def _again(p: QPainter, c: QColor) -> None:
     p.drawPolyline(QPolygonF([QPointF(11.6, 6.9), QPointF(16.3, 6.3), QPointF(14.6, 1.9)]))
 
 
+def _split(p: QPainter, c: QColor) -> None:
+    """Two bars with a gap: cut at the playhead."""
+    _stroke(p, c, 2.0)
+    p.drawLine(QPointF(12, 4), QPointF(12, 20))
+    p.drawPolyline(QPolygonF([QPointF(7.5, 8.5), QPointF(4, 12), QPointF(7.5, 15.5)]))
+    p.drawPolyline(QPolygonF([QPointF(16.5, 8.5), QPointF(20, 12), QPointF(16.5, 15.5)]))
+
+
+def _undo(p: QPainter, c: QColor) -> None:
+    _stroke(p, c, 1.9)
+    p.drawPolyline(QPolygonF([QPointF(9, 6), QPointF(5, 10), QPointF(9, 14)]))
+    path = QPainterPath()
+    path.moveTo(5.5, 10)
+    path.lineTo(14, 10)
+    path.quadTo(19.5, 10, 19.5, 14.5)
+    path.quadTo(19.5, 19, 14, 19)
+    path.lineTo(10, 19)
+    p.drawPath(path)
+
+
+def _redo(p: QPainter, c: QColor) -> None:
+    _stroke(p, c, 1.9)
+    p.drawPolyline(QPolygonF([QPointF(15, 6), QPointF(19, 10), QPointF(15, 14)]))
+    path = QPainterPath()
+    path.moveTo(18.5, 10)
+    path.lineTo(10, 10)
+    path.quadTo(4.5, 10, 4.5, 14.5)
+    path.quadTo(4.5, 19, 10, 19)
+    path.lineTo(14, 19)
+    p.drawPath(path)
+
+
+def _zoom(p: QPainter, c: QColor, plus: bool) -> None:
+    _stroke(p, c, 1.8)
+    p.drawEllipse(QRectF(4, 4, 11.5, 11.5))
+    p.drawLine(QPointF(13.5, 13.5), QPointF(19.5, 19.5))
+    p.drawLine(QPointF(7.3, 9.75), QPointF(12.2, 9.75))
+    if plus:
+        p.drawLine(QPointF(9.75, 7.3), QPointF(9.75, 12.2))
+
+
+def _zoom_in(p: QPainter, c: QColor) -> None:
+    _zoom(p, c, True)
+
+
+def _zoom_out(p: QPainter, c: QColor) -> None:
+    _zoom(p, c, False)
+
+
+def _select_all(p: QPainter, c: QColor) -> None:
+    """Four corners: the whole file."""
+    _stroke(p, c, 1.9)
+    for sx, sy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
+        x, y = (4.5 if sx > 0 else 19.5), (4.5 if sy > 0 else 19.5)
+        p.drawPolyline(QPolygonF([QPointF(x, y + 4.5 * sy), QPointF(x, y), QPointF(x + 4.5 * sx, y)]))
+
+
+def _speaker(p: QPainter, c: QColor) -> None:
+    _fill(p, c)
+    p.drawPolygon(QPolygonF([QPointF(4, 9.5), QPointF(8, 9.5), QPointF(12.5, 5.5), QPointF(12.5, 18.5), QPointF(8, 14.5), QPointF(4, 14.5)]))
+    _stroke(p, c, 1.7)
+    p.drawArc(QRectF(10, 8, 7, 8), -60 * 16, 120 * 16)
+    p.drawArc(QRectF(11, 4.5, 11, 15), -55 * 16, 110 * 16)
+
+
+def _speaker_off(p: QPainter, c: QColor) -> None:
+    _fill(p, c)
+    p.drawPolygon(QPolygonF([QPointF(4, 9.5), QPointF(8, 9.5), QPointF(12.5, 5.5), QPointF(12.5, 18.5), QPointF(8, 14.5), QPointF(4, 14.5)]))
+    _stroke(p, c, 1.8)
+    p.drawLine(QPointF(15.5, 9.5), QPointF(20.5, 14.5))
+    p.drawLine(QPointF(20.5, 9.5), QPointF(15.5, 14.5))
+
+
+def _spark(p: QPainter, c: QColor) -> None:
+    _fill(p, c)
+    path = QPainterPath()
+    path.moveTo(12, 3)
+    path.quadTo(12.8, 10.2, 21, 12)
+    path.quadTo(12.8, 13.8, 12, 21)
+    path.quadTo(11.2, 13.8, 3, 12)
+    path.quadTo(11.2, 10.2, 12, 3)
+    p.drawPath(path)
+
+
 _DRAWERS: dict[str, Drawer] = {
+    "split": _split, "undo": _undo, "redo": _redo, "zoom-in": _zoom_in, "zoom-out": _zoom_out, "select-all": _select_all,
+    "speaker": _speaker, "speaker-off": _speaker_off, "spark": _spark,
     "play": _play, "pause": _pause, "folder": _folder, "close": _close, "stop": _stop, "plus": _plus,
     "upload": _upload, "waveform": _waveform, "info": _info, "up": _up, "down": _down, "trash": _trash,
     "again": _again,

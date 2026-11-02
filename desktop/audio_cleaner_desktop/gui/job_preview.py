@@ -30,7 +30,7 @@ class JobPreview(PreviewPane):
         self._stream: LiveMix | None = None
         live = self._live
         for signal, slot in (
-            (live.positionChanged, self._on_position), (live.durationChanged, lambda d: self._slider.setRange(0, d)),
+            (live.positionChanged, self._on_position), (live.durationChanged, self._on_duration),
             (live.playbackStateChanged, self._on_state), (live.mediaStatusChanged, self._on_status),
             (live.errorOccurred, self._on_error),
         ):

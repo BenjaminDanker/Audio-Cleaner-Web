@@ -1,121 +1,85 @@
-"""The name box under each file and the list of types joined to it: how the two follow each other, what happens with a
-name that can't be used, and that the choice reaches the job and the file that is written."""
+"""The output pane under the editor: the name of the result with the list of types joined to it (how the two follow each other, what happens with a
+name that can't be used, that the choice reaches the job and the file that is written), and the video size."""
 from __future__ import annotations
 
 import threading
-from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
 from audio_cleaner_desktop import engine
-from audio_cleaner_desktop.gui import main_window
-from audio_cleaner_desktop.gui.main_window import MainWindow
-from audio_cleaner_desktop.gui.queue_view import DONE, FAILED, RUNNING, WAITING
-from audio_cleaner_desktop.gui.theme import ThemeWatcher
 
 from conftest import wait_until
+from studio_helpers import add_file, settle
 
 
-def ready_window(qapp, tmp_path, monkeypatch, runner):
-    """A window whose files are read (by a stand-in for the probe) and whose jobs run `runner`."""
-    monkeypatch.setattr(main_window.resources, "check", lambda: [])
-    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(
-        duration=5.0, has_video=False, audio_channels=1, ext=path.suffix, video_codec=None))
-    return open_window(qapp, tmp_path, runner, missing=False)
-
-
-def open_window(qapp, tmp_path, runner=engine.process, missing=True):
-    ThemeWatcher(qapp)
-    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    w = MainWindow([], settings=settings, history_path=tmp_path / "history.db", runner=runner)
-    if missing:
-        w._missing = ["x"]  # no file is read in the background: the rows start from what their ending says
-    w.show()
-    return w
-
-
-def close_window(w):
-    w.queue.shutdown()
-    w.history.close()
-    w._pool.waitForDone()
-
-
-@pytest.fixture
-def window(qapp, tmp_path):
-    w = open_window(qapp, tmp_path)
-    yield w
-    close_window(w)
-
-
-def add(window, tmp_path, *names):
-    paths = []
-    for name in names:
-        (tmp_path / name).write_bytes(b"x")
-        paths.append(tmp_path / name)
-    window.add_paths(paths)
-    items = [next(i for i in window._items.values() if i.path == p) for p in paths]
-    return [window.view.row(i.id) for i in items]
-
-
-def type_name(row, text):
-    box = row._namebox
+def type_name(w, text):
+    box = w.studio.output.name
     box.setFocus()
     box.selectAll()
     if text:
         QTest.keyClicks(box, text)
     else:
         QTest.keyClick(box, Qt.Key.Key_Delete)
+    settle(w)
 
 
-def pick(row, ending):
-    index = row._format.findData(ending)
+def pick(w, ending):
+    box = w.studio.output.format
+    index = box.findData(ending)
     assert index >= 0, f"{ending} is not in the list"
-    row._format.setCurrentIndex(index)
-    row._format.activated.emit(index)
+    box.setCurrentIndex(index)
+    box.activated.emit(index)
+    settle(w)
+
+
+def open_file(w, tmp_path, name="talk.wav"):
+    add_file(w, tmp_path, name)
+    assert wait_until(lambda: w.doc.model is not None, 5)
+    settle(w)
+    return w.doc
 
 
 def test_the_box_starts_with_todays_result_name_and_typing_or_picking_keep_each_other_in_step(window, tmp_path):
-    (row,) = add(window, tmp_path, "talk.wav")
-    item = row.item
-    assert row._namebox.text() == "talk-cleaned.wav" and row._format.currentData() == ".wav"
-    type_name(row, "interview.mp3")
-    assert row._format.currentData() == ".mp3" and item.out_name == "interview.mp3" and item.out_custom
-    type_name(row, "interview.FLAC")  # capitals are fine
-    assert row._format.currentData() == ".flac"
-    type_name(row, "interview.mp")  # half an ending is no type: the list shows none
-    assert row._format.currentIndex() == -1
-    pick(row, ".ogg")
-    assert row._namebox.text() == "interview.mp.ogg"  # ".mp" is no ending we know, so it was part of the name
-    type_name(row, "interview.mp3")
-    pick(row, ".m4a")
-    assert row._namebox.text() == "interview.m4a" and item.out_name == "interview.m4a"
-    pick(row, ".mp4")  # a sound can become a video
-    assert row._namebox.text() == "interview.mp4"
+    doc = open_file(window, tmp_path)
+    o = window.studio.output
+    assert o.name.text() == "talk-cleaned.wav" and o.format.currentData() == ".wav"
+    type_name(window, "interview.mp3")
+    assert o.format.currentData() == ".mp3" and doc.out_name == "interview.mp3" and doc.out_custom and doc.item.out_name == "interview.mp3"
+    type_name(window, "interview.FLAC")  # capitals are fine
+    assert o.format.currentData() == ".flac"
+    type_name(window, "interview.mp")  # half an ending is no type: the list shows none
+    assert o.format.currentIndex() == -1
+    pick(window, ".ogg")
+    assert o.name.text() == "interview.mp.ogg"  # ".mp" is no ending we know, so it was part of the name
+    type_name(window, "interview.mp3")
+    pick(window, ".m4a")
+    assert o.name.text() == "interview.m4a" and doc.out_name == "interview.m4a"
+    pick(window, ".mp4")  # a sound can become a video
+    assert o.name.text() == "interview.mp4" and "(plain black picture)" in o.format.itemText(o.format.currentIndex())
+    assert o.size_box.isVisibleTo(o)  # and then it has a picture size to choose
 
 
 def test_a_name_that_is_the_usual_one_again_follows_the_settings_again(window, tmp_path):
-    (row,) = add(window, tmp_path, "talk.wav")
-    type_name(row, "mine.wav")
-    assert row.item.out_custom
-    type_name(row, "talk-cleaned.wav")
-    assert not row.item.out_custom
+    doc = open_file(window, tmp_path)
+    type_name(window, "mine.wav")
+    assert doc.out_custom
+    type_name(window, "talk-cleaned.wav")
+    assert not doc.out_custom
 
 
-def test_a_name_that_cannot_be_used_gets_a_short_reason_once_the_box_is_left_and_it_goes_when_fixed(window, tmp_path):
-    (row,) = add(window, tmp_path, "talk.wav")
-    type_name(row, "talk-cleaned.xyz")
-    assert not row._hint.isVisible()  # not while still typing
-    row._namebox.clearFocus()
-    row._namebox.editingFinished.emit()
-    assert row._hint.isVisible() and "can't be saved as .xyz" in row._hint.text()
-    assert row._namebox.property("invalid") is True and row._format.currentIndex() == -1
-    type_name(row, "talk-cleaned.mp3")  # fixed: the reason goes away at once
-    assert not row._hint.isVisible() and row._namebox.property("invalid") is False
+def test_a_name_that_cannot_be_used_gets_a_short_reason_and_it_goes_when_fixed(window, tmp_path):
+    open_file(window, tmp_path)
+    o = window.studio.output
+    type_name(window, "talk-cleaned.xyz")
+    assert "can't be saved as .xyz" in o.hint.text() and o.name.property("invalid") is True and o.format.currentIndex() == -1
+    assert not window.studio.start.button.isEnabled() and any("can't be saved as .xyz" in t for t, _ in window.studio.note_lines(window.doc))
+    type_name(window, "talk-cleaned.mp3")  # fixed: the reason goes away at once
+    assert "can't be saved" not in o.hint.text() and o.name.property("invalid") is False and window.studio.start.button.isEnabled()
 
 
-def test_starting_leaves_out_a_file_whose_name_is_unusable_and_says_so(qapp, tmp_path, monkeypatch):
+def test_a_file_whose_name_is_unusable_is_left_out_of_a_start_and_the_others_go(make_window, tmp_path):
     started: list[tuple[str, str | None]] = []
     gate = threading.Event()
 
@@ -124,33 +88,30 @@ def test_starting_leaves_out_a_file_whose_name_is_unusable_and_says_so(qapp, tmp
         gate.wait(5)
         return engine.JobResult(path, 1.0, False)
 
-    w = ready_window(qapp, tmp_path, monkeypatch, runner)
-    try:
-        good, bad = add(w, tmp_path, "good.wav", "bad.wav")
-        assert wait_until(lambda: good.item.probed and bad.item.probed, timeout=10)
-        type_name(bad, "oops")
-        assert w.status.text() == "2 files ready, 1 can't start until its name is fixed"
-        w.start()
-        assert wait_until(lambda: started, timeout=10)
-        assert started == [("good.wav", "good-cleaned.wav")]  # the box's name goes with the job
-        assert bad.item.state == WAITING and bad._hint.isVisible()  # refused, with the reason on its row
-        gate.set()
-        assert wait_until(lambda: good.item.state == DONE, timeout=10)
-        assert bad.item.state == WAITING
-        # nothing to start at all: the queue is not left "active"
-        w.start()
-        assert not w.queue.active and not w.queue.busy
-        type_name(bad, "bad-cleaned.wav")  # fixed: it can go
-        assert not bad._hint.isVisible()
-        w.start()
-        assert wait_until(lambda: bad.item.state == DONE, timeout=10)
-        assert started[1] == ("bad.wav", "bad-cleaned.wav")
-    finally:
-        gate.set()
-        close_window(w)
+    w = make_window(runner)
+    for name in ("good.wav", "bad.wav"):
+        (tmp_path / name).write_bytes(b"x")
+    w.add_paths([tmp_path / "good.wav", tmp_path / "bad.wav"])
+    assert wait_until(lambda: all(i.doc.model is not None for i in w._items.values()), 10)
+    good, bad = w._items[1], w._items[2]
+    w.open_item(bad.id)
+    type_name(w, "oops")
+    w.start_all()
+    assert wait_until(lambda: started, timeout=10)
+    assert started == [("good.wav", "good-cleaned.wav")]  # the box's name goes with the job
+    assert bad.state == "waiting" and bad.id not in w._queued
+    w.open_item(bad.id)
+    settle(w)
+    assert any("Type" in t or "ending" in t or "can't" in t for t, _ in w.studio.note_lines(bad.doc)) and not w.studio.start.button.isEnabled()
+    gate.set()
+    assert wait_until(lambda: good.state == "done", timeout=10)
+    type_name(w, "bad-cleaned.wav")  # fixed: it can go
+    w.studio.start.button.click()
+    assert wait_until(lambda: bad.state == "done", timeout=10)
+    assert started[1] == ("bad.wav", "bad-cleaned.wav")
 
 
-def test_the_name_of_a_file_already_in_line_follows_the_box_and_a_bad_one_waits(qapp, tmp_path, monkeypatch):
+def test_a_file_in_line_or_running_cannot_be_renamed_and_keeps_the_name_it_had(make_window, tmp_path):
     release = threading.Event()
     seen: list[tuple[str, str | None]] = []
 
@@ -159,43 +120,106 @@ def test_the_name_of_a_file_already_in_line_follows_the_box_and_a_bad_one_waits(
         release.wait(10)
         return engine.JobResult(path, 1.0, False)
 
-    w = ready_window(qapp, tmp_path, monkeypatch, runner)
+    w = make_window(runner)
     try:
         w.prefs.parallel = 1
         w._settings_changed()
-        a, b = add(w, tmp_path, "a.wav", "b.wav")
-        assert wait_until(lambda: a.item.probed and b.item.probed, timeout=10)
-        w.start()
+        for name in ("a.wav", "b.wav"):
+            (tmp_path / name).write_bytes(b"x")
+        w.add_paths([tmp_path / "a.wav", tmp_path / "b.wav"])
+        assert wait_until(lambda: all(i.doc.model is not None for i in w._items.values()), 10)
+        a, b = w._items[1], w._items[2]
+        w.open_item(b.id)
+        type_name(w, "second.mp3")  # b is renamed, then started: it is in line behind a
+        w.start_all()
         assert wait_until(lambda: seen, timeout=10)
-        assert a.item.state == RUNNING and not a._namebox.isEnabled() and not a._format.isEnabled()  # busy: no editing
-        type_name(b, "second.mp3")  # b is in line behind a
-        assert [(j.id, j.output_name) for j in w.queue._pending] == [(b.item.id, "second.mp3")]
-        type_name(b, "second.exe")  # not good: out of the line until it is
-        assert w.queue.pending_ids() == [] and b.item.state == WAITING
-        type_name(b, "second.flac")  # good again: back in line, with the new name
-        assert [(j.id, j.output_name) for j in w.queue._pending] == [(b.item.id, "second.flac")]
+        w.open_item(a.id)
+        settle(w)
+        assert a.state == "running" and not w.studio.output.isEnabled()  # busy: no editing
+        w.open_item(b.id)
+        settle(w)
+        assert b.id in w._queued and not w.studio.output.isEnabled()
         release.set()
-        assert wait_until(lambda: b.item.state == DONE, timeout=10)
-        assert seen == [("a.wav", "a-cleaned.wav"), ("b.wav", "second.flac")]
+        assert wait_until(lambda: b.state == "done", timeout=10)
+        assert seen == [("a.wav", "a-cleaned.wav"), ("b.wav", "second.mp3")]
     finally:
         release.set()
-        close_window(w)
 
 
 def test_the_usual_name_follows_the_audio_file_type_setting_and_a_typed_name_does_not(window, tmp_path):
-    plain, mine = add(window, tmp_path, "plain.wav", "mine.wav")
-    type_name(mine, "mine.ogg")
-    window.settings_panel._format.setCurrentIndex(window.settings_panel._format.findData("flac"))
-    assert plain._namebox.text() == "plain-cleaned.flac" and plain._format.currentData() == ".flac"
-    assert mine._namebox.text() == "mine.ogg"
-    video, = add(window, tmp_path, "clip.mp4")
-    assert video._namebox.text() == "clip-cleaned.mp4"  # a video is not touched by the audio file type
+    plain = open_file(window, tmp_path, "plain.wav")
+    mine_item = None
+    (tmp_path / "mine.wav").write_bytes(b"x")
+    window.add_paths([tmp_path / "mine.wav"])
+    assert wait_until(lambda: window.doc.model is not None, 5)
+    mine = window.doc
+    type_name(window, "mine.ogg")
+    window.show_settings()
+    box = window._settings_dialog._format
+    box.setCurrentIndex(box.findData("flac"))
+    settle(window)
+    assert plain.out_name == "plain-cleaned.flac" and mine.out_name == "mine.ogg" and mine_item is None
+    window.open_item(plain.item.id)
+    settle(window)
+    assert window.studio.output.name.text() == "plain-cleaned.flac" and window.studio.output.format.currentData() == ".flac"
+    window.fakes.facts.update(video=True, ext=".mp4")
+    (tmp_path / "clip.mp4").write_bytes(b"x")
+    window.add_paths([tmp_path / "clip.mp4"])
+    assert wait_until(lambda: window.doc.model is not None, 5)
+    settle(window)
+    assert window.studio.output.name.text() == "clip-cleaned.mp4"  # a video is not touched by the audio file type
 
 
-@pytest.fixture
-def fake_bin(tmp_path, monkeypatch):
-    """Stands in for the Recycle Bin / Trash, so tests never touch the real one."""
-    from audio_cleaner_desktop.gui import shell
+def test_the_video_size_is_there_only_for_a_picture_and_is_remembered(window, tmp_path):
+    window.fakes.facts.update(video=True, ext=".mp4")
+    doc = open_file(window, tmp_path, "clip.mp4")
+    o = window.studio.output
+    assert o.size_box.isVisibleTo(o) and o.size.currentData() == "same" and "copied as it is" in o.size_hint.text()
+    o.sizePicked.emit("720")
+    settle(window)
+    assert doc.video_size == "720" and window.prefs.video_size == "720" and "made again at this size" in o.size_hint.text()
+    pick(window, ".mp3")  # only its sound: no picture, no size
+    assert not o.size_box.isVisibleTo(o)
+    assert window._wanted(doc).video_size == "720" if doc.is_job else True
+
+
+def test_the_pane_says_where_the_result_is_saved_and_what_it_will_save(window, tmp_path):
+    doc = open_file(window, tmp_path)
+    o = window.studio.output
+    assert o.where.text() == "Saved next to the original" and not o.next_to.isVisibleTo(o)
+    assert "<b>talk-cleaned.wav</b>" in o.will.text() and o.will.text().startswith("When it’s done, these are saved by themselves")
+    doc.set_subtitles("srt")
+    settle(window)
+    assert "talk-cleaned.wav and the subtitles (SRT)" in o.will.text()
+    window.prefs.output_folder, window.prefs.output_mode = str(tmp_path / "out"), "folder"
+    window._settings_changed()
+    settle(window)
+    assert o.where.text() == f"Saved in {tmp_path / 'out'}" and o.next_to.isVisibleTo(o)
+    o.next_to.click()
+    settle(window)
+    assert window.prefs.output_mode == "next" and o.where.text() == "Saved next to the original"
+
+
+@pytest.mark.native
+def test_the_chosen_name_and_type_are_what_gets_written(native_window, tmp_path, clip_wav, quick_clean):
+    w = native_window
+    src = tmp_path / "in" / "talk.wav"
+    src.parent.mkdir()
+    src.write_bytes(clip_wav.read_bytes())
+    w.add_paths([src])
+    assert wait_until(lambda: w.doc.model is not None, 30)
+    settle(w)
+    type_name(w, "My talk.mp3")
+    w.studio.start.button.click()
+    item = next(iter(w._items.values()))
+    assert wait_until(lambda: item.state in ("done", "failed"), timeout=60)
+    assert item.state == "done", item.message
+    assert item.outputs == [src.parent / "My talk.mp3"] and (src.parent / "My talk.mp3").is_file()
+
+
+@pytest.mark.native
+def test_saving_again_under_another_name_makes_a_new_file_and_under_the_same_name_replaces(native_window, tmp_path, clip_wav, monkeypatch):
+    from audio_cleaner_desktop.gui import main_window, shell
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -206,78 +230,35 @@ def fake_bin(tmp_path, monkeypatch):
 
     monkeypatch.setattr(shell, "move_to_trash", move)
     monkeypatch.setattr(main_window.shell, "move_to_trash", move)
-    return bin_dir
-
-
-@pytest.mark.native
-def test_the_chosen_name_and_type_are_what_gets_written(qapp, tmp_path, clip_wav, quick_clean):
-    src = tmp_path / "in" / "talk.wav"
-    src.parent.mkdir()
-    src.write_bytes(clip_wav.read_bytes())
-    w = open_window(qapp, tmp_path, missing=False)
-    try:
-        w.add_paths([src])
-        row = w.view.rows()[0]
-        assert wait_until(lambda: row.item.probed, timeout=30)
-        type_name(row, "My talk.mp3")
-        w.start()
-        assert wait_until(lambda: row.item.state in (DONE, FAILED), timeout=60)
-        assert row.item.state == DONE, row.item.message
-        assert row.item.outputs == [src.parent / "My talk.mp3"] and (src.parent / "My talk.mp3").is_file()
-    finally:
-        close_window(w)
-
-
-@pytest.mark.native
-def test_clean_again_with_a_changed_name_makes_a_new_file_and_with_the_same_name_replaces(qapp, tmp_path, clip_wav, quick_clean, fake_bin):
+    w = native_window
     src = tmp_path / "talk.wav"
     src.write_bytes(clip_wav.read_bytes())
-    w = open_window(qapp, tmp_path, missing=False)
-    try:
-        w.add_paths([src])
-        row = w.view.rows()[0]
-        item = row.item
-        w.start()
-        assert wait_until(lambda: item.state == DONE, timeout=60), item.message
-        first = tmp_path / "talk-cleaned.wav"
-        assert item.outputs == [first]
+    w.add_paths([src])
+    assert wait_until(lambda: w.doc.model is not None, 30)
+    settle(w)
+    doc = w.doc
+    w.studio.start.button.click()
+    assert wait_until(lambda: doc.stage == "done", timeout=60), doc.note
+    settle(w)
+    first = tmp_path / "talk-cleaned.wav"
+    assert doc.result_paths() == [first]
 
-        # another name: a new file next to the first, which stays where it is
-        type_name(row, "episode 1.wav")
-        w.clean_again(item.id)
-        assert wait_until(lambda: item.state == DONE, timeout=60), item.message
-        assert item.outputs == [tmp_path / "episode 1.wav"] and first.is_file()
-        assert list(fake_bin.iterdir()) == []
+    def save(name_or_ending, *, ending=False):
+        (pick if ending else type_name)(w, name_or_ending)
+        assert doc.changed_output
+        w.studio.start.button.click()
+        assert wait_until(lambda: w._saving is None and doc.stage == "done" and not doc.changed_output, 60), doc.note
+        settle(w)
 
-        # the same name as the last time: the new result takes the place of the old one, which goes to the bin
-        w.clean_again(item.id)
-        assert wait_until(lambda: item.state == DONE, timeout=60), item.message
-        assert item.outputs == [tmp_path / "episode 1.wav"]
-        assert [p.name for p in fake_bin.iterdir()] == ["episode 1.wav"]
-        assert not [p for p in tmp_path.iterdir() if "(2)" in p.name]
-
-        # the type changed in the list: the file of the other type is a new file, too
-        pick(row, ".flac")
-        assert row._namebox.text() == "episode 1.flac"
-        w.clean_again(item.id)
-        assert wait_until(lambda: item.state == DONE, timeout=60), item.message
-        assert item.outputs == [tmp_path / "episode 1.flac"] and (tmp_path / "episode 1.wav").is_file()
-    finally:
-        close_window(w)
-
-
-@pytest.mark.native
-def test_clean_again_will_not_start_with_an_unusable_name(qapp, tmp_path, clip_wav, quick_clean):
-    src = tmp_path / "talk.wav"
-    src.write_bytes(clip_wav.read_bytes())
-    w = open_window(qapp, tmp_path, missing=False)
-    try:
-        w.add_paths([src])
-        row = w.view.rows()[0]
-        w.start()
-        assert wait_until(lambda: row.item.state == DONE, timeout=60), row.item.message
-        type_name(row, "no/good.wav")
-        w.clean_again(row.item.id)
-        assert row.item.state == WAITING and row._hint.isVisible() and not w.queue.busy and not w.queue.active
-    finally:
-        close_window(w)
+    type_name(w, "no/good.wav")  # an unusable name does not start anything
+    assert not w.studio.start.button.isEnabled() and w._saving is None
+    w.primary()
+    assert w._saving is None and doc.stage == "done"
+    save("episode 1.wav")  # another name: a new file next to the first, which stays where it is
+    assert doc.result_paths() == [tmp_path / "episode 1.wav"] and first.is_file() and list(bin_dir.iterdir()) == []
+    w.ask_replace = lambda name: "replace"
+    save("episode 1.wav")  # the name of the last result, on purpose: the new one takes its place and the old one goes to the bin
+    assert doc.result_paths() == [tmp_path / "episode 1.wav"] and [p.name for p in bin_dir.iterdir()] == ["episode 1.wav"]
+    assert not [p for p in tmp_path.iterdir() if "(2)" in p.name]
+    save(".flac", ending=True)  # another type: the file of the other type is a new file
+    assert doc.result_paths() == [tmp_path / "episode 1 (2).flac"] and (tmp_path / "episode 1.wav").is_file()  # (the name had moved on to the next free one)

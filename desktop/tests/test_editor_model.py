@@ -7,12 +7,10 @@ import math
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtTest import QTest
 
 from acw_common import clarity, pipeline
 from acw_common.timeline import Timeline
-from audio_cleaner_desktop import editor_job, editor_model, editor_session, live_mix
+from audio_cleaner_desktop import live_mix
 from audio_cleaner_desktop.editor_model import EditModel, Suggestion
 
 from fake_media import FakeSink, namespace, sink_factory

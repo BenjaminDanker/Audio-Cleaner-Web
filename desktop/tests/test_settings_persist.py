@@ -1,29 +1,42 @@
-"""Every option of the settings panel (and the window's size, position and tab) is still there after the app is
-closed and opened again: the real window on an INI-backed QSettings, driven through its widgets. Also the automatic
-best settings: on by default, the hand-made choices kept for when it is off."""
+"""What was chosen is still there after the app is closed and opened again: the choices made on the editor screen for a whole file (they are what the
+next file starts with), the ones in Settings, and the window's size: the real window on an INI-backed QSettings, driven through its widgets. Also
+Automatic: on by default, the hand-made choices kept for when it is off."""
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QCheckBox, QFileDialog
 
-from audio_cleaner_desktop import resources
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QFileDialog
+
+from audio_cleaner_desktop import labels, resources
+from audio_cleaner_desktop.gui import copy
 from audio_cleaner_desktop.gui.main_window import MainWindow
-from audio_cleaner_desktop.gui.preferences import Preferences
-from audio_cleaner_desktop.gui.settings_panel import InfoButton, SettingsPanel
+from audio_cleaner_desktop.gui.settings_dialog import HelpButton
 from audio_cleaner_desktop.gui.theme import ThemeWatcher
 
+import studio_helpers as sh
+from conftest import wait_until
 
-def _open(tmp_path):
+
+def _open(tmp_path, seconds=11.0):
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     w = MainWindow([], settings=settings, history_path=tmp_path / "history.db")
+    w.fakes = sh.Fakes(seconds).install(w)
     w.show()
     return w
 
 
 def _close(w):
-    w.close()  # closeEvent saves the geometry and tab and shuts the queue down
+    w.close()  # closeEvent saves the geometry and shuts the queue down
     w._pool.waitForDone()
     w.deleteLater()
+
+
+def _file(w, tmp_path, name="talk.wav"):
+    (tmp_path / name).write_bytes(b"x" * 100)
+    w.add_paths([tmp_path / name])
+    assert wait_until(lambda: w.doc.model is not None, 10)
+    sh.settle(w)
+    return w.doc
 
 
 def _pick(box, key):
@@ -31,87 +44,82 @@ def _pick(box, key):
     assert box.currentData() == key
 
 
-def _click(check, on):
-    if check.isChecked() != on:
-        check.click()
-    assert check.isChecked() == on
-
-
-def _shown(panel):
-    """Everything the panel shows, read back from its widgets."""
+def _shown(w):
+    """Everything the screen and Settings show for the file in the editor, read back from the widgets."""
+    i, d = w.studio.inspector, w.settings_dialog_for_tests
+    m = w.doc.model
     return {
-        "auto": panel._auto.isChecked(), "strength": panel._strength.value(), "leveling": panel._leveling.isChecked(),
-        "loudness": panel._loudness.currentData(), "subtitles": panel._subtitles.currentData(),
-        "language": panel._language.currentData(), "noise": panel._noise.currentData(),
-        "echo": panel._echo.isChecked(), "rebuild": panel._rebuild.isChecked(),
-        "format": panel._format.currentData(), "video_size": panel._video_size.currentData(),
-        "parallel": panel._parallel.currentData(),
-        "where": panel._where.value(), "folder": panel._folder.text(),
+        "auto": w.studio.top.switch.isChecked(), "strength": m.strength_of(0, m.seconds), "remover": m.remover_of(0, m.seconds),
+        "voice": m.voice_mode_of(0, m.seconds), "leveling": i.level.value(), "subtitles": i.subs.value(), "kind": i.files.value(),
+        "language": i.language.currentData(), "echo": i.echo.isChecked(), "size": w.studio.output.size.currentData(),
+        "format": d._format.currentData(), "parallel": d._parallel.currentData(), "where": d._where.value(), "folder": d._folder.text(),
     }
 
 
-def _change_everything(panel, folder, monkeypatch):
-    _click(panel._auto, False)  # choosing by hand: strength, noise and rebuild are enabled
-    panel._strength._buttons["gentle"].click()  # while rebuild is still off: strength is enabled
-    _pick(panel._noise, "heavy")
-    _click(panel._leveling, False)  # greys the loudness list out
-    _pick(panel._loudness, "broadcast")  # still stored while greyed out
-    _pick(panel._subtitles, "vtt")
-    _pick(panel._language, "de")
-    _click(panel._echo, True)
-    _pick(panel._format, "flac")
-    _pick(panel._video_size, "720")
-    _pick(panel._parallel, 0)  # Automatic is a real choice, 0, and must not read back as unset
+def _change_everything(w, folder, monkeypatch):
+    i = w.studio.inspector
+    w.studio.top.switch.click()  # choosing by hand
+    sh.settle(w)
+    i.strength._buttons["gentle"].click()
+    i.remover._buttons["heavy"].click()
+    i.level._buttons["broadcast"].click()
+    i.subs._buttons["on"].click()
+    sh.settle(w)
+    i.files._buttons["vtt"].click()
+    _pick(i.language, "de")
+    i.language.activated.emit(i.language.currentIndex())
+    i.echo.click()
+    sh.settle(w)
+    dialog = w.settings_dialog_for_tests
+    _pick(dialog._format, "flac")
+    _pick(dialog._parallel, 0)  # Automatic is a real choice, 0, and must not read back as unset
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
-    panel._where._buttons["folder"].click()
-    _click(panel._rebuild, True)  # greys out strength and noise
+    dialog._where._buttons["folder"].click()
+    sh.settle(w)
 
 
-EXPECTED = {
-    "auto": False, "strength": "gentle", "leveling": False, "loudness": "broadcast", "subtitles": "vtt", "language": "de",
-    "noise": "heavy", "echo": True, "rebuild": True, "format": "flac", "video_size": "720", "parallel": 0,
-    "where": "folder",
-}
+def _with_dialog(w):
+    w.show_settings()
+    w.settings_dialog_for_tests = w._settings_dialog
 
 
-def test_every_setting_survives_closing_and_reopening(qapp, tmp_path, monkeypatch):
-    """The saved choices stay even when the models they need are not installed (they are only greyed out)."""
+def test_every_choice_survives_closing_and_reopening(qapp, tmp_path, monkeypatch):
     ThemeWatcher(qapp)
     monkeypatch.setattr(resources, "speech_ready", lambda: False)
     monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
     folder = tmp_path / "out folder"
     folder.mkdir()
-
     w = _open(tmp_path)
-    panel = w.settings_panel
+    w.fakes.facts.update(tracks=2)  # (a second audio track: the echo card is there)
+    _file(w, tmp_path)
+    _with_dialog(w)
     # a fresh install shows the defaults
-    assert _shown(panel)["strength"] == "max" and _shown(panel)["where"] == "next"
-    assert _shown(panel)["auto"]  # automatic best settings, until unticked
-    assert _shown(panel)["video_size"] == "same"  # the picture is left as it is unless asked
-    _change_everything(panel, folder, monkeypatch)
-    want = {**EXPECTED, "folder": str(folder)}
-    assert _shown(panel) == want
-    w.tabs.setCurrentIndex(1)
-    w.resize(905, 641)  # the offscreen screen is only 800 wide: the width is clamped there, the height is not
+    first = _shown(w)
+    assert first["auto"] and first["where"] == "next" and first["size"] in ("same", None) and first["kind"] == ""
+    _change_everything(w, folder, monkeypatch)
+    want = {"auto": False, "strength": "gentle", "remover": "heavy", "voice": "noise", "leveling": "broadcast", "subtitles": "on", "kind": "vtt",
+            "language": "de", "echo": True, "size": "same", "format": "flac", "parallel": 0, "where": "folder", "folder": str(folder)}
+    assert _shown(w) == want
+    w.resize(905, 641)
     height = w.height()
     _close(w)
 
     again = _open(tmp_path)
     try:
-        panel = again.settings_panel
-        assert _shown(panel) == want
-        # the job the next Clean starts with is built from the same values
+        again.fakes.facts.update(tracks=2)
+        _file(again, tmp_path, "next.wav")
+        _with_dialog(again)
+        shown = _shown(again)
+        # the next file starts with what was chosen (Automatic is off, so nothing is decided for it)
+        assert shown == want, {k: (shown[k], want[k]) for k in want if shown[k] != want[k]}
         o = again.prefs.job_options()
-        assert (o.strength, o.leveling, o.loudness, o.subtitles, o.language, o.noise) == (
-            "gentle", False, "broadcast", "vtt", "de", "heavy")
-        assert (o.echo_track, o.rebuild_voice, o.audio_format) == (True, True, "flac")
-        assert (o.video_size, o.short_side) == ("720", 720)
+        assert (o.strength, o.leveling, o.loudness, o.subtitles, o.language, o.noise) == ("gentle", True, "broadcast", "vtt", "de", "heavy")
+        assert (o.echo_track, o.rebuild_voice, o.audio_format) == (True, False, "flac")
         assert again.prefs.parallel == 0 and again.prefs.output_dir() == folder
-        assert again.tabs.currentIndex() == 1
-        assert again.height() == height and again.width() >= 900  # not the 720 of a first start
+        assert again.height() == height and again.width() >= 640  # (not the 900 of a first start: the offscreen screen clamps the width, not the height)
         # the folder is offered again without asking when "Next to original" is picked and then "folder" again
-        again.settings_panel._where._buttons["next"].click()
-        again.settings_panel._where._buttons["folder"].click()
+        again._settings_dialog._where._buttons["next"].click()
+        again._settings_dialog._where._buttons["folder"].click()
         assert again.prefs.output_dir() == folder
     finally:
         _close(again)
@@ -127,68 +135,99 @@ def test_a_saved_setting_that_no_longer_exists_falls_back(qapp, tmp_path):
     ini.sync()
     w = _open(tmp_path)
     try:
-        s = _shown(w.settings_panel)
-        assert s["strength"] == "max" and s["parallel"] == 0 and s["where"] == "next" and s["video_size"] == "same"
+        _file(w, tmp_path)
+        _with_dialog(w)
+        s = _shown(w)
+        assert w.doc.model.default_noise["strength_db"] == 100.0 and s["parallel"] == 0 and s["where"] == "next" and w.doc.video_size == "same"
     finally:
         _close(w)
 
 
-def test_automatic_best_settings_choose_for_each_file_while_on_and_keep_the_hand_made_choices(qapp, tmp_path, monkeypatch):
-    # the voice model is not installed here
-    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
-    ini = tmp_path / "s.ini"
-    prefs = Preferences(QSettings(str(ini), QSettings.Format.IniFormat))
-    panel = SettingsPanel(prefs)
+def test_automatic_chooses_for_each_file_while_on_and_keeps_the_hand_made_choices(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)  # the voice model is not installed here
+    w = _open(tmp_path)
+    ini = tmp_path / "settings.ini"
     try:
-        assert panel._auto.isChecked() and prefs.auto_settings  # on for a fresh install
-        o = prefs.job_options()
-        assert (o.strength, o.noise, o.atten_lim_db, o.rebuild_voice, o.auto_rebuild) == ("auto", "auto", None, False, True)
-        _click(panel._auto, False)  # by hand
-        panel._strength._buttons["strong"].click()
-        _pick(panel._noise, "light")
-        o = prefs.job_options()
-        assert (o.strength, o.noise, o.rebuild_voice, o.auto_rebuild) == ("strong", "light", False, False)
-        assert not o.decides  # by hand: nothing is measured, nothing is picked for the file
-        _click(panel._rebuild, True)  # rebuilt always, the noise settings don't apply
-        assert prefs.job_options().rebuild_voice and not prefs.job_options().auto_rebuild
-        _click(panel._auto, True)  # ticked rebuild doesn't count while automatic: only some files are rebuilt
-        o = prefs.job_options()
-        assert (o.strength, o.noise, o.rebuild_voice, o.auto_rebuild) == ("auto", "auto", False, True)
-        # the hand-made choices are kept for when it is off
-        assert panel._strength.value() == "strong" and panel._noise.currentData() == "light"
-        _click(panel._auto, False)
-        _click(panel._rebuild, False)
+        doc = _file(w, tmp_path)
+        assert doc.auto and w.prefs.auto_settings  # on for a fresh install
+        assert wait_until(lambda: doc.applied, 10)
+        options, timeline = doc.run_plan()
+        assert (options.strength, options.noise, options.atten_lim_db, options.rebuild_voice, options.auto_rebuild) == ("auto", "auto", None, False, True)
+        assert timeline is None and options.decides  # untouched: the run measures the file and decides for itself
+        assert doc.model.strength_of(0, 11) == "balanced" and doc.model.remover_of(0, 11) == "light"  # (what it decided is shown)
+        # by hand
+        w.prefs.strength, w.prefs.noise = "strong", "light"
+        w.studio.top.switch.click()
+        sh.settle(w)
+        assert not doc.auto and not w.prefs.auto_settings and doc.model.strength_of(0, 11) == "strong"
+        options, timeline = doc.run_plan()
+        assert (options.rebuild_voice, options.auto_rebuild, options.decides) == (False, False, False) and timeline["layers"]["noise"][0]["strength_db"] == 40.0
+        w.studio.inspector.options["rebuild"].radio.click()  # rebuilt: the noise settings don't apply
+        sh.settle(w)
+        assert doc.model.voice_mode_of(0, 11) == "rebuild" and w.prefs.rebuild_voice and w.prefs.strength == "strong"
+        # Automatic again: its choices replace them (rebuilding only where the model is there), the hand-made ones are kept for when it is off
+        w.studio.top.switch.click()
+        assert wait_until(lambda: doc.applied and not doc.listening, 10)
+        sh.settle(w)
+        assert doc.auto and doc.model.strength_of(0, 11) == "balanced" and doc.model.voice_mode_of(0, 11) == "noise"
+        assert w.prefs.strength == "strong" and w.prefs.noise == "light" and w.prefs.rebuild_voice  # (kept: Automatic's picks are not remembered)
+        assert w.studio.top.auto_action.text() == "Undo"  # "Undo" gives the choices before Automatic back
+        w.studio.top.auto_action.click()
+        sh.settle(w)
+        assert not doc.auto and doc.model.voice_mode_of(0, 11) == "rebuild"
     finally:
-        panel.deleteLater()
+        _close(w)
     # off is remembered, and the hand-made choices come back
-    prefs = Preferences(QSettings(str(ini), QSettings.Format.IniFormat))
-    panel = SettingsPanel(prefs)
+    again = _open(tmp_path)
     try:
-        assert not panel._auto.isChecked() and prefs.auto_settings is False
-        assert panel._strength.value() == "strong"
+        doc = _file(again, tmp_path, "next.wav")
+        assert not doc.auto and again.prefs.auto_settings is False and doc.model.voice_mode_of(0, 11) == "rebuild"
+        again.studio.inspector.options["noise"].radio.click()
+        assert again.doc.model.strength_of(0, 11) == "strong" and again.doc.model.remover_of(0, 11) == "light"
+        assert ini.exists()
     finally:
-        panel.deleteLater()
+        _close(again)
 
 
-def test_the_settings_say_what_the_voice_is_rebuilt_for(qapp, tmp_path):
-    """The Rebuild the voice tick, the Extra cleanup help and the Automatic best settings help name the same causes the
-    automatic choice rebuilds for (echo, a muffled voice, phone-quality or damaged sound, distortion from recording too loud)."""
-    panel = SettingsPanel(Preferences(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)))
-    try:
-        tip = " ".join(panel._rebuild.toolTip().split())
-        assert tip.startswith("For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud.")
-        assert "It takes several times longer" in tip and "dull sound" not in tip
-        helps = [" ".join(b._text.split()) for b in panel.findChildren(InfoButton)]
-        auto = next(t for t in helps if t.startswith("Each file is listened to"))
-        assert ("Rebuild the voice: when it sounds echoey, muffled, damaged or like a phone call, or distorts from being recorded too loud "
-                "(needs its model, downloaded once)") in auto
-        assert "highs" not in auto.lower() and "(phone calls, small files)" not in auto
-        extra = next(t for t in helps if t.startswith("Remove speaker echo"))
-        assert "highs" not in extra.lower()
-        assert ("Rebuild the voice: instead of filtering the noise out, Audio Cleaner rebuilds the whole voice. Use it for a recording made "
-                "in an echoey room, a muffled voice, phone-quality or damaged sound (voice messages, very small files) or distortion from "
-                "recording too loud.") in extra
-        assert "also removes room echo and brings back dull sound" not in extra
-        assert not [w for w in panel.findChildren(QCheckBox) if "highs" in w.text().lower()]  # no tick for it in the panel
-    finally:
-        panel.deleteLater()
+def test_the_screen_says_what_the_voice_is_rebuilt_for(qapp, tmp_path):
+    """The Voice rebuild line, its tooltip and the Automatic help name the same causes the automatic choice rebuilds for (echo, a muffled voice,
+    phone-quality or damaged sound, distortion from recording too loud)."""
+    tip = " ".join(copy.TIPS["v.rebuild"].split())
+    assert tip.startswith("For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud:")
+    assert "Keeps only speech" in tip and "highs" not in tip.lower() and "dull sound" not in tip
+    line = dict((k, v) for k, _, v in copy.VOICE_MODES)["rebuild"]
+    assert "echo" in line and "muffled" in line and "keeps only speech" in line
+    assert any("echo, a muffled or phone-quality voice and distortion from recording too loud" in p for p in copy.REBUILD_POINTS)
+    helps = [" ".join(b._text.split()) for b in _help_buttons(tmp_path)]
+    extra = next(t for t in helps if t.startswith("Cleaned files get"))
+    assert "highs" not in extra.lower()
+
+
+def _help_buttons(tmp_path):
+    from audio_cleaner_desktop.gui.preferences import Preferences
+    from audio_cleaner_desktop.gui.settings_dialog import SettingsDialog
+    from audio_cleaner_desktop.gui.speech_model import SpeechModelDownloader
+    from audio_cleaner_desktop.updater import UpdateController
+
+    prefs = Preferences(QSettings(str(tmp_path / "p.ini"), QSettings.Format.IniFormat))
+    dialog = SettingsDialog(prefs, SpeechModelDownloader(), SpeechModelDownloader(model=resources.VOICE_MODEL), UpdateController(prefs))
+    return dialog.findChildren(HelpButton)
+
+
+def test_which_one_to_pick_is_said_in_plain_words(qapp, tmp_path):
+    text = labels.WHICH_TEXT
+    for phrase in ("keeps your voice exactly as recorded", "never changes a word", "laughs, shouts, whispers and singing stay as they were",
+                   "any length", "game sounds", "fixes echo, a muffled or phone-quality voice and distortion", "can sound slightly too clean",
+                   "keeps only speech", "may come out oddly", "can change a word, so listen before you publish", "slower", "many languages"):
+        assert phrase.lower() in text.lower(), phrase
+    assert "polish" not in text.lower() and "model" not in text.lower()
+    assert "the voice was rebuilt because it sounded echoey" in labels.rebuild_reason_text("echoey") and "keeps only speech" in labels.rebuild_reason_text("echoey")
+    # the screen says it in the card (a link to All the options) and in that window
+    from audio_cleaner_desktop.gui.info_dialog import InfoDialog
+    from PySide6.QtWidgets import QLabel
+
+    dialog = InfoDialog()
+    shown = " ".join(label.text() for label in dialog.findChildren(QLabel))
+    for phrase in ("never changes words", "Laughs, shouts, whispers and singing stay as they were", "can change a word, so listen before you publish"):
+        assert phrase in shown
+    dialog.close()

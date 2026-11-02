@@ -42,11 +42,16 @@ _VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".flv", ".avi"}
 class PreviewPane(QFrame):
     closed = Signal()
     positionMoved = Signal(int)  # the playing position in ms (the editor's playhead follows it)
+    stateChanged = Signal(bool)  # playing or not
+    durationChanged = Signal(int)  # ms
+    listeningChanged = Signal(str)  # "original" | "cleaned": what the person switched to
     _subtitles_read = Signal(object, object)  # key, cues (read on a worker thread)
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, *, compact: bool = False):
+        """`compact`: only the picture (and the subtitles over it): the screen's own controls play, seek and switch."""
         super().__init__(parent)
-        self.setObjectName("Card")
+        self.compact = compact
+        self.setObjectName("Picture" if compact else "Card")
         self.key: int | None = None  # whatever the caller uses to say which file is shown
         self._original: Path | None = None
         self._cleaned: Path | None = None
@@ -61,7 +66,7 @@ class PreviewPane(QFrame):
         self._video = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 14)
+        layout.setContentsMargins(0, 0, 0, 0) if compact else layout.setContentsMargins(16, 12, 16, 14)
         layout.setSpacing(10)
         head = QHBoxLayout()
         title = QLabel("Preview")
@@ -73,11 +78,12 @@ class PreviewPane(QFrame):
         head.addWidget(title)
         head.addWidget(self._name, 1)
         head.addWidget(close)
+        self._head_widgets = (title, self._name, close)
         layout.addLayout(head)
 
         self._stage = QStackedWidget()
         self._stage.setObjectName("Preview")
-        self._stage.setMinimumHeight(195)
+        self._stage.setMinimumHeight(0 if compact else 195)
         self._art = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         self._note = QLabel("Preview unavailable", alignment=Qt.AlignmentFlag.AlignCenter)
         self._note.setWordWrap(True)
@@ -123,9 +129,17 @@ class PreviewPane(QFrame):
         self._which.setMinimumWidth(190)
         controls.addWidget(self._which)
         layout.addLayout(controls)
+        self._controls = (self._play, self._slider, self._time, self._cc, self._which)
+        if compact:
+            for w in (*self._head_widgets, self._play, self._slider, self._time, self._which):
+                w.hide()
+            self._cc.setParent(self._stage)
+            self._cc.setStyleSheet("QPushButton { padding: 1px 4px; font-size: 10px; }")
+            self._cc.move(4, 4)
 
         self._play.clicked.connect(self.toggle)
         self._which.changed.connect(self._switch_source)
+        self._which.changed.connect(self.listeningChanged)
         self._slider.sliderPressed.connect(lambda: setattr(self, "_scrubbing", True))
         self._slider.sliderReleased.connect(self._scrub_done)
         self._slider.sliderMoved.connect(self._show_position)
@@ -185,6 +199,29 @@ class PreviewPane(QFrame):
             self._player.stop()
             self._player.setSource(QUrl())
 
+    @property
+    def playing(self) -> bool:
+        return self._player is not None and self._player.playbackState() == self._mm.QMediaPlayer.PlaybackState.PlayingState
+
+    @property
+    def position_ms(self) -> int:
+        return int(self._player.position()) if self._player is not None else 0
+
+    @property
+    def duration_ms(self) -> int:
+        return int(self._player.duration()) if self._player is not None else 0
+
+    @property
+    def listening(self) -> str:
+        return self._which.value()
+
+    def set_listening(self, which: str) -> None:
+        """Switch between the recording as it was and the cleaned version (the position stays)."""
+        if which == "cleaned" and self._cleaned is None:
+            return
+        if self._which.value() != which:
+            self._which.set_value(which)
+
     def toggle(self) -> None:
         if self._player is None:
             return
@@ -202,7 +239,7 @@ class PreviewPane(QFrame):
         self._player.setAudioOutput(self._audio)
         self._view = video_preview.VideoView()
         self._stage.insertWidget(0, self._view)
-        self._player.durationChanged.connect(lambda d: self._slider.setRange(0, d))
+        self._player.durationChanged.connect(self._on_duration)
         self._player.positionChanged.connect(self._on_position)
         self._player.playbackStateChanged.connect(self._on_state)
         self._player.mediaStatusChanged.connect(self._on_status)
@@ -336,11 +373,16 @@ class PreviewPane(QFrame):
         self._set_controls(False)
         self._which.setEnabled(True)
 
+    def _on_duration(self, ms: int) -> None:
+        self._slider.setRange(0, ms)
+        self.durationChanged.emit(int(ms))
+
     def _on_state(self, state) -> None:
         playing = state == self._mm.QMediaPlayer.PlaybackState.PlayingState
         self._play.set_icon("pause" if playing else "play")
         if self._synced is not None:
             self._synced.set_playing(playing)
+        self.stateChanged.emit(playing)
 
     def _on_position(self, pos: int) -> None:
         if not self._scrubbing:

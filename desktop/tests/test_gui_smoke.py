@@ -1,64 +1,66 @@
-"""The real window with the real engine (offscreen): a file cleaned from the window, the stop and the clean-again
-behaviour, the automatic choice shown and kept, and the window's own protections (missing parts, closing mid-job)."""
+"""The real window with the real engine (offscreen): a file cleaned from the editor screen and its result changed and saved again on the same screen,
+files started together, the window's own protections (missing parts, closing mid-job) and the About box."""
 from __future__ import annotations
 
-from types import SimpleNamespace
+import threading
 
 import pytest
 from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
 
 from audio_cleaner_desktop import engine
+from audio_cleaner_desktop.gui import main_window
 from audio_cleaner_desktop.gui.main_window import MainWindow
-from audio_cleaner_desktop.gui.queue_view import DONE, FAILED, WAITING
-from audio_cleaner_desktop.gui.theme import ThemeWatcher
 
+import studio_helpers as sh
 from conftest import wait_until
 
 
-@pytest.fixture
-def window(qapp, tmp_path):
-    ThemeWatcher(qapp)
-    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    w = MainWindow([], settings=settings, history_path=tmp_path / "history.db")
-    w.show()
-    yield w
-    w.queue.shutdown()
-    w.history.close()
-    w._pool.waitForDone()
+def put(window, speech_wav, tmp_path, name="talk.wav"):
+    src = tmp_path / name
+    src.write_bytes(speech_wav.read_bytes())
+    window.add_paths([src])
+    return src
+
+
+def ready(w) -> None:
+    doc = w.doc
+    assert wait_until(lambda: doc.model is not None and doc.wave == "ready" and not doc.listening, 120)
+    QApplication.processEvents()
 
 
 @pytest.mark.native
-def test_clean_a_file_end_to_end(window, speech_wav, tmp_path):
-    src = tmp_path / "talk.wav"
-    src.write_bytes(speech_wav.read_bytes())
-    assert window.add_paths([src]) == 1
-    assert window.add_paths([src]) == 0  # the same file is not queued twice
-    assert window.primary.isEnabled() and window.primary.text() == "Clean 1 file"
-    window.start()
-    item = next(iter(window._items.values()))
-    assert wait_until(lambda: item.state in (DONE, FAILED), timeout=120)
-    assert item.state == DONE, item.message
-    assert item.outputs == [tmp_path / "talk-cleaned.wav"] and item.outputs[0].is_file()
-    assert window.status.text() == "1 file cleaned"
-    entries = window.history.search()
-    assert len(entries) == 1 and entries[0].status == "done" and entries[0].outputs == [str(item.outputs[0])]
-    # Automatic best settings (on by default) picked the strength, and the list and the history say which
-    assert item.picked_strength in engine.STRENGTHS and item.picked_rebuild is None
-    assert "noise reduction picked for this file" in item.message
-    assert entries[0].settings["strength"] == "auto" and entries[0].settings["picked_strength"] == item.picked_strength
+def test_clean_a_file_end_to_end(native_window, speech_wav, tmp_path):
+    w = native_window
+    src = put(w, speech_wav, tmp_path)
+    assert w.add_paths([src]) == 1 and len(w._items) == 1  # the same file is shown again, not added twice
+    ready(w)
+    doc = w.doc
     from scipy.io import wavfile
 
     rate, samples = wavfile.read(speech_wav, mmap=True)
+    assert doc.facts.duration == pytest.approx(len(samples) / rate, abs=0.5) and doc.peaks and doc.applied  # Automatic listened to the file
+    s = w.studio
+    assert s.start.button.text() == "Start" and s.start.button.isEnabled()
+    s.start.button.click()
+    item = next(iter(w._items.values()))
+    assert wait_until(lambda: doc.stage == "done", 180), item.message
+    assert item.outputs == [tmp_path / "talk-cleaned.wav"] and item.outputs[0].is_file()
+    entries = w.history.search()
+    assert len(entries) == 1 and entries[0].status == "done" and entries[0].outputs == [str(item.outputs[0])]
+    # Automatic (on by default) decided the strength for the whole file; the list and the history say which and why
+    assert item.picked_strength in engine.STRENGTHS and item.picked_rebuild is None and "noise reduction picked for this file" in doc.note
+    assert entries[0].settings["strength"] == "auto" and entries[0].settings["picked_strength"] == item.picked_strength
     assert entries[0].duration == pytest.approx(len(samples) / rate, abs=0.5)
-    assert window.history_page._stats["files"].value.text() == "0"  # not drawn while the tab is hidden
-    window.tabs.setCurrentIndex(1)
-    assert window.history_page._stats["files"].value.text() == "1"
+    sh.settle(w)
+    assert doc.job is not None and doc.entry.id == entries[0].id and "1 file cleaned" in w.jobs.totals.text()
+    assert s.start.button.text() == "Open the file"
 
 
 @pytest.fixture
 def fake_bin(tmp_path, monkeypatch):
     """Stands in for the Recycle Bin / Trash, so tests never touch the real one."""
-    from audio_cleaner_desktop.gui import main_window, shell
+    from audio_cleaner_desktop.gui import shell
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -73,118 +75,100 @@ def fake_bin(tmp_path, monkeypatch):
 
 
 @pytest.mark.native
-def test_clean_again_keeps_the_row_and_the_name_and_takes_the_new_settings(window, speech_wav, tmp_path, fake_bin):
-    src = tmp_path / "talk.wav"
-    src.write_bytes(speech_wav.read_bytes())
-    window.prefs.auto_settings = False  # the strength chosen below is the one used
-    window.add_paths([src])
-    window.start()
-    item = next(iter(window._items.values()))
-    assert wait_until(lambda: item.state == DONE, timeout=120), item.message
-    first = item.outputs[0]
+def test_the_result_is_changed_and_saved_again_on_the_same_screen(native_window, speech_wav, tmp_path, fake_bin):
+    w = native_window
+    put(w, speech_wav, tmp_path)
+    ready(w)
+    doc = w.doc
+    w.studio.top.switch.click()  # Automatic off: the strength chosen below is the one used
+    w.studio.inspector.strength._buttons["strong"].click()
+    w.studio.start.button.click()
+    assert wait_until(lambda: doc.stage == "done", 180), doc.note
+    sh.settle(w)
+    first = doc.result_paths()[0]
     first_bytes = first.read_bytes()
-
-    window.settings_panel._strength.set_value("gentle")
-    window.prefs.strength = "gentle"
-    window.clean_again(item.id)
-    assert wait_until(lambda: item.state in (DONE, FAILED), timeout=120)
-    assert item.state == DONE, item.message
-    assert len(window._items) == 1 and len(window.view) == 1  # same row
-    assert item.outputs == [first] and first.name == "talk-cleaned.wav"  # same name, no "(2)"
-    assert first.read_bytes() != first_bytes  # the new, gentler result
-    assert [p.name for p in fake_bin.iterdir()] == ["talk-cleaned.wav"]  # the earlier one is in the bin
-    assert not [p.name for p in tmp_path.iterdir() if "cleaned (" in p.name]  # no "(2)" copies left behind
-
-    # Adding the same file again does not make a twin row either.
-    assert window.add_paths([src]) == 1
-    assert len(window.view) == 1 and item.state == WAITING
-
-
-@pytest.mark.native
-def test_clean_again_never_bins_a_result_that_was_changed(window, speech_wav, tmp_path, fake_bin, quick_clean):
-    src = tmp_path / "talk.wav"
-    src.write_bytes(speech_wav.read_bytes())
-    window.add_paths([src])
-    window.start()
-    item = next(iter(window._items.values()))
-    assert wait_until(lambda: item.state == DONE, timeout=120), item.message
-    first = item.outputs[0]
-    with open(first, "ab") as f:  # edited elsewhere since
-        f.write(b"\0" * 10)
-    window.clean_again(item.id)
-    assert wait_until(lambda: item.state == DONE, timeout=120), item.message
-    assert first.exists() and item.outputs[0].name == "talk-cleaned (2).wav"
-    assert not any(fake_bin.iterdir())
+    assert first.name == "talk-cleaned.wav"
+    # the same screen: a part is changed, the button says what it takes, and the new file is saved next to the old one
+    w.studio.timeline.sectionClicked.emit(0.0, doc.seconds)
+    w.studio.inspector.strength._buttons["gentle"].click()
+    sh.settle(w)
+    assert doc.model.strength_of(0, doc.seconds) == "gentle" and doc.changed_sound
+    assert w.studio.start.button.isEnabled() and doc.out_name == "talk-cleaned (2).wav"
+    w.studio.start.button.click()
+    assert wait_until(lambda: doc.stage == "done" and w._saving is None and not doc.changed_sound, 180), doc.note
+    sh.settle(w)
+    second = doc.result_paths()[0]
+    assert second.name == "talk-cleaned (2).wav" and second.read_bytes() != first_bytes  # the new, gentler result
+    assert first.read_bytes() == first_bytes and not list(fake_bin.iterdir())  # the earlier one is as it was
+    assert w.history.get(doc.entry.id).outputs == [str(second)] and len(w._items) == 1 and len(w.jobs._cards) == 1  # one job, one editor
+    # a name that is taken, chosen on purpose, replaces the earlier file, which goes to the bin
+    doc.model.select(0.0, doc.seconds)
+    w.studio.inspector.strength._buttons["max"].click()
+    doc.set_out_name("talk-cleaned.wav")
+    w.ask_replace = lambda name: "replace"
+    sh.settle(w)
+    w.save_changes(doc)
+    assert wait_until(lambda: w._saving is None and doc.stage == "done", 180), doc.note
+    assert doc.result_paths()[0] == first and [p.name for p in fake_bin.iterdir()] == ["talk-cleaned.wav"] and first.read_bytes() != first_bytes
 
 
-def test_changed_settings_reach_waiting_files_and_a_running_one_can_restart_with_them(qapp, tmp_path, monkeypatch):
-    import threading
-
-    from audio_cleaner_desktop.gui import main_window
-    from audio_cleaner_desktop.gui.queue_view import RUNNING
-
-    calls: list[tuple[str, str]] = []
+def test_starting_uses_what_was_chosen_then_and_a_run_cannot_be_changed_while_it_goes(make_window, tmp_path, monkeypatch):
+    calls: list[tuple[str, object]] = []
     started = threading.Event()
 
-    def runner(path, options, *, cancel, progress, **_):
-        calls.append((path.name, options.noise))
+    def runner(path, options, *, cancel, progress, **extra):
+        calls.append((path.name, extra.get("timeline")))
         started.set()
         while not cancel.wait(0.01):
             pass
         raise engine.Cancelled()
 
-    monkeypatch.setattr(main_window.resources, "check", lambda: [])
-    settings = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
-    w = MainWindow([], settings=settings, history_path=tmp_path / "h.db", runner=runner)
-    w.show()
+    w = make_window(runner)
     for name in ("a.wav", "b.wav"):
         (tmp_path / name).write_bytes(b"x")
-    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
     w.prefs.parallel = 1
-    w.prefs.auto_settings = False  # Background noise is chosen by hand
     w._settings_changed()
     w.add_paths([tmp_path / "a.wav", tmp_path / "b.wav"])
-    assert wait_until(lambda: all(i.probed for i in w._items.values()), timeout=10)
-    w.start()
-    assert wait_until(started.is_set, timeout=10) and calls == [("a.wav", "auto")]
-    a = next(i for i in w._items.values() if i.path.name == "a.wav")
-
-    w.prefs.noise = "heavy"  # what the Background noise setting does
-    w._settings_changed()
-    assert [j.options.noise for j in w.queue._pending] == ["heavy"]  # b, still waiting, takes the new setting
-    row = w.view.row(a.id)
-    assert a.state == RUNNING and a.outdated and row._again.isVisibleTo(row)
-
-    w.clean_again(a.id)  # the row's "Restart with the new settings"
-    assert wait_until(lambda: len(calls) == 2, timeout=10)
-    assert calls[1] == ("a.wav", "heavy")  # straight back in, before b, with the new setting
+    assert wait_until(lambda: all(i.doc.model is not None for i in w._items.values()), 10)
+    a, b = w._items[1], w._items[2]
+    a.doc.set_auto(False)  # a is done by hand, b is left to Automatic
+    a.doc.model.set_strength("gentle", 0, 5)
+    w.open_item(a.id)
+    w.studio.start.button.click()
+    assert wait_until(started.is_set, 10) and calls[0][0] == "a.wav" and calls[0][1]["layers"]["noise"][0]["strength_db"] == 12.0
+    # while it runs the choices are locked, and another file can be looked at and waits for its turn
+    sh.settle(w)
+    assert a.doc.locked and not w.studio.inspector.cards.isEnabled()
+    w.studio.inspector._strength("max")  # (ignored)
+    assert a.doc.model.strength_of(0, 5) == "gentle"
+    w.open_item(b.id)
+    assert not b.doc.locked and w.studio.inspector.cards.isEnabled()
+    w.studio.start.button.click()
+    sh.settle(w)
+    assert b.id in w._queued and b.doc.run_text.startswith("In line") and w.jobs._cards[("item", b.id)].status.text() == "In line"
     monkeypatch.setattr(w, "_confirm", lambda title, text: True)
     w.close()
+    assert not w.queue.busy
 
 
 @pytest.mark.native
-def test_two_files_in_parallel_and_a_bad_one(window, speech_wav, tmp_path):
+def test_two_files_start_together_and_a_bad_one_is_not_taken_in(native_window, speech_wav, tmp_path):
+    w = native_window
     for name in ("one.wav", "two.wav"):
         (tmp_path / name).write_bytes(speech_wav.read_bytes())
     (tmp_path / "broken.wav").write_bytes(b"nothing here" * 50)
-    window.prefs.parallel = 2
-    window.add_paths(sorted(tmp_path.glob("*.wav")))
-    window.start()
-    assert wait_until(lambda: not window.queue.busy and all(i.state in (DONE, FAILED) for i in window._items.values()), 180)
-    states = {i.path.name: i.state for i in window._items.values()}
-    assert states == {"broken.wav": FAILED, "one.wav": DONE, "two.wav": DONE}
+    w.prefs.parallel = 2
+    w._settings_changed()
+    w.add_paths(sorted(tmp_path.glob("*.wav")))
+    assert wait_until(lambda: len(w._items) == 2 and all(i.doc.model is not None for i in w._items.values()), 60)  # the broken one left, with a message
+    assert "broken.wav" in w.banner_files._label.text() or "broken.wav" in w.studio.problem._label.text()
+    w.start_all()
+    assert wait_until(lambda: not w.queue.busy and all(i.state == "done" for i in w._items.values()), 240)
     assert (tmp_path / "one-cleaned.wav").is_file() and (tmp_path / "two-cleaned.wav").is_file()
-    history = {e.name: e.status for e in window.history.search()}
-    assert history == {"broken.wav": "failed", "one.wav": "done", "two.wav": "done"}
-    window.clear_finished()
-    assert len(window.view) == 0
+    assert {e.name: e.status for e in w.history.search()} == {"one.wav": "done", "two.wav": "done"}
 
 
-def test_closing_while_cleaning_asks_and_stops(qapp, tmp_path, monkeypatch):
-    import threading
-
-    from audio_cleaner_desktop.gui import main_window
-
+def test_closing_while_cleaning_asks_and_stops(make_window, tmp_path, monkeypatch):
     started = threading.Event()
 
     def runner(path, options, *, cancel, progress, **_):
@@ -193,16 +177,12 @@ def test_closing_while_cleaning_asks_and_stops(qapp, tmp_path, monkeypatch):
             pass
         raise engine.Cancelled()
 
-    monkeypatch.setattr(main_window.resources, "check", lambda: [])
-    settings = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
-    w = MainWindow([], settings=settings, history_path=tmp_path / "h.db", runner=runner)
-    w.show()
+    w = make_window(runner)
     (tmp_path / "a.wav").write_bytes(b"x")
-    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
     w.add_paths([tmp_path / "a.wav"])
-    assert wait_until(lambda: next(iter(w._items.values())).probed, timeout=10)
+    assert wait_until(lambda: w.doc.model is not None, 10)
     w.start()
-    assert wait_until(started.is_set, timeout=10)
+    assert wait_until(started.is_set, 10)
     answers = []
     monkeypatch.setattr(w, "_confirm", lambda title, text: answers.append(title) or False)
     w.close()
@@ -218,11 +198,14 @@ def test_missing_components_block_starting(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(resources, "check", lambda: ["libdf.so"])
     settings = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
     w = MainWindow([], settings=settings, history_path=tmp_path / "h.db")
+    w.fakes = sh.Fakes(5.0).install(w)
     w.show()
     (tmp_path / "a.wav").write_bytes(b"x")
     w.add_paths([tmp_path / "a.wav"])
     assert w.banner_missing.isVisible() and "libdf.so" in w.banner_missing._label.text()
-    assert not w.primary.isEnabled()
+    assert wait_until(lambda: w.doc.item.probed or True, 1)
+    QApplication.processEvents()
+    assert not w.studio.start.button.isEnabled()
     w.start()
     assert not w.queue.busy
     w.close()

@@ -16,11 +16,12 @@ from PySide6.QtWidgets import QApplication
 
 from acw_common.ffmpeg import FFmpeg, MediaError
 from audio_cleaner_desktop import engine, models, sysinfo
-from audio_cleaner_desktop.gui import history_view, main_window, shell, single_instance, tips
+from audio_cleaner_desktop.gui import jobs_column, main_window, shell, single_instance, tips
 from audio_cleaner_desktop.gui.history import DONE, Entry, HistoryStore
 from audio_cleaner_desktop.gui.main_window import MainWindow
-from audio_cleaner_desktop.gui.queue_view import RUNNING
+from audio_cleaner_desktop.gui.items import RUNNING
 
+import studio_helpers as sh
 from conftest import wait_until
 
 
@@ -308,20 +309,22 @@ def _entry(n: int) -> Entry:
                  outputs=[f"/a/f{n}-cleaned.wav"], status=DONE, finished_at=1000.0 + n)
 
 
-def test_history_draws_fifty_rows_at_first_and_more_on_request(qapp, tmp_path):
+def test_the_jobs_are_drawn_a_page_at_first_and_more_on_request(qapp, tmp_path):
     store = HistoryStore(tmp_path / "h.db")
-    for n in range(60):
+    n_all = jobs_column.PAGE_SIZE * 2 + 10
+    for n in range(n_all):
         store.add(_entry(n))
-    page = history_view.HistoryPage(store)
+    column = jobs_column.JobsColumn(store, lambda: [], lambda: set())
     try:
-        rows = lambda: page.findChildren(history_view._HistoryRow)  # noqa: E731
-        assert len(rows()) == 50
-        page._show_more()
-        assert len(rows()) == 60
-        assert page._stats["files"].value.text() == "60"
-        page._search.setText("f1")
-        page._search_changed()
-        assert len(rows()) == 11 and page._shown == 50  # f1 and f10..f19
+        column.refresh()
+        cards = lambda: [k for k in column._cards if k[0] == "entry"]  # noqa: E731
+        assert len(cards()) == jobs_column.PAGE_SIZE
+        column._show_more()
+        column._show_more()
+        assert len(cards()) == n_all and f"{n_all} files cleaned" in column.totals.text()
+        column.search.setText("f1")
+        column._search_changed()
+        assert len(cards()) == 11 and column._shown == jobs_column.PAGE_SIZE  # f1 and f10..f19
         assert store.recent_folders() == [Path("/a")]
     finally:
         store.close()
@@ -341,9 +344,9 @@ def busy_window(qapp, tmp_path, monkeypatch):
         raise engine.Cancelled()
 
     monkeypatch.setattr(main_window.resources, "check", lambda: [])
-    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
     w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat),
                    history_path=tmp_path / "h.db", runner=runner)
+    w.fakes = sh.Fakes(5.0).install(w)
     w.show()
     (tmp_path / "a.wav").write_bytes(b"x")
     w.add_paths([tmp_path / "a.wav"])
@@ -353,8 +356,7 @@ def busy_window(qapp, tmp_path, monkeypatch):
     yield w
     release.set()
     w.queue.shutdown()
-    w.history.close()
-    w._pool.waitForDone()
+    sh.shut(w)
 
 
 def test_stopping_says_so_at_once(busy_window, monkeypatch):
@@ -368,17 +370,20 @@ def test_stopping_says_so_at_once(busy_window, monkeypatch):
     assert not item.stopping
 
 
-def test_esc_does_not_stop_the_cleaning_while_a_help_text_is_up_or_on_the_history_tab(busy_window, monkeypatch):
+def test_esc_does_not_stop_the_cleaning_while_a_help_text_is_up_or_in_a_box_you_are_typing_in(busy_window, monkeypatch):
     w = busy_window
     asked = []
     monkeypatch.setattr(w, "_confirm", lambda title, text: asked.append(title) or False)
     monkeypatch.setattr(tips, "is_showing", lambda: True)
     w._escape()
     monkeypatch.setattr(tips, "is_showing", lambda: False)
-    w.tabs.setCurrentIndex(1)
-    w._escape()
+    w.jobs.search.setFocus()  # (Esc in the search or a name box only leaves the box)
+    QApplication.processEvents()
+    if w.jobs.search.hasFocus():
+        w._escape()
+        assert not w.jobs.search.hasFocus()
     assert asked == []
-    w.tabs.setCurrentIndex(0)
+    w.jobs.search.clearFocus()
     w._escape()
     assert asked == ["Stop cleaning?"]
 
@@ -395,9 +400,9 @@ def test_quitting_does_not_wait_for_files_that_will_not_stop_and_never_touches_a
         raise engine.Cancelled()
 
     monkeypatch.setattr(main_window.resources, "check", lambda: [])
-    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
     w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat),
                    history_path=tmp_path / "h.db", runner=runner)
+    w.fakes = sh.Fakes(5.0).install(w)
     (tmp_path / "a.wav").write_bytes(b"x")
     w.add_paths([tmp_path / "a.wav"])
     assert wait_until(lambda: next(iter(w._items.values())).probed, timeout=10)

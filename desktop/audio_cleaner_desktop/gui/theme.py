@@ -189,7 +189,103 @@ QTabBar::tab:selected {{ color: {t.text.name()}; font-weight: 600; border-bottom
 QTabBar::tab:focus {{ background: {t.hover.name()}; }}
 QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QPlainTextEdit, QListWidget#Licenses {{ background: {t.surface.name()}; border: 1px solid {t.border.name()}; border-radius: 8px; }}
-"""
+""" + studio_stylesheet(t)
+
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    c = QColor(hex_color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha})"
+
+
+_LANES = {  # (light, dark): the colour of each row of the editor screen, as on the web
+    "voice": ("#3b5bdb", "#4c68f0"), "rebuild": ("#0b8f8a", "#2bb5af"), "echo": ("#d9480f", "#ff922b"), "level": ("#b87500", "#f0b84a"),
+    "subs": ("#c2255c", "#f06595"), "sugg": ("#7c4dff", "#b79bff"),
+}
+
+
+def studio_stylesheet(t: Theme) -> str:
+    """The editor screen: panes, the settings cards, the soft segmented buttons, pills, the jobs column (the web's studio.css)."""
+    lane = {k: v[1 if t.dark else 0] for k, v in _LANES.items()}
+    surface, border, muted, text, hover = t.surface.name(), t.border.name(), t.muted.name(), t.text.name(), t.hover.name()
+    rules = [f"""
+QWidget#Page, QWidget#Studio, QWidget#InspBody {{ background: transparent; }}
+QFrame#Pane {{ background: {surface}; border: 1px solid {border}; border-radius: 14px; }}
+QFrame#Poster {{ background: {hover}; border: 1px solid {border}; border-radius: 9px; }}
+QFrame#Poster[video="true"] {{ background: #0b0f19; border: none; }}
+QFrame#Poster QLabel#PosterText {{ color: {muted}; font-size: {t.base_pt * 1.1:.1f}pt; background: transparent; }}
+QFrame#Picture {{ background: transparent; border: none; }}
+QLabel#TimeBadge {{ background: rgba(0, 0, 0, 160); color: white; border-radius: 6px; padding: 1px 7px; font-size: {t.base_pt * 0.82:.1f}pt; }}
+QLabel#FileName {{ font-weight: 700; font-size: {t.base_pt * 1.4:.1f}pt; }}
+QLabel#AutoLabel {{ font-weight: 650; font-size: {t.base_pt * 1.05:.1f}pt; }}
+QLabel#TimeText {{ color: {muted}; }}
+QLabel#FieldLabel {{ font-weight: 700; }}
+QLabel#LaneName {{ color: {muted}; font-weight: 700; }}
+QLabel#Plain {{ color: {text}; }}
+QLabel#InspHead {{ font-weight: 700; font-size: {t.base_pt * 1.2:.1f}pt; }}
+QLabel#ColHead {{ font-weight: 700; font-size: {t.base_pt * 1.3:.1f}pt; }}
+QLabel#DlgH3 {{ font-weight: 700; font-size: {t.base_pt * 1.15:.1f}pt; margin-top: 8px; }}
+QLabel#DlgH4 {{ font-weight: 650; }}
+QFrame#GhostBar {{ background: {hover}; border: 1px solid {border}; border-radius: 7px; }}
+QFrame#DropArea {{ background: transparent; border: 2px dashed {border}; border-radius: 14px; }}
+QFrame#DropArea:hover, QFrame#DropArea[over="true"] {{ border-color: {t.brand}; background: {_rgba(t.brand, 0.06)}; }}
+QToolButton#InfoDot {{ border: 1.5px solid {t.brand}; border-radius: 13px; color: {t.brand}; font-weight: 800; background: transparent; padding: 0; }}
+QToolButton#InfoDot:hover {{ background: {t.brand_soft}; }}
+QToolButton#MenuDots {{ font-size: {t.base_pt * 1.4:.1f}pt; font-weight: 700; padding: 0 8px; }}
+QToolButton#MenuDots::menu-indicator {{ image: none; }}
+
+QPushButton#Tool {{ background: {surface}; border: 1px solid {border}; border-radius: 9px; padding: 6px 10px; font-weight: 650; }}
+QPushButton#Tool:hover {{ background: {hover}; }}
+QPushButton#Tool:checked {{ background: {t.brand_soft}; border-color: {t.brand}; }}
+QPushButton#Tool:disabled {{ color: {muted}; background: transparent; }}
+QPushButton#PlayButton {{ background: {t.brand}; border: 1px solid {t.brand}; border-radius: 9px; }}
+QPushButton#PlayButton:hover {{ background: {t.brand_hover}; }}
+QPushButton#PlayButton:disabled {{ background: {border}; border-color: {border}; }}
+QPushButton#Chip {{ background: {_rgba(lane['sugg'], 0.12)}; border: 1px solid {_rgba(lane['sugg'], 0.5)}; border-radius: 12px; padding: 2px 12px; font-weight: 700; }}
+QPushButton#DangerOutline {{ background: transparent; border: 1px solid {t.danger}; color: {t.danger}; }}
+QPushButton#DangerOutline:hover {{ background: {t.danger_soft}; }}
+QPushButton#Pill {{ border: 1px solid {border}; border-radius: 12px; padding: 3px 12px; font-weight: 700; color: {muted}; background: transparent; }}
+QPushButton#Pill:checked {{ border-color: {lane['subs']}; color: {text}; background: {_rgba(lane['subs'], 0.14)}; }}
+QPushButton#Pill:disabled {{ color: {muted}; border-style: dashed; }}
+QPushButton#Primary[state="processing"] {{ background: {t.brand}; }}
+
+QFrame#Ctl {{ border: 1px solid {border}; border-radius: 12px; }}
+QFrame#SgCard {{ background: {_rgba(lane['sugg'], 0.10)}; border: 1px solid {_rgba(lane['sugg'], 0.45)}; border-radius: 10px; }}
+QLabel#Mark {{ border-radius: 3px; }}
+QLabel#CardHead {{ font-weight: 700; font-size: {t.base_pt * 1.0:.1f}pt; }}
+QLabel#AutoTag {{ color: {muted}; border: 1px solid {border}; border-radius: 9px; padding: 0 7px; font-size: {t.base_pt * 0.78:.1f}pt; font-weight: 600; }}
+QLabel#MixedTag {{ color: {t.warn}; background: {t.warn_soft}; border-radius: 9px; padding: 0 7px; font-size: {t.base_pt * 0.78:.1f}pt; font-weight: 700; }}
+QFrame#VOpt {{ background: {surface}; border: 1px solid {border}; border-radius: 10px; }}
+QRadioButton#VRadio {{ font-weight: 700; background: transparent; spacing: 8px; }}
+QRadioButton#VRadio::indicator {{ width: 12px; height: 12px; border-radius: 8px; border: 2px solid {muted}; background: transparent; }}
+QRadioButton#VRadio::indicator:checked {{ border: 2px solid {t.brand}; background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, stop:0 {t.brand}, stop:0.45 {t.brand}, stop:0.5 transparent, stop:1 transparent); }}
+QWidget#SoftSeg {{ background: {hover}; border: 1px solid {border}; border-radius: 10px; }}
+QPushButton#Segment[soft="true"] {{ background: transparent; border: none; border-radius: 7px; color: {muted}; font-weight: 650; padding: 6px 4px; margin: 0; }}
+QPushButton#Segment[soft="true"]:hover {{ color: {text}; background: transparent; }}
+QPushButton#Segment[soft="true"]:checked {{ background: {surface}; color: {text}; border-bottom: 3px solid {t.brand}; }}
+QPushButton#Segment[soft="true"]:disabled {{ color: {muted}; }}
+QPushButton#Segment[soft="true"]:focus {{ border: 1px solid {t.brand}; padding: 5px 3px; }}
+
+QFrame#Popover {{ background: {surface}; border: 1px solid {border}; border-radius: 12px; }}
+QFrame#JobCard {{ background: {surface}; border: 1px solid {border}; border-radius: 12px; }}
+QFrame#JobCard:hover {{ border-color: {_rgba(t.brand, 0.6)}; }}
+QFrame#JobCard[current="true"] {{ border: 2px solid {t.brand}; }}
+QLabel#JobName {{ font-weight: 650; }}
+QFrame#JobsCol {{ background: transparent; }}
+"""]
+    voice_edge = lane
+    for key, color in lane.items():
+        if key in ("voice", "echo", "level", "subs"):
+            tint = 0.10 if key == "voice" else 0.05
+            rules.append(f"""
+QFrame#Ctl[lane="{key}"] {{ border-left: 4px solid {color}; background: {_rgba(color, tint)}; }}
+QLabel#Mark[lane="{key}"] {{ background: {color}; }}
+QPushButton#Segment[soft="true"][lane="{key}"]:checked {{ border-bottom: 3px solid {color}; }}
+QFrame#VOpt[mode="noise"][on="true"] {{ border-color: {lane['voice']}; background: {_rgba(lane['voice'], 0.08)}; }}
+QFrame#VOpt[mode="rebuild"][on="true"] {{ border-color: {lane['rebuild']}; background: {_rgba(lane['rebuild'], 0.08)}; }}
+QFrame#VOpt[mode="off"][on="true"] {{ border-color: {muted}; }}
+""")
+    del voice_edge
+    return "\n".join(rules)
 
 
 def set_property(widget: QWidget, name: str, value: object) -> None:

@@ -21,6 +21,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from audio_cleaner_desktop import resources  # noqa: E402
 
+# Imported here, on the main thread, before any window exists: the first import of these inside a worker thread (the live sound measuring its
+# Leveling gains) while the main thread runs Qt crashed the interpreter now and then (a segmentation fault while Python collected garbage in that thread).
+import pyloudnorm  # noqa: E402,F401
+import scipy.signal  # noqa: E402,F401
+
 SPEECH_SECONDS = 4  # length of the stand-in used where the dev sample is missing (CI)
 SPEECH_SAMPLE = Path.home() / "audio-cleaner" / "dev" / "live_opus.wav"
 FULL_FFMPEG = Path(os.environ.get("ACW_FULL_FFMPEG", Path.home() / "audio-cleaner" / "bin" / "ffmpeg"))
@@ -252,3 +257,91 @@ def _noise_models_count_as_there(monkeypatch):
     real_ready = speech_model.SpeechModelDownloader.ready.fget
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready",
                         property(lambda self: self.model is resources.NOISE_MODEL or real_ready(self)))
+
+
+# ---- the editor screen's window: one MainWindow with the background work replaced (studio_helpers.py) and QtMultimedia stood in for
+
+@pytest.fixture
+def media(monkeypatch):
+    """QtMultimedia and the sound card stood in for."""
+    import fake_media
+    from audio_cleaner_desktop.gui import job_preview, player
+
+    fake_media.FakeSink.made.clear()
+    monkeypatch.setattr(player, "_multimedia", fake_media.namespace())
+    monkeypatch.setattr(job_preview.JobPreview, "sink_factory", fake_media.sink_factory)
+
+
+@pytest.fixture
+def runner():
+    import studio_helpers
+
+    return studio_helpers.QuickRunner()
+
+
+@pytest.fixture
+def window(qapp, tmp_path, monkeypatch, runner, media):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    import studio_helpers as sh
+    from audio_cleaner_desktop.gui import main_window
+    from audio_cleaner_desktop.gui.theme import ThemeWatcher
+
+    if getattr(qapp, "_test_theme", None) is None:  # (the style sheet is big: it is set once, not for every test)
+        qapp._test_theme = ThemeWatcher(qapp)
+    monkeypatch.setattr(main_window.resources, "check", lambda: [])
+    w = main_window.MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db", runner=runner)
+    w.fakes = sh.Fakes(11.0).install(w)
+    w.resize(1440, 900)
+    w.show()
+    QApplication.processEvents()
+    yield w
+    sh.shut(w)
+
+
+@pytest.fixture
+def native_window(qapp, tmp_path, monkeypatch):
+    """The window with nothing stood in for (the real files are read, the real engine runs), only the heavy by-itself work left out: moments
+    worth a look are not looked for unless asked."""
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    import studio_helpers as sh
+    from audio_cleaner_desktop.gui import main_window
+    from audio_cleaner_desktop.gui.theme import ThemeWatcher
+
+    if getattr(qapp, "_test_theme", None) is None:
+        qapp._test_theme = ThemeWatcher(qapp)
+    w = main_window.MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db")
+    w.doc_env.auto_suggest = False
+    w.resize(1440, 900)
+    w.show()
+    QApplication.processEvents()
+    yield w
+    sh.shut(w)
+
+
+@pytest.fixture
+def make_window(qapp, tmp_path, monkeypatch):
+    """A window with a runner of the test's own and the file facts stood in for; always shut down at the end, also when the test fails."""
+    import studio_helpers
+    from PySide6.QtCore import QSettings
+
+    from audio_cleaner_desktop.gui import main_window
+    from audio_cleaner_desktop.gui.main_window import MainWindow
+
+    made = []
+
+    def make(runner, seconds=5.0):
+        monkeypatch.setattr(main_window.resources, "check", lambda: [])
+        w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db", runner=runner)
+        w.fakes = studio_helpers.Fakes(seconds).install(w)
+        w.show()
+        made.append(w)
+        return w
+
+    yield make
+    for w in made:
+        w.queue.shutdown()
+        studio_helpers.shut(w)
