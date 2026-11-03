@@ -267,6 +267,79 @@ def windows_showing() -> list:
     return [w for w in QApplication.topLevelWidgets() if w.isVisible() and isinstance(w, (QMainWindow, QDialog))]
 
 
+class TopLevels:
+    """Catches every top-level window that is shown while it is on: through the Show event (a window that comes and goes inside one event is caught
+    too) and a poll every few milliseconds (the screen's own timers run in the same loop). `seen` keeps what each one was (class, name, size, the
+    chain of its parents, its flags and text), in the order they showed."""
+
+    def __init__(self, main):
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication
+
+        self.main, self.seen, self._open = main, [], {}
+        self._app = QApplication.instance()
+        self._timer = QTimer(main, interval=2)
+        self._timer.timeout.connect(self.poll)
+
+    def start(self) -> "TopLevels":
+        self._app.installEventFilter(self_filter(self))
+        self._timer.start()
+        return self
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self._app.removeEventFilter(self._filter)
+
+    def record(self, w) -> None:
+        self._open[id(w)] = w
+        chain, p = [], w.parent()
+        while p is not None:
+            chain.append(f"{type(p).__name__}({p.objectName()})")
+            p = p.parent()
+        self.seen.append({"widget": w, "cls": type(w).__name__, "name": w.objectName(), "size": (w.width(), w.height()), "parents": chain,
+                          "flags": int(w.windowFlags().value), "text": self._text_of(w), "title": w.windowTitle()})
+
+    @staticmethod
+    def _text_of(w) -> str:
+        """What it says: its own text, or that of the first label inside it (a banner's message)."""
+        from PySide6.QtWidgets import QLabel
+
+        if callable(getattr(w, "text", None)):
+            return str(w.text())
+        label = w.findChild(QLabel)
+        return label.text() if label is not None else ""
+
+    def poll(self) -> None:
+        visible = {id(w): w for w in self._app.topLevelWidgets() if w.isVisible() and w.isWindow()}
+        for key in [k for k in self._open if k not in visible]:
+            del self._open[key]  # (hidden again: its next show counts again)
+        for key, w in visible.items():
+            if key not in self._open:
+                self.record(w)
+
+    def mark(self) -> int:
+        return len(self.seen)
+
+    def strangers(self, since: int = 0, allow: tuple = ()) -> list[str]:
+        """What showed since `mark` that is neither the main window nor one of the classes in `allow`, described."""
+        return [f"{r['cls']} name={r['name']!r} size={r['size']} parents={r['parents']} flags={r['flags']:#x} text={r['text'][:70]!r} title={r['title']!r}"
+                for r in self.seen[since:] if r["widget"] is not self.main and r["cls"] not in allow]
+
+
+def self_filter(watch):
+    """The application-wide event filter of a TopLevels (kept on it, so it is not collected)."""
+    from PySide6.QtCore import QEvent, QObject
+
+    class _Filter(QObject):
+        def eventFilter(self, obj, event):  # noqa: N802
+            if event.type() == QEvent.Type.Show and obj.isWidgetType() and obj.isWindow():
+                watch.record(obj)
+            return False
+
+    watch._filter = _Filter(watch.main)
+    return watch._filter
+
+
 def add_file(window, tmp_path, name="talk.wav", size=2000) -> Path:
     path = tmp_path / name
     path.write_bytes(b"x" * size)

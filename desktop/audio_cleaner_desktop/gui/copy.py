@@ -11,9 +11,9 @@ LANGUAGE_NAMES = {
 
 
 def loudness_name(lufs: float | None) -> str:
-    """The short name of a loudness target: Podcast, YouTube, Broadcast, Keep (or the number)."""
+    """The short name of a loudness target: Podcast, YouTube, Broadcast, Even (or the number)."""
     if lufs is None:
-        return "Keep"
+        return "Even"
     for name, value in (("Podcast", -16.0), ("YouTube", -14.0), ("Broadcast", -23.0)):
         if abs(value - lufs) < 0.05:
             return name
@@ -64,7 +64,7 @@ TIPS = {
     "l.1": "Podcast: evens out the volume at −16 LUFS, the usual loudness for podcasts.",
     "l.2": "YouTube: evens out the volume at −14 LUFS, the loudness YouTube plays videos at.",
     "l.3": "Broadcast: evens out the volume at −23 LUFS, the TV and radio standard.",
-    "l.4": "Keep loudness: evens out the volume but keeps the overall loudness as recorded.",
+    "l.4": "Even: evens out the volume but keeps the overall loudness as recorded.",
     "subs": "Writes down what is said, in the language you choose: subtitle files (SRT, VTT) and a transcript (TXT). Made on this computer from the original "
             "recording: nothing is uploaded.",
     "q.0": "No subtitles or transcript.",
@@ -98,7 +98,6 @@ EMPTY_LINE = "Take the noise out of a recording, and get subtitles and a transcr
 DROP_TITLE = "Drop an audio or video file here"
 DROP_HINT = "or click to pick one. Almost any audio or video file: MP3, WAV, M4A, FLAC, WMA, AMR, MP4, MOV, MKV, AVI, WMV, MPEG and more."
 OUTPUT_EMPTY = "The file type, name and video size go here."
-NAME_TIP = "Tip: type another ending (.mp3, .flac, .mkv…) or pick a file type from the list. Each follows the other."
 
 # "All the options": what the web's (i) window says, for what this app has; where it works differently, in its own words.
 VOICE_POINTS = [
@@ -127,7 +126,7 @@ LEVELING_ROWS = [
     ("Podcast", "−16 LUFS, the usual loudness for podcasts"),
     ("YouTube", "−14 LUFS, the loudness YouTube plays videos at"),
     ("Broadcast", "−23 LUFS, the TV and radio standard"),
-    ("Keep", "Evens out the volume but keeps the overall loudness as recorded"),
+    ("Even", "Evens out the volume but keeps the overall loudness as recorded"),
 ]
 SUBTITLES_TEXT = ("Made on this computer from the original recording, in about 100 languages: nothing is uploaded. Pick the language yourself if the speech "
                   "is noisy or mixes accents. Files: SRT and VTT subtitles and a TXT transcript, and the subtitles can go into the video (the picture "

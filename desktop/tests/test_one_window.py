@@ -72,10 +72,10 @@ def test_choosing_a_file_fills_the_screen_in_place(window, tmp_path):
     QApplication.processEvents()
     assert s.inspector.cards.isVisible() and not s.inspector.ghost.isVisible() and s.inspector.heading.text() == "Whole file · 0:11"
     assert s.top.meta.text().startswith("0:11 · Audio") and s.top.different.isVisible()
-    assert s.output.fields.isVisible() and s.output.name.text() == "talk-cleaned.wav" and s.output.format.currentData() == ".wav"
-    assert s.start.button.text() == "Start" and s.start.button.isEnabled()
+    assert s.output.fields.isVisible() and s.output.name.text() == "talk-cleaned" and s.output.format.currentData() == ".wav"
+    assert s.start.button.text().startswith("Start · about ") and s.start.button.isEnabled()  # (what is on, and about how long it takes here)
     lanes = [lane for lane, _ in s.timeline.plot.lanes()]
-    assert lanes == ["voice", "level", "subs", "music"]  # (Echo removal only for a file with a second audio track)
+    assert lanes == ["voice", "level", "subs"]  # (Echo removal only for a file with a second audio track)
     # the waveform fills in while it is read
     assert wait_until(lambda: window.doc.wave == "reading" and window.doc.peaks, 5) or window.doc.wave == "ready"
     assert wait_until(lambda: window.doc.wave == "ready", 10)
@@ -93,7 +93,7 @@ def test_a_second_audio_track_adds_the_echo_row_and_card(window, tmp_path):
     add_file(window, tmp_path)
     ready(window)
     s = window.studio
-    assert [lane for lane, _ in s.timeline.plot.lanes()] == ["voice", "echo", "level", "subs", "music"]
+    assert [lane for lane, _ in s.timeline.plot.lanes()] == ["voice", "echo", "level", "subs"]
     assert s.inspector.echo_card.isVisible()
     s.inspector.echo.click()
     assert window.doc.model.switch_of("echo", 0, 11) is True
@@ -236,7 +236,7 @@ def test_a_past_job_opens_in_the_same_window_with_what_it_kept(job_window):
     assert wait_until(lambda: doc.session_state == "ready", 10)
     QApplication.processEvents()
     assert s.preview is not None and s.preview.live and s.top.hear_box.isVisible()
-    assert [lane for lane, _ in s.timeline.plot.lanes()] == ["voice", "level", "subs", "music"]
+    assert [lane for lane, _ in s.timeline.plot.lanes()] == ["voice", "level", "subs"]
     assert window.jobs.current == ("entry", eid)
     # another file replaces it in the same editor, and the job's live sound (its scratch files) is closed
     session = sh.FakeSession.made[-1]

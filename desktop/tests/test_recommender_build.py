@@ -55,7 +55,7 @@ def test_the_public_copy_takes_the_model_and_the_new_code(tmp_path):
     spec.loader.exec_module(sync)
     assert "common" in sync.ALLOWLIST and "desktop" in sync.ALLOWLIST  # all of common/, so the file and the module go
     export = tmp_path / "export"
-    ignore = shutil.ignore_patterns("__pycache__", "vendor", "node_modules")
+    ignore = shutil.ignore_patterns("__pycache__", "vendor", "node_modules", ".ruff_cache", ".pytest_cache", ".mypy_cache")  # (the real copy is `git archive`: only what is committed)
     shutil.copytree(ROOT / "common", export / "common", ignore=ignore)
     for part in ("audio_cleaner_desktop", "tests", "packaging"):
         shutil.copytree(ROOT / "desktop" / part, export / "desktop" / part, ignore=ignore)

@@ -1,13 +1,14 @@
 """The parallel queue, with a fake runner so timing is under the test's control."""
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
 import pytest
 
 from acw_common.ffmpeg import MediaError
-from audio_cleaner_desktop import engine
+from audio_cleaner_desktop import engine, sysinfo
 from audio_cleaner_desktop.gui.worker import Job, JobQueue
 
 from conftest import wait_until
@@ -99,6 +100,52 @@ def test_two_files_run_at_once_and_the_third_waits(make_queue):
     assert sorted(e for e in events if e[0] == "finished") == [("finished", 1), ("finished", 2), ("finished", 3)]
     assert runner.peak == 2
     assert all(t >= 2 for t in runner.threads.values())
+
+
+def test_a_file_that_runs_by_itself_gets_every_thread_but_one_and_two_that_run_together_share_them(make_queue, monkeypatch):
+    asked = []
+    real = sysinfo.threads_per_job
+    monkeypatch.setattr(sysinfo, "threads_per_job", lambda parallel: (asked.append(parallel), real(parallel))[1])
+    q, runner, events = make_queue(parallel=2)
+    jobs(q, "alone.wav")
+    q.start()
+    assert wait_until(lambda: runner.started == ["alone.wav"], timeout=5)
+    assert asked == [1] and runner.threads["alone.wav"] == real(1) == max(2, (os.cpu_count() or 2) - 1)  # (all but one: the window keeps a core)
+    runner.finish("alone.wav")
+    assert wait_until(lambda: events[-1] == ("idle",), timeout=5)
+    asked.clear()
+    q.add(Job(11, Path("a.wav"), engine.JobOptions()))
+    q.add(Job(12, Path("b.wav"), engine.JobOptions()))
+    q.start()
+    assert wait_until(lambda: len(runner.started) == 3, timeout=5)
+    assert asked == [2, 2] and runner.threads["a.wav"] == runner.threads["b.wav"] == real(2)  # (two files: half of them each)
+    assert runner.threads["a.wav"] <= runner.threads["alone.wav"]
+    runner.finish("a.wav"), runner.finish("b.wav")
+    assert wait_until(lambda: events[-1] == ("idle",), timeout=5)
+
+
+def test_a_file_that_waits_for_a_free_place_gets_the_share_of_those_that_run_with_it(make_queue, monkeypatch):
+    asked = []
+    real = sysinfo.threads_per_job
+    monkeypatch.setattr(sysinfo, "threads_per_job", lambda parallel: (asked.append(parallel), real(parallel))[1])
+    q, runner, events = make_queue(parallel=2)
+    jobs(q, "a.wav", "b.wav", "c.wav")
+    q.start()
+    assert wait_until(lambda: len(runner.started) == 2, timeout=5)
+    assert asked == [2, 2]  # (a and b run together; c waits)
+    runner.finish("a.wav")
+    assert wait_until(lambda: "c.wav" in runner.started, timeout=5)
+    assert asked == [2, 2, 2]  # (c runs beside b)
+    runner.finish("b.wav")
+    runner.finish("c.wav")
+    assert wait_until(lambda: events[-1] == ("idle",), timeout=5)
+    asked.clear()
+    q.add(Job(21, Path("d.wav"), engine.JobOptions()))
+    q.start()
+    assert wait_until(lambda: "d.wav" in runner.started, timeout=5)
+    assert asked == [1]  # (and one that comes later, by itself, gets all it can)
+    runner.finish("d.wav")
+    assert wait_until(lambda: events[-1] == ("idle",), timeout=5)
 
 
 def test_cancelling_one_leaves_the_other_running(make_queue):

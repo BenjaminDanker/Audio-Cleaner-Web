@@ -1,5 +1,5 @@
-"""The start row under the editor and the settings (the web's Bar.jsx): Details (what will be done and about how long) or Your files, or the
-progress, and then the one button. It is in the page, not pinned to the window; a computer's own work has no balance, so nothing is billed here."""
+"""The start row under the editor and the settings (the web's Bar.jsx): the progress while a run goes, then Details (what will be done and about
+how long) or Your files beside the one button, which says about how long a run takes (where the website says what it costs). It is in the page, not pinned to the window; a computer's own work has no balance, so nothing is billed here."""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -53,9 +53,11 @@ class Popover(QFrame):
         self.lay.addWidget(small_label(text))
 
     def show_above(self, anchor: QWidget) -> None:
+        """Above the link, its right side at the link's right side (the link sits at the right of the window, beside the button)."""
         self.adjustSize()
         top_left = anchor.mapToGlobal(QPoint(0, 0))
-        self.move(top_left.x(), top_left.y() - self.sizeHint().height() - 10)
+        x = max(anchor.window().mapToGlobal(QPoint(0, 0)).x(), top_left.x() + anchor.width() - self.width())  # (its width: at least the minimum)
+        self.move(x, top_left.y() - self.sizeHint().height() - 10)
         self.show()
 
 
@@ -105,10 +107,10 @@ class StartBar(Pane):
         self.button.setMinimumWidth(200)
         self.button.setMinimumHeight(40)
         self.button.clicked.connect(self.startClicked)
-        lay.addWidget(self.details)
-        lay.addWidget(self.files)
         lay.addWidget(self.progress_box, 1)
         lay.addStretch(1)
+        lay.addWidget(self.details)  # (beside the button, like the website's balance)
+        lay.addWidget(self.files)
         lay.addWidget(self.button)
         self.popover = Popover(self)
         self._fill: dict[str, Callable[[Popover], None]] = {}

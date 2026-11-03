@@ -151,7 +151,7 @@ QLineEdit#NameBox {{ border-top-right-radius: 0px; border-bottom-right-radius: 0
 QLineEdit#NameBox:focus {{ padding: 2px 7px; }}
 QLineEdit#NameBox[invalid="true"] {{ border-color: {t.danger}; }}
 QLineEdit#NameBox:disabled {{ color: {t.muted.name()}; background: transparent; }}
-QComboBox#FormatBox {{ border-top-left-radius: 0px; border-bottom-left-radius: 0px; padding: 3px 8px; min-height: 1.2em; }}
+QComboBox#FormatBox {{ border-top-left-radius: 0px; border-bottom-left-radius: 0px; border-left: 0px; padding: 3px 8px; min-height: 1.2em; }}
 QComboBox#FormatBox:focus {{ padding: 2px 7px; }}
 
 QComboBox {{

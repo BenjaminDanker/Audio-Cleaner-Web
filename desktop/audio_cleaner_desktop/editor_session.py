@@ -90,7 +90,7 @@ class Session:
 
     def quote(self, tl: Timeline) -> editor_job.Quote:
         tl = self._for_listening(tl)
-        return editor_job.quote(tl, self._facts, self.cache, editor_job.previous_of(self.job, self.seconds), self.threads)
+        return editor_job.quote(tl, self._facts, self.cache, editor_job.previous_of(self.job, self.seconds))  # (the threads a run gets: speed.py)
 
     def suggest(self, *, cancel: threading.Event | None = None, progress: Progress | None = None) -> dict:
         """Look for moments that other settings would suit (editor_job.find_suggestions) and keep what was found with the job."""
@@ -148,7 +148,7 @@ class PlanSession:
     def quote(self, tl: Timeline) -> editor_job.Quote:
         tl, _ = editor_job.drop_missing_echo(tl, self._facts_inputs)
         tl = editor_job.resolve_known(tl, None)
-        return editor_job.quote(tl, self._facts_inputs, None, None, self.threads)
+        return editor_job.quote(tl, self._facts_inputs, None, None)  # (the threads a run gets: speed.py)
 
     def suggest(self, *, cancel: threading.Event | None = None, progress: Progress | None = None) -> dict:
         self.suggestions = editor_job.find_suggestions(self.inputs.source, threads=self.threads, cancel=cancel, progress=progress)

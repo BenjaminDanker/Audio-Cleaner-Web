@@ -19,8 +19,8 @@ from .theme import set_property
 STRENGTHS = (("gentle", "Gentle"), ("balanced", "Balanced"), ("strong", "Strong"), ("max", "Max"))
 STRENGTH_TIPS = {"gentle": "s.1", "balanced": "s.2", "strong": "s.3", "max": "s.4"}
 REMOVERS = (("auto", "Auto"), ("light", "Light"), ("heavy", "Heavy"))
-LEVELS = (("off", "Off"), ("podcast", "Podcast"), ("youtube", "YouTube"), ("broadcast", "Broadcast"), ("keep", "Keep"))
-SUBTITLE_FILES = (("srt", "SRT"), ("vtt", "VTT"), ("txt", "TXT"), ("embed", "Into the video"))
+LEVELS = (("off", "Off"), ("podcast", "Podcast"), ("youtube", "YouTube"), ("broadcast", "Broadcast"), ("keep", "Even"))
+SUBTITLE_FILES = (("srt", "SRT"), ("vtt", "VTT"), ("txt", "TXT"), ("embed", "Embed"))
 WIDTH = 356
 
 
@@ -67,6 +67,12 @@ class _VoiceOption(QFrame):
 
     def set_on(self, on: bool) -> None:
         set_property(self, "on", on)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        """A click anywhere on the row picks it, not only on the button or its name (the line under it, the space around them)."""
+        if event.button() == Qt.MouseButton.LeftButton and self.radio.isEnabled() and not self.radio.isChecked() and self.rect().contains(event.position().toPoint()):
+            self.radio.click()
+        super().mouseReleaseEvent(event)
 
 
 class Inspector(QFrame):
@@ -220,7 +226,7 @@ class Inspector(QFrame):
         # Subtitles
         self.subs_card = Card("subs", "Subtitles")
         self.subs_card.title.setToolTip(copy.TIPS["subs"])
-        self.subs = SoftSegmented([("off", "Off"), ("on", "On, on this computer")], "subs")
+        self.subs = SoftSegmented([("off", "Off"), ("on", "On")], "subs")
         self.subs.set_tooltips({"off": copy.TIPS["q.0"], "on": copy.TIPS["q.1"]})
         self.subs.changed.connect(self._subs)
         self.language = QComboBox()
@@ -240,12 +246,11 @@ class Inspector(QFrame):
         self.files = Pills(list(SUBTITLE_FILES))
         self.files.changed.connect(self._file_kind)
         self.files_row = QWidget()
-        fr = QHBoxLayout(self.files_row)
+        fr = QVBoxLayout(self.files_row)  # (the label above the file types: beside it the four did not fit and the last was cut off)
         fr.setContentsMargins(0, 0, 0, 0)
-        label = small_label("Files", wrap=False)
-        label.setFixedWidth(66)
-        fr.addWidget(label)
-        fr.addWidget(self.files, 1)
+        fr.setSpacing(4)
+        fr.addWidget(small_label("Files", wrap=False))
+        fr.addWidget(self.files)
         self.subs_note = small_label()
         self.speech_panel = SpeechModelPanel(self.speech)
         self.speech.changed.connect(self._refresh_models)

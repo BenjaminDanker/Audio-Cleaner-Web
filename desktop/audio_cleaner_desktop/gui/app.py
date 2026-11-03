@@ -12,9 +12,9 @@ from PySide6.QtCore import QDir, QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .. import __version__, config, sysinfo
+from .. import __version__, config, speed, sysinfo
 from . import single_instance, tips
-from .main_window import MainWindow, log_dir
+from .main_window import MainWindow, data_dir, log_dir
 from .theme import ThemeWatcher
 
 ICON = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
@@ -116,6 +116,7 @@ def run(files: list[str]) -> int:
     if single_instance.forward(name, [str(Path(f).absolute()) for f in files]):
         return 0  # Audio Cleaner is already open: it got the files
     _install_excepthook(setup_logging())
+    speed.use_file(data_dir() / "speed.json")  # how fast this computer's runs were (the times on Start and in Details)
     sysinfo.lower_priority()
     ThemeWatcher(app)
     window = MainWindow(files)

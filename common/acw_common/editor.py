@@ -35,6 +35,7 @@ from __future__ import annotations
 import math
 import shutil
 import threading
+import time
 import uuid
 import weakref
 from collections.abc import Callable
@@ -568,6 +569,8 @@ class Runner:
     restore_model_dir: str | Path | None = None
     device: str = "cpu"
     threads: int = 2
+    #: When given, a run adds to it how long each step took: {step: [wall seconds, seconds of audio made]} (the desktop learns its speed).
+    timings: dict | None = None
 
 
 def _run_tasks(tasks: list[Task], lay: Layout, inputs: Inputs, E: np.ndarray, cache: blocks.BlockCache, runner: Runner | None,
@@ -593,6 +596,7 @@ def _run_tasks(tasks: list[Task], lay: Layout, inputs: Inputs, E: np.ndarray, ca
         if cancel is not None and cancel.is_set():
             raise dfn.Cancelled()
         prog = lambda f, base=done, share=share: advance(f, 1.0, base, share)  # noqa: E731
+        began = time.monotonic()
         if step == "echo":
             for k, t in enumerate(ts):
                 if cancel is not None and cancel.is_set():
@@ -614,6 +618,10 @@ def _run_tasks(tasks: list[Task], lay: Layout, inputs: Inputs, E: np.ndarray, ca
             by_index = {t.index: t for t in ts}
             restore.restore_blocks(src, runner.restore_model_dir, list(by_index), lambda b, y: cache.put(by_index[b].key, y),
                                    threads=runner.threads, device=runner.device, progress=prog, cancel=cancel)
+        if runner.timings is not None:
+            seen = runner.timings.setdefault(step, [0.0, 0.0])
+            seen[0] += time.monotonic() - began
+            seen[1] += sum(t.compute_seconds for t in ts)
         done += share
     if progress:
         progress(1.0)

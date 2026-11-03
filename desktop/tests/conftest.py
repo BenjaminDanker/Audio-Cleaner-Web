@@ -238,6 +238,16 @@ def qapp():
 
 
 @pytest.fixture(autouse=True)
+def _speed_starts_unlearned(monkeypatch):
+    """The times shown on Start and in Details come from guesses corrected by earlier runs (speed.py); no test depends on what another one learned,
+    and none writes the real speed file."""
+    from audio_cleaner_desktop import speed
+
+    monkeypatch.setattr(speed, "_ratios", {})
+    monkeypatch.setattr(speed, "_file", None)
+
+
+@pytest.fixture(autouse=True)
 def _models_in_a_scratch_folder(tmp_path, monkeypatch):
     """No test downloads to, or tidies up in, the real models folder of whoever runs the tests."""
     monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "default-models"))

@@ -391,13 +391,14 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
   the system hands over) fills the same screen in place.
   * *Left:* the editor (the picture or the poster of a sound, the file name and facts with "Different file", the Automatic switch and its line, the tools:
     play, split at the playhead, undo, redo, zoom, select all; the timeline with the rows Voice, Echo removal (a file with a second audio track),
-    Leveling, Subtitles and Music (not there yet), as in the web), and under it the output pane (the name of the result with its file type, the video
-    size, where it is saved, what is saved by itself). The output pane stretches so the column ends level with the settings.
+    Leveling and Subtitles, as in the web), and under it the output pane (the name of the result in a box joined to its file type, which gives the
+    ending; an ending typed into the box moves to the list when the box is left; the video size, where it is saved, what is saved by itself). The output pane stretches so the column ends level with the settings.
   * *Right:* the settings for the part that is chosen (heading "Whole file · 0:11" or the part), the cards Voice (Off, Noise removal with strength and
-    remover, Voice rebuild), Echo removal, Leveling (Off, Podcast, YouTube, Broadcast, Keep) and Subtitles (Off / On on this computer, language, SRT / VTT / TXT /
-    Into the video). Parts are chosen by dragging on the timeline (or clicking a section, or a pin); there is no separate Start / End card.
-  * *Under both columns:* the start row (not pinned to the window): Details (what will be done, with a rough time; nothing is billed) or Your files, or the
-    progress with "Cancel job", then the button: Start, Processing, Save changes, or Open the file (the desktop's "Download again").
+    remover, Voice rebuild; a click anywhere on an option's row picks it), Echo removal, Leveling (Off, Podcast, YouTube, Broadcast, Even: evens out the volume
+    and keeps the overall loudness as recorded) and Subtitles (Off / On, language, the files SRT / VTT / TXT / Embed under their label). Parts are chosen by dragging on the timeline (or clicking a section, or a pin); there is no separate Start / End card.
+  * *Under both columns:* the start row (not pinned to the window): the progress with "Cancel job" while a run goes, then beside the button Details (what
+    will be done, step by step with its time; nothing is billed) or Your files, and the button: "Start · about 3 min" (where the website says the price, the
+    time it takes on this computer), Processing, Save changes, or Open the file (the desktop's "Download again").
   * *Jobs:* a column beside the editor (under it when the window is narrow): the files waiting and running with their progress, and every finished or
     failed job, newest first, searchable, sortable, paged. Opening one shows it in the same editor: the result, the parts it was made with, the live
     sound (Listen to Original / Cleaned and the speakers of the rows); change a part or a setting and "Save changes" makes a new file next to the
@@ -506,10 +507,10 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     job whose copies can't become blocks (it removed echo but did not keep the echo-free recording) starts an empty block cache, and what a change
     needs is made from the original.
   * *The editor* (the screen above): the timeline (ruler with a pin for each suggestion, the waveform with the chosen part's two handles and the
-    playhead, one row each for Voice, Echo removal, Leveling, Subtitles and Music; click moves the playhead, drag across the waveform or a row chooses a
+    playhead, one row each for Voice, Echo removal, Leveling and Subtitles; click moves the playhead, drag across the waveform or a row chooses a
     part, click a section chooses it; "Split at playhead" divides a section so both pieces can be chosen; zoom; undo and redo of every edit) and the
     cards. Part settings: Voice Off / Noise removal (strength Gentle / Balanced / Strong / Max, remover Auto / Light / Heavy) / Voice rebuild (exclusive:
-    where it is on it wins over the noise removal), Echo removal on or off, Leveling Off / Podcast / YouTube / Broadcast / Keep with one loudness for the
+    where it is on it wins over the noise removal), Echo removal on or off, Leveling Off / Podcast / YouTube / Broadcast / Even with one loudness for the
     whole file. A job's rows have a speaker each (hear the file with that layer or without it). All edits are `Timeline.paint` / `erase`, so the draft is
     always a valid timeline. "Which one should I pick?" (`labels.WHICH_TEXT`, in All the options) says in plain words how noise reduction and Rebuild the voice
     differ; the cards, the tooltips and the notes on a result use the same words.
@@ -521,10 +522,14 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     the compressor and limiter come with the saved file). A part whose blocks are not in the cache yet is heard without that change, and the strip
     says so. The saved file is made by `editor.render` (joins that look for a pause, loudness matching, the whole of Leveling), not by this mix.
   * *Quote and Save.* The button says "Open the file" (nothing changed), or "Save changes" with "about 40 s" when something has to be made
-    (`editor.plan` over the facts the job kept, so nothing is decoded to say it; `editor_job.CPU_COSTS` turns the plan's compute seconds into wall-clock
-    seconds on one core of an ordinary computer: the light remover and Leveling as measured, the heavy remover 1.8 x the light one, Voice rebuild about
-    30 x, divided by the threads); "Details" lists the steps. For a file that has not run, Details gives a rough figure from the same costs times what each
-    layer covers. Save runs `redo.run` with a timeline: the original is decoded, only the missing blocks are made (cancelable, with progress), the
+    (`editor.plan` over the facts the job kept, so nothing is decoded to say it) and `speed.py` turns the plan's compute seconds into wall-clock seconds on
+    this computer; "Details" lists the steps. For a file that has not run, Start and Details give the same from what each layer covers (Voice rebuild
+    counted once for a stereo file: it runs on the mix). *This computer's speed* (`speed.py`): the first guess is the cost of each step on one core of an
+    ordinary computer (the light remover and Leveling as measured, the heavy remover 1.8 x the light one, Voice rebuild about 30 x, the speech for
+    subtitles 0.5 s a second) spread over the threads a run gets here (every thread but one for a file that runs by itself; `worker.py` gives files that
+    run together a share each); every run then measures each step (`editor.Runner.timings`, the speech in `engine.process` / `redo.run`) and keeps how far
+    that was from the guess, in `speed.json` in the app's data folder, so later times follow this computer after one run of each step. Everything runs
+    on the processor (no graphics card), so Voice rebuild is by far the slowest step. Save runs `redo.run` with a timeline: the original is decoded, only the missing blocks are made (cancelable, with progress), the
     timeline is rendered, and the result is a new file next to the last one (the naming and Replace rules above); the same screen shows it.
   * *Suggestions* (`suggest.suggest`): the pins on the ruler, the count next to the Automatic switch, and a card on top of the settings when the part
     that is chosen is one. Found in the background (a job: when it is opened for the first time; a file that has not run: with Automatic on) up to 20

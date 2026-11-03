@@ -1,17 +1,24 @@
 """The output pane under the editor (the web's OutputPane): the name of the result with its file type, the video size, where it is saved, and what
-the run saves by itself. Typing another ending changes the type; picking a type changes the ending."""
+the run saves by itself. The box holds the name, the list joined to it the type (its ending); an ending typed into the box moves to the list
+when the box is left."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QVBoxLayout, QWidget
 
 from .. import engine, labels
 from . import copy
 from .studio_widgets import Pane, link_button, small_label
 from .theme import set_property
 from .widgets import ElidedLabel
+
+
+def name_stem(name: str) -> str:
+    """The name without its ending ("talk-cleaned.mp3" -> "talk-cleaned"): what the name box shows (the ending is the type in the list)."""
+    stem, ending = engine.split_name(name)
+    return stem if ending in engine.ENDING_NAMES else name
 
 
 class OutputPane(Pane):
@@ -41,11 +48,11 @@ class OutputPane(Pane):
         title.setObjectName("FieldLabel")
         f.addWidget(title)
         line = QHBoxLayout()
-        line.setSpacing(-1)  # the two borders overlap into one
+        line.setSpacing(0)  # joined: the list's left side is square and has no border of its own (theme.py)
         self.name = QLineEdit()
         self.name.setObjectName("NameBox")
         self.name.setAccessibleName("Name of the result")
-        self.name.setToolTip("What the result is called. Change the ending (for example .mp3) to save it as something else, or pick a type in the list.")
+        self.name.setToolTip("What the result is called. Its type (the ending, like .mp3) is the list beside it.")
         self.format = QComboBox()
         self.format.setObjectName("FormatBox")
         self.format.setAccessibleName("File type")
@@ -53,10 +60,12 @@ class OutputPane(Pane):
         self.format.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.format.setToolTip("The types this file can be saved as. A video can become another kind of video, or just its sound. A sound can become a video "
                                "with a plain black picture, which can carry subtitles.")
+        for w in (self.name, self.format):  # (as tall as each other)
+            w.setSizePolicy(w.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Preferred)
         line.addWidget(self.name, 1)
         line.addWidget(self.format)
         f.addLayout(line)
-        self.hint = small_label(copy.NAME_TIP)
+        self.hint = small_label()  # (only a problem with the name)
         f.addWidget(self.hint)
         self.size_box = QWidget()
         s = QVBoxLayout(self.size_box)
@@ -137,8 +146,8 @@ class OutputPane(Pane):
                         elif not source.has_video:
                             label += " (plain black picture)"
                         self.format.addItem(label, ending)
-                if self.name.text() != doc.out_name:  # (a changed text would move the cursor: only when it differs)
-                    self.name.setText(doc.out_name)
+                if self.name.text() != name_stem(doc.out_name):  # (a changed text would move the cursor: only when it differs)
+                    self.name.setText(name_stem(doc.out_name))
                 self.format.setCurrentIndex(self.format.findData(engine.split_name(doc.out_name)[1]))
                 picture = engine.split_name(doc.out_name)[1] in (*engine.VIDEO_ENDINGS, ".m4v")  # (a sound made into a video has a plain black one)
                 self.size_box.setVisible(bool(picture))
@@ -149,7 +158,8 @@ class OutputPane(Pane):
             else:
                 self.size_box.hide()
             bad = problem or (engine.check_output_name(doc.out_name, source)[1] if source is not None and doc.out_name else "")
-            self.hint.setText(bad or copy.NAME_TIP)
+            self.hint.setText(bad)
+            self.hint.setVisible(bool(bad))
             set_property(self.hint, "state", "failed" if bad else "")
             set_property(self.name, "invalid", bool(bad))
             self.where.setText(f"Saved in {out_dir}" if out_dir is not None else "Saved next to the original")

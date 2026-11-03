@@ -32,7 +32,7 @@ from acw_common import blocks, editor, kept, pipeline, suggest
 from acw_common.ffmpeg import MediaError
 from acw_common.timeline import DEFAULT_LOUDNESS, Timeline, TimelineError
 
-from . import copies, engine, resources
+from . import copies, engine, resources, speed
 
 log = logging.getLogger(__name__)
 
@@ -42,13 +42,7 @@ PEAK_BUCKETS = 1600
 #: Suggestions are looked for by themselves in recordings up to this long; for a longer one there is a button (it takes a while).
 SUGGEST_AUTO_SECONDS = 20 * 60
 
-#: Wall-clock seconds one second of audio takes on one core of an ordinary computer, and a fixed amount per run, step by step. The
-#: light remover, echo removal and Leveling are measured (editor.STEP_COSTS: CPU); the heavy remover is 1.8 x the light one, and Voice
-#: rebuild on a CPU about 30 x (docs/research); the server runs those two on a graphics card, this app on the processor.
-CPU_COSTS = {
-    "echo": (0.12, 0.034), "light": (0.27, 0.116), "heavy": (1.5, 0.21), "rebuild": (4.3, 3.5), "leveling": (1.28, 0.013),
-}
-THREAD_EFFICIENCY = 0.7
+CPU_COSTS, THREAD_EFFICIENCY = speed.CPU_COSTS, speed.THREAD_EFFICIENCY  # (speed.py: what the times are worked out from)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -219,18 +213,12 @@ class Quote:
         return self.misses == 0
 
 
-def estimate_seconds(plan: editor.Plan, threads: int = 2) -> float:
-    """About how long the plan's missing blocks and Leveling take on this kind of computer (wall-clock seconds)."""
-    cores = max(1.0, threads * THREAD_EFFICIENCY)
-    total = 0.0
-    for step, row in plan.summary().items():
-        if row["blocks"]:
-            fixed, per = CPU_COSTS[step]
-            total += (fixed + per * row["compute_seconds"]) / cores
-    return total
+def estimate_seconds(plan: editor.Plan, threads: int | None = None) -> float:
+    """About how long the plan's missing blocks and Leveling take on this computer (wall-clock seconds; speed.py)."""
+    return sum(speed.cost(step, row["compute_seconds"], threads) for step, row in plan.summary().items() if row["blocks"])
 
 
-def quote(tl: Timeline, inputs: editor.Inputs, cache, previous: Timeline | None = None, threads: int = 2) -> Quote:
+def quote(tl: Timeline, inputs: editor.Inputs, cache, previous: Timeline | None = None, threads: int | None = None) -> Quote:
     p = editor.plan(tl, inputs, cache, previous)
     steps = {s: row["blocks"] for s, row in p.summary().items() if row["blocks"] and s != "leveling"}
     return Quote(estimate_seconds(p, threads), steps, len(p.misses), bool(p.leveling), p)
@@ -252,7 +240,7 @@ def say_time(seconds: float) -> str:
     return f"about {hours:.1f} h"
 
 
-def quote_for(job: copies.JobCopies, tl: Timeline, threads: int = 2) -> Quote | None:
+def quote_for(job: copies.JobCopies, tl: Timeline, threads: int | None = None) -> Quote | None:
     """What it would take to make `tl` from the job's blocks, worked out from the facts it kept (None when it kept none)."""
     f = job_facts(job)
     if f is None or not job.has_blocks:
@@ -281,10 +269,10 @@ def previous_of(job: copies.JobCopies, seconds: float) -> Timeline | None:
     return stored_timeline(job, seconds)
 
 
-def runner(threads: int | None = None, device: str = "cpu") -> editor.Runner:
+def runner(threads: int | None = None, device: str = "cpu", timings: dict | None = None) -> editor.Runner:
     return editor.Runner(
         lib_path=resources.libdf_path(), model_path=resources.model_path(), heavy_model_path=resources.heavy_noise_model_path(),
-        restore_model_dir=resources.voice_model_dir(), device=device, threads=threads or engine.worker_threads())
+        restore_model_dir=resources.voice_model_dir(), device=device, threads=threads or engine.worker_threads(), timings=timings)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -329,10 +317,10 @@ def drop_missing_echo(tl: Timeline, inputs: editor.Inputs) -> tuple[Timeline, st
 def render_timeline(
     tl: Timeline, inputs: editor.Inputs, cache, *, work: Path, threads: int, known: dict | None = None,
     progress: Callable[[float], None] | None = None, cancel: threading.Event | None = None, out: np.ndarray | None = None,
-    previous: Timeline | None = None,
+    previous: Timeline | None = None, timings: dict | None = None,
 ) -> tuple[np.ndarray, Timeline, dict, str | None, dict]:
     """Decide the automatic removers, make the blocks the cache lacks and compose the result. Returns (the audio, the timeline as it ran,
-    {part: remover} decided, a notice or None, {step: blocks made})."""
+    {part: remover} decided, a notice or None, {step: blocks made}). `timings`: filled with how long each step took (speed.learn)."""
     tl, notice = drop_missing_echo(tl, inputs)
     if progress:
         progress(0.01)
@@ -345,7 +333,7 @@ def render_timeline(
             raise MediaError("The model that rebuilds the voice is not installed. Download it in Settings.")
         if not resources.noise_ready() and any(s in ("light", "heavy") for s in missing):
             raise MediaError("The noise removal models are not installed.")
-    y = editor.render(tl, inputs, cache, runner(threads), out=out, work_dir=work,
+    y = editor.render(tl, inputs, cache, runner(threads, timings=timings), out=out, work_dir=work,
                       progress=(lambda f: progress(0.02 + 0.98 * f)) if progress else None, cancel=cancel)
     return y, tl, decided, notice, made
 

@@ -214,7 +214,9 @@ class JobQueue(QObject):
             if len(self._running) >= limit:
                 return
             job = self._pending.pop(0)
-            thread = _JobThread(job, self._runner, sysinfo.threads_per_job(limit), self)
+            # (the processor shared by the files that run together now: a file by itself gets every thread but one)
+            together = min(limit, len(self._pending) + len(self._running) + 1)
+            thread = _JobThread(job, self._runner, sysinfo.threads_per_job(together), self)
             thread.progress.connect(self.itemProgress)
             thread.succeeded.connect(self._on_succeeded)
             thread.failed.connect(self._on_failed)

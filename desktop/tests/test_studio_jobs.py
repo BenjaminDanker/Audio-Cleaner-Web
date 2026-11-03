@@ -662,7 +662,7 @@ def test_a_failed_job_keeps_the_copies_it_made_and_one_that_made_none_keeps_no_f
     # the screen says why, and the file can be started again from the same editor
     assert failed.doc.stage == "ready" and failed.doc.note == "Saving the cleaned audio failed." and failed.doc.note_kind == "error"
     w.open_item(failed.id)
-    assert w.studio.start.button.text() == "Try again" and w.studio.start.button.isEnabled()
+    assert w.studio.start.button.text().startswith("Try again") and w.studio.start.button.isEnabled()
 
 
 def test_a_stopped_job_is_not_listed_and_leaves_no_folder(keeper, tmp_path):

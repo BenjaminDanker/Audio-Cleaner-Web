@@ -5,10 +5,11 @@ from __future__ import annotations
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 import studio_helpers as sh
-from audio_cleaner_desktop.gui import timeline as tl_mod
+from audio_cleaner_desktop import editor_job, speed
+from audio_cleaner_desktop.gui import copy as copy_mod, timeline as tl_mod
 from conftest import wait_until
 from studio_helpers import add_file, ready, settle
 
@@ -101,11 +102,64 @@ def test_a_click_on_a_section_chooses_it_and_the_rows_say_what_each_part_does(lo
     press(plot, plot.x_of(5), y)
     release(plot, plot.x_of(5), y)
     assert got == [(3.0, 7.0)]
-    # the Music row is not there yet: nothing to choose
-    music = [i for i, (lane, _) in enumerate(plot.lanes()) if lane == "music"][0]
-    press(plot, plot.x_of(5), plot.lane_top(music) + 10)
-    release(plot, plot.x_of(5), plot.lane_top(music) + 10)
-    assert got == [(3.0, 7.0)]
+    # there is no Music row any more
+    assert [lane for lane, _ in plot.lanes()] == ["voice", "level", "subs"]
+
+
+def test_there_is_no_music_row_in_the_timeline_its_names_or_the_rows_before_a_file(window, tmp_path):
+    assert "music" not in tl_mod.LANE_NAMES and sorted(tl_mod.LANE_NAMES) == ["echo", "level", "subs", "voice"]
+    ghost = [label.text() for label in window.studio.ghost.findChildren(QLabel)]
+    assert ghost == ["Voice", "Leveling", "Subtitles"]  # (the empty screen's rows: nothing "coming")
+    add_file(window, tmp_path)
+    ready(window)
+    plot = plot_of(window)
+    assert [lane for lane, _ in plot.lanes()] == ["voice", "level", "subs"]
+    assert plot.total_height() < plot.lane_top(2) + 2 * tl_mod.LANE_H  # (no room for a fourth row under Subtitles)
+    names = " ".join(label.text() for label in window.studio.timeline.labels.findChildren(QLabel))
+    assert "Music" not in names and "Coming" not in names
+
+
+def test_the_waveforms_bars_are_drawn_once_and_reused_by_every_repaint_until_the_width_or_the_waveform_changes(loaded):
+    plot = plot_of(loaded)
+    plot.grab()
+    first = dict(plot._bars)
+    assert first  # (the waveform's bars are in the cache)
+    (key, pixmap), = [(k, v) for k, v in first.items()][:1]
+    width, dpr = key[4], key[-1]  # (the key ends with the drawn width, the colour and the screen's pixel ratio)
+    assert pixmap.width() == int(width * dpr) and pixmap.height() == int(tl_mod.WAVE_H * dpr) and width <= plot.width()
+    loaded.doc.model.select(3, 7)  # a part is chosen, the playhead moves, a setting changes: the timeline repaints, the bars are not drawn again
+    loaded.studio.seek(4.0)
+    loaded.doc.model.set_voice("rebuild")
+    settle(loaded)
+    plot.grab()
+    plot.grab()
+    assert all(plot._bars.get(k) is v for k, v in first.items()) and set(plot._bars) == set(first)
+    loaded.resize(1000, 900)  # another width: drawn again for it
+    QApplication.processEvents()
+    plot_of(loaded).grab()
+    assert any(k not in first for k in plot._bars)
+    for extra in range(1, 12):  # (what is kept does not grow with every width the window has had)
+        loaded.resize(800 + 37 * extra, 900)
+        QApplication.processEvents()
+        plot_of(loaded).grab()
+    assert len(plot._bars) <= 6
+
+
+def test_the_timeline_row_for_subtitles_says_embed_for_a_video_that_gets_them_inside(window, tmp_path):
+    window.fakes.facts.update(video=True, ext=".mp4")
+    add_file(window, tmp_path, "clip.mp4")
+    ready(window)
+    i = window.studio.inspector
+    i.subs._buttons["on"].click()
+    settle(window)
+    i.files._buttons["embed"].click()
+    settle(window)
+    assert window.doc.subtitles == "embed"
+    subs = dict(plot_of(window).lanes())["subs"]
+    assert [(x["label"], x["on"]) for x in subs] == [("Embed", True)]
+    i.files._buttons["vtt"].click()
+    settle(window)
+    assert dict(plot_of(window).lanes())["subs"][0]["label"] == "VTT"
 
 
 def test_splitting_makes_the_part_around_the_playhead_two_that_can_be_chosen_by_themselves(loaded):
@@ -220,7 +274,189 @@ def test_the_subtitles_card_has_language_files_and_into_the_video_only_for_a_vid
     assert "whole file" in i.subs_note.text()
 
 
+def test_a_click_anywhere_on_a_voice_option_picks_it_not_only_on_its_button_or_name(loaded):
+    s, doc = loaded.studio, loaded.doc
+    i = s.inspector
+    doc.model.select(0, 11)
+    i.options["noise"].radio.click()
+    settle(loaded)
+    assert doc.model.voice_mode_of(0, 11) == "noise"
+    rebuild = i.options["rebuild"]
+    rebuild.show()
+    # on its line ("fixes echo, muffled or distorted voices..."), the words under the name
+    QTest.mouseClick(rebuild.line, Qt.MouseButton.LeftButton)
+    settle(loaded)
+    assert rebuild.radio.isChecked() and doc.model.voice_mode_of(0, 11) == "rebuild"
+    # on the empty space to the right of the name (the button's own space, outside its circle and text)
+    noise = i.options["noise"]
+    QTest.mouseClick(noise, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(noise.width() - 8, noise.radio.geometry().center().y()))
+    settle(loaded)
+    assert noise.radio.isChecked() and doc.model.voice_mode_of(0, 11) == "noise"
+    # on the margin around the row, and between the name and its line
+    QTest.mouseClick(rebuild, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(rebuild.width() - 3, 2))
+    settle(loaded)
+    assert doc.model.voice_mode_of(0, 11) == "rebuild"
+    QTest.mouseClick(noise, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(noise.width() // 2, noise.rect().bottom() - 1))
+    settle(loaded)
+    assert doc.model.voice_mode_of(0, 11) == "noise"
+    # Off is a row too (no line under it)
+    QTest.mouseClick(i.options["off"], Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(i.options["off"].width() - 8, i.options["off"].height() // 2))
+    settle(loaded)
+    assert doc.model.voice_mode_of(0, 11) == "off" and i.options["off"].radio.isChecked()
+
+
+def test_a_click_on_a_voice_row_that_cannot_be_chosen_or_that_is_pressed_in_and_dragged_out_picks_nothing(loaded):
+    s, doc = loaded.studio, loaded.doc
+    i = s.inspector
+    doc.model.select(0, 11)
+    i.options["noise"].radio.click()
+    settle(loaded)
+    rebuild = i.options["rebuild"]
+    rebuild.radio.setEnabled(False)  # (its model is not there, say)
+    QTest.mouseClick(rebuild.line, Qt.MouseButton.LeftButton)
+    settle(loaded)
+    assert doc.model.voice_mode_of(0, 11) == "noise" and not rebuild.radio.isChecked()
+    rebuild.radio.setEnabled(True)
+    QTest.mousePress(rebuild.line, Qt.MouseButton.LeftButton)
+    QTest.mouseRelease(rebuild.line, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(rebuild.line.width() // 2, -60))  # let go far above it
+    settle(loaded)
+    assert doc.model.voice_mode_of(0, 11) == "noise"
+    QTest.mouseClick(rebuild.line, Qt.MouseButton.RightButton)
+    settle(loaded)
+    assert doc.model.voice_mode_of(0, 11) == "noise"
+
+
+def test_leveling_calls_its_fifth_option_even_everywhere_and_it_still_means_the_loudness_as_recorded(loaded):
+    s, doc = loaded.studio, loaded.doc
+    i = s.inspector
+    assert [b.text() for b in i.level._buttons.values()] == ["Off", "Podcast", "YouTube", "Broadcast", "Even"]
+    assert "Even" in i.level._buttons["keep"].toolTip() and "Keep" not in i.level._buttons["keep"].toolTip() and i.level._buttons["keep"].toolTip().startswith("Even:")
+    assert copy_mod.loudness_name(None) == "Even" and copy_mod.TIPS["l.4"].startswith("Even: ") and "Keep" not in copy_mod.TIPS["l.4"]
+    assert ("Even", "Evens out the volume but keeps the overall loudness as recorded") in copy_mod.LEVELING_ROWS and all(n != "Keep" for n, _ in copy_mod.LEVELING_ROWS)
+    doc.model.select(0, 11)
+    i.level._buttons["keep"].click()  # (the same choice as before: no target, the loudness stays)
+    settle(loaded)
+    assert doc.model.loudness() is None and doc.model.level_of(0, 11) == "on"
+    assert [x["label"] for x in dict(plot_of(loaded).lanes())["level"]] == ["Even"]
+    from audio_cleaner_desktop.gui.info_dialog import InfoDialog
+
+    dialog = InfoDialog()
+    text = " ".join(label.text() for label in dialog.findChildren(QLabel))
+    assert "Evens out the volume but keeps the overall loudness as recorded" in text and "Keep loudness" not in text
+    dialog.close()
+    assert not hasattr(copy_mod, "NAME_TIP")  # (the tip line under the name box is gone)
+
+
+def test_the_subtitles_say_on_and_embed_and_the_files_row_has_its_label_above_the_file_types_so_none_is_cut_off(window, tmp_path):
+    window.fakes.facts.update(video=True, ext=".mp4")
+    add_file(window, tmp_path, "clip.mp4")
+    ready(window)
+    i = window.studio.inspector
+    assert [b.text() for b in i.subs._buttons.values()] == ["Off", "On"]
+    assert [b.text() for b in i.files._buttons.values()] == ["SRT", "VTT", "TXT", "Embed"]
+    i.subs._buttons["on"].click()
+    settle(window)
+    row = i.files_row
+    assert row.isVisibleTo(i)
+    label = next(w for w in row.findChildren(QLabel) if w.text() == "Files")
+    assert label.geometry().bottom() <= i.files.geometry().top() and label.geometry().left() <= i.files.geometry().left()  # (above, not beside)
+    pills = list(i.files._buttons.values())
+    assert all(b.isVisibleTo(i) for b in pills)
+    assert pills[-1].geometry().right() <= i.files.width() and i.files.geometry().right() <= row.width()  # (every pill is inside the row)
+    assert i.files.minimumSizeHint().width() <= row.width()
+    assert all(b.width() >= b.fontMetrics().horizontalAdvance(b.text()) for b in pills)  # (and wide enough for its own word)
+
+
 # ---------------------------------------------------------------------------------------------------- the start row and the details
+
+def test_start_says_about_how_long_the_run_takes_when_something_is_on_and_only_start_when_nothing_is(loaded):
+    s, doc = loaded.studio, loaded.doc
+    doc.model.select(0, 11)
+    doc.model.set_voice("noise")
+    settle(loaded)
+    total = doc.estimate()[1]
+    assert total > 0 and s.start.button.text() == f"Start · {editor_job.say_time(total)}" and "· about " in s.start.button.text()
+    doc.model.set_voice("rebuild")
+    settle(loaded)
+    assert s.start.button.text() == f"Start · {editor_job.say_time(doc.estimate()[1])}"  # (more work: more time)
+    assert doc.estimate()[1] > total
+    doc.model.set_voice("off")
+    s.inspector.level._buttons["off"].click()
+    settle(loaded)
+    assert doc.estimate() == ([], 0.0) and s.start.button.text() == "Start"  # nothing on: no time to say
+
+
+def test_the_time_on_start_follows_what_this_computers_runs_measured(loaded):
+    s, doc = loaded.studio, loaded.doc
+    doc.model.select(0, 11)
+    doc.model.set_voice("noise")
+    settle(loaded)
+    before = doc.estimate()[1]
+    assert before == pytest.approx(speed.cost("light", 11.0) + speed.cost("leveling", 11.0))
+    speed.learn({"light": [speed.guess("light", 600.0, speed.run_threads()) * 6, 600.0], "leveling": [0.0, 1.0]}, speed.run_threads())  # (six times slower than guessed)
+    assert speed._ratios["light"] == pytest.approx(6.0) and "leveling" not in speed._ratios  # (the tiny leveling run is not counted)
+    after = doc.estimate()[1]
+    assert after == pytest.approx(speed.cost("light", 11.0) + speed.cost("leveling", 11.0)) and after > before
+    assert s.start.button.text() == f"Start · {editor_job.say_time(after)}"
+
+
+def test_details_counts_voice_rebuild_once_for_a_stereo_recording_and_noise_removal_for_each_side(window, tmp_path):
+    def rows_for(channels: int):
+        window.fakes.facts.update(channels=channels)
+        add_file(window, tmp_path, f"talk{channels}.wav")
+        ready(window)
+        doc = window.doc
+        doc.model.select(0, 11)
+        doc.model.set_voice("rebuild")
+        settle(window)
+        rebuild = [c for t, c in doc.estimate()[0] if t.startswith("Voice rebuild")][0]
+        doc.model.set_voice("noise")
+        settle(window)
+        noise = [c for t, c in doc.estimate()[0] if t.startswith("Noise removal")][0]
+        return rebuild, noise
+
+    mono_rebuild, mono_noise = rows_for(1)
+    stereo_rebuild, stereo_noise = rows_for(2)
+    assert mono_rebuild == pytest.approx(speed.cost("rebuild", 11.0)) and stereo_rebuild == pytest.approx(speed.cost("rebuild", 11.0))  # (once)
+    assert mono_noise == pytest.approx(speed.cost("light", 11.0)) and stereo_noise == pytest.approx(speed.cost("light", 22.0))  # (each side)
+    assert stereo_noise > mono_noise
+
+
+def test_details_and_your_files_sit_beside_the_start_button_and_their_popover_opens_right_aligned_above_the_link(loaded):
+    s, doc = loaded.studio, loaded.doc
+    bar = s.start
+    lay = bar.layout()
+    order = [("spacer" if lay.itemAt(n).spacerItem() is not None else lay.itemAt(n).widget()) for n in range(lay.count())]
+    stretch = order.index("spacer")
+    assert order.index(bar.details) > stretch and order.index(bar.files) > stretch and order.index(bar.button) > order.index(bar.files)  # (after the stretch)
+    assert order.index(bar.progress_box) < stretch
+    assert bar.details.isVisibleTo(bar) and not bar.files.isVisibleTo(bar)
+    d, b = bar.details.geometry(), bar.button.geometry()
+    assert d.right() < b.left() and b.left() - d.right() <= 30  # (right beside the button, not at the left of the bar)
+    assert d.left() > bar.width() // 2
+    bar.set_mode("files")  # Your files is in the same place
+    settle(loaded)
+    assert bar.files.isVisibleTo(bar) and not bar.details.isVisibleTo(bar) and bar.button.geometry().left() - bar.files.geometry().right() <= 30
+
+
+@pytest.mark.parametrize("which", ["details", "files"])
+def test_the_popover_of_details_and_your_files_opens_above_the_link_with_its_right_side_at_the_links_right_side(loaded, which):
+    bar = loaded.studio.start
+    bar.set_fillers(lambda pop: pop.note("What will be done"), lambda pop: pop.note("The files this made"))  # (what is in it does not matter here)
+    bar.set_mode(which)
+    link_widget = getattr(bar, which)
+    settle(loaded)
+    link = link_widget.mapToGlobal(QPoint(0, 0))
+    link_widget.click()
+    pop = bar.popover
+    assert pop.isVisible()
+    assert pop.x() + pop.width() == pytest.approx(link.x() + link_widget.width(), abs=2), (  # (its right side is the link's right side)
+        f"{which}: the popover's right edge is at {pop.x() + pop.width()}, the link's at {link.x() + link_widget.width()} "
+        f"(the popover is {pop.width()} wide, its size hint {pop.sizeHint().width()})")
+    assert pop.y() + pop.height() <= link.y() and link.y() - (pop.y() + pop.height()) < 40  # (above the link, close to it)
+    assert pop.x() >= bar.window().mapToGlobal(QPoint(0, 0)).x()
+    pop.hide()
+
 
 def test_details_lists_what_will_be_done_and_the_total_and_says_nothing_is_billed(loaded):
     s, doc = loaded.studio, loaded.doc

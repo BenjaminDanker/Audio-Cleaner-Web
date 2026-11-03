@@ -20,6 +20,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import traceback
 import uuid
 from collections.abc import Callable
@@ -29,7 +30,7 @@ from pathlib import Path
 from acw_common import pipeline
 from acw_common.ffmpeg import MediaError
 
-from . import copies, editor_job, engine, resources
+from . import copies, editor_job, engine, resources, speed
 
 log = logging.getLogger(__name__)
 
@@ -296,10 +297,13 @@ def run(
             editor_job.make_ready(job, ff, inputs, work, cancel=cancel)
             report(0.1)
             segments, language = None, None
+            timings: dict = {}  # how long each step took: this computer's speed (speed.py)
             if wanted.subtitles != "off":
                 saved = job.transcript()
                 if sound_plan.transcribe:
+                    began = time.monotonic()
                     segments, language = engine._transcribe(ff, src, info, work, options, threads, report.span(0.1, 0.4), cancel)
+                    timings["speech"] = [time.monotonic() - began, info.duration]
                     keeper.transcript(segments, language, job.echo)
                 else:
                     segments, language = saved
@@ -311,7 +315,8 @@ def run(
             tl = timeline_of(job, wanted)
             y, done, decided, notice, _ = editor_job.render_timeline(
                 tl, inputs, job.block_cache(ff), work=work, threads=threads, known=job.editor.get("resolved"),
-                progress=report.span(start, 0.9), cancel=cancel, out=pipeline.output_buffer(x, work))
+                progress=report.span(start, 0.9), cancel=cancel, out=pipeline.output_buffer(x, work), timings=timings)
+            speed.learn(timings, threads)
             _check_cancel(cancel)
             made = _made(job, wanted, done, language, ext)
             kept_info = engine._write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language,

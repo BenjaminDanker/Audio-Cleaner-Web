@@ -41,7 +41,7 @@ def test_clean_a_file_end_to_end(native_window, speech_wav, tmp_path):
     rate, samples = wavfile.read(speech_wav, mmap=True)
     assert doc.facts.duration == pytest.approx(len(samples) / rate, abs=0.5) and doc.peaks and doc.applied  # Automatic listened to the file
     s = w.studio
-    assert s.start.button.text() == "Start" and s.start.button.isEnabled()
+    assert s.start.button.text().startswith("Start") and s.start.button.isEnabled()
     s.start.button.click()
     item = next(iter(w._items.values()))
     assert wait_until(lambda: doc.stage == "done", 180), item.message

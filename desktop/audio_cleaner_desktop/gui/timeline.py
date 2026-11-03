@@ -1,6 +1,6 @@
 """The timeline of the editor screen (the web's Timeline.jsx): the ruler with the suggestions' pins, the waveform with the handles of the chosen
 part and the playhead, and a row for each of Voice, Echo removal (a file with a second audio track), Leveling and Subtitles, each as sections that
-say what is done there; a last row, Music, is not there yet. Drag across the waveform or a row to choose a part, click a section to choose it,
+say what is done there. Drag across the waveform or a row to choose a part, click a section to choose it,
 click the ruler or the waveform to move the playhead. Zoom makes it wider than the window (it scrolls).
 
 This draws a `doc.Doc` (its model, waveform and state) and tells its owner what the person did through signals; it edits nothing itself.
@@ -8,7 +8,7 @@ This draws a `doc.Doc` (its model, waveform and state) and tells its owner what 
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QHBoxLayout, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 from ..editor_model import clock
@@ -17,11 +17,12 @@ from .copy import loudness_name
 from .studio_widgets import app_palette, brand, is_dark, lane_color, tint
 
 RULER_H, WAVE_H, LANE_H, GAP = 30, 92, 30, 6
+_READING = [4] * 80  # (the flat waveform shown while a file is read)
 HANDLE_W = 14
 DRAG_PX = 5
 NICE = (1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 900, 1200, 1800, 3600, 7200)
 LABEL_W, LABEL_W_HEAR = 84, 112
-LANE_NAMES = {"voice": "Voice", "echo": "Echo removal", "level": "Leveling", "subs": "Subtitles", "music": "Music"}
+LANE_NAMES = {"voice": "Voice", "echo": "Echo removal", "level": "Leveling", "subs": "Subtitles"}
 HEARABLE = ("voice", "echo", "level")
 
 
@@ -42,7 +43,7 @@ def split_at(sections: list[dict], cuts: list[float]) -> list[dict]:
 
 
 def lanes_of(doc, subs_label: str) -> list[tuple[str, list[dict]]]:
-    """[(lane, sections)] for the file: Voice, Echo removal (when the file has a second track), Leveling, Subtitles (the whole file), Music."""
+    """[(lane, sections)] for the file: Voice, Echo removal (when the file has a second track), Leveling, Subtitles (the whole file)."""
     m = doc.model
     whole = [{"start": 0.0, "end": doc.seconds, "on": bool(subs_label), "label": subs_label or "Off", "pending": False, "settings": None}]
     voice = [{**s, "on": s["mode"] != "off", "label": s["label"] or "Off"} for s in m.voice_sections()]
@@ -55,7 +56,6 @@ def lanes_of(doc, subs_label: str) -> list[tuple[str, list[dict]]]:
         level.append({**s, "label": name or "Off"})
     out.append(("level", split_at(level, doc.cuts)))
     out.append(("subs", whole))
-    out.append(("music", []))
     return out
 
 
@@ -76,6 +76,7 @@ class Plot(QWidget):
         self.subs_label = ""
         self.hear_on = {"voice": True, "echo": True, "level": True}
         self._drag: tuple | None = None
+        self._bars: dict[tuple, QPixmap] = {}  # the waveform's bars as drawn, by what they show (drawing them is most of a repaint)
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setAccessibleName("Timeline")
@@ -204,11 +205,47 @@ class Plot(QWidget):
             lane = d[3]
             for s in self.lanes()[lane][1]:
                 if s["start"] <= d[2] < s["end"] or (d[2] >= self.seconds and s["end"] >= self.seconds):
-                    if self.lanes()[lane][0] != "music":
-                        self.sectionClicked.emit(s["start"], s["end"])
+                    self.sectionClicked.emit(s["start"], s["end"])
                     break
 
     # -- painting -------------------------------------------------------------------------------------------------------------
+    def _bars_pixmap(self, values, color: QColor, w: int) -> QPixmap:
+        """The bars of a waveform (`values`, 0-100) across `w`, drawn once and kept: a change elsewhere (a setting, the playhead, the chosen part)
+        repaints the timeline without drawing them again. Kept by the list, its length and a few of its values (the waveform grows while it
+        is read), the width, the colour and the screen's pixel ratio."""
+        n_values = len(values)
+        dpr = self.devicePixelRatioF()
+        key = (id(values), n_values, values[n_values // 2] if n_values else 0, values[-1] if n_values else 0, w, color.rgba(), dpr)
+        hit = self._bars.get(key)
+        if hit is not None:
+            return hit
+        pm = QPixmap(max(1, int(w * dpr)), int(WAVE_H * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        q = QPainter(pm)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        n = max(40, int(w / 3.2))
+        step = w / n
+        mid, mx = WAVE_H / 2, WAVE_H / 2 - 3
+        path = QPainterPath()
+        for i in range(n):
+            a = i * n_values // n
+            b = max(a + 1, (i + 1) * n_values // n)
+            v = max(values[a:b]) / 100.0 if a < n_values else 0.0
+            y = max(1.5, v * mx)
+            x = (i + 0.5) * step
+            path.moveTo(x, mid - y)
+            path.lineTo(x, mid + y)
+        pen = QPen(color, 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        q.setPen(pen)
+        q.drawPath(path)
+        q.end()
+        if len(self._bars) >= 6:  # (the waveform and the heard one, for the last few widths)
+            self._bars.clear()
+        self._bars[key] = pm
+        return pm
+
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -230,35 +267,17 @@ class Plot(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(surface2)
         p.drawRoundedRect(wave, 8, 8)
-        mid = wave.center().y()
-        mx = WAVE_H / 2 - 3
 
         def bars(values, color: QColor, alpha: float = 1.0) -> None:
-            n = max(40, int(w / 3.2))
-            step = w / n
-            N = len(values)
-            path = QPainterPath()
-            for i in range(n):
-                a = i * N // n
-                b = max(a + 1, (i + 1) * N // n)
-                v = max(values[a:b]) / 100.0 if a < N else 0.0
-                y = max(1.5, v * mx)
-                x = (i + 0.5) * step
-                path.moveTo(x, mid - y)
-                path.lineTo(x, mid + y)
             c = QColor(color)
             c.setAlphaF(alpha)
-            pen = QPen(c, 2)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            p.setPen(pen)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawPath(path)
+            p.drawPixmap(QPointF(0, wave.top()), self._bars_pixmap(values, c, w))
 
         peaks = doc.peaks
         if peaks:
             bars(peaks, muted, 0.45 if doc.heard else 1.0)
         elif doc.wave in ("none", "failed", "reading"):
-            bars([4] * 80, muted, 0.5)
+            bars(_READING, muted, 0.5)
         if doc.heard and self.hear_on.get("voice", True) and self.progress is None:
             bars(doc.heard, accent)
         # the bands of the chosen part (on the waveform and every row)
@@ -342,9 +361,6 @@ class Plot(QWidget):
             p.setPen(QPen(QColor(text.red(), text.green(), text.blue(), 40), 1))
             p.setBrush(surface2)
             p.drawRoundedRect(track.adjusted(0.5, 0.5, -0.5, -0.5), 7, 7)
-            if lane == "music":
-                self._draw_na(p, track, font, muted, text, pal)
-                continue
             for s in sections:
                 self._section(p, lane, s, top, w, font, dark, text, muted)
         # the part that is being made
@@ -405,23 +421,6 @@ class Plot(QWidget):
         if fm.horizontalAdvance(label) + 14 <= rect.width():
             p.drawText(rect.adjusted(7, 0, -3, 0), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), label)
         p.setFont(font)
-
-    def _draw_na(self, p: QPainter, track: QRectF, font: QFont, muted: QColor, text: QColor, pal) -> None:
-        p.setPen(QPen(QColor(text.red(), text.green(), text.blue(), 28), 1))
-        x = track.left() + 11
-        while x < track.right():
-            p.drawLine(QPointF(x, track.top() + 1), QPointF(x, track.bottom() - 1))
-            x += 12
-        label = "Coming"
-        fm = QFontMetrics(font)
-        tw = fm.horizontalAdvance(label) + 16
-        r = QRectF(track.center().x() - tw / 2, track.top() + 6, tw, LANE_H - 12)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(pal.base().color())
-        p.drawRoundedRect(r, 4, 4)
-        p.setPen(muted)
-        p.setFont(font)
-        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), label)
 
 
 class LaneLabels(QWidget):
@@ -496,7 +495,7 @@ class LaneLabels(QWidget):
         for i, (lane, _) in enumerate(self._plot.lanes()):
             top = self._plot.lane_top(i)
             left = 30 if self._hear and lane in HEARABLE else 4
-            p.setPen(muted if lane != "music" else QColor(muted.red(), muted.green(), muted.blue(), 110))
+            p.setPen(muted)
             p.drawText(QRectF(left, top, self.width() - left, LANE_H), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), LANE_NAMES[lane])
         p.end()
 
@@ -582,7 +581,7 @@ class GhostRows(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(GAP)
-        for name in ("Voice", "Leveling", "Subtitles", "Music"):
+        for name in ("Voice", "Leveling", "Subtitles"):
             row = QHBoxLayout()
             row.setSpacing(10)
             label = QLabel_(name)

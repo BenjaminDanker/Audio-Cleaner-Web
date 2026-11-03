@@ -34,7 +34,7 @@ from acw_common import analysis, captions, editor as editor_core, pipeline, reco
 from acw_common.ffmpeg import AUDIO_FORMATS, FFmpeg, MediaError, ProbeResult, VideoOut
 from acw_common.timeline import Timeline
 
-from . import copies, models, resources
+from . import copies, models, resources, speed
 
 log = logging.getLogger(__name__)
 
@@ -707,10 +707,13 @@ def process(
                 notice = "only one audio track, so no speaker echo was removed"
             echo_used = False
             segments, language = [], None
+            timings: dict = {}  # how long each step took: this computer's speed (speed.py)
             if want_subs:
+                began = time.monotonic()
                 segments, language = _transcribe(
                     ff, src, info, work, options, threads, report.span(0.0, transcribe_end), cancel, echo_free=x
                 )
+                timings["speech"] = [time.monotonic() - began, info.duration]
                 if keeper is not None:
                     keeper.transcript(segments, language, echo_used)
                 _check_cancel(cancel)
@@ -746,7 +749,8 @@ def process(
             inputs = editor_core.Inputs(x, sid, reference=ref, reference_id=editor_job.REFERENCE_ID if ref is not None else None)
             y, tl_done, decided, tl_notice, _ = editor_job.render_timeline(
                 tl_run, inputs, keeper.quiet(cache) if cache is not None else None, work=work, threads=threads, progress=report.span(decode_end, clean_end), cancel=cancel,
-                out=pipeline.output_buffer(x, work))
+                out=pipeline.output_buffer(x, work), timings=timings)
+            speed.learn(timings, threads)
             notice = "; ".join(filter(None, [notice, tl_notice]))
             echo_used = bool(tl_done.layers["echo"])
             rebuild = bool(tl_done.layers["rebuild"])

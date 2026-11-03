@@ -22,7 +22,7 @@ from PySide6.QtCore import QObject, Signal
 
 from acw_common.timeline import Timeline
 
-from .. import copies, editor_job, editor_session, engine, quick_look, redo, resources
+from .. import copies, editor_job, editor_session, engine, quick_look, redo, resources, speed
 from ..editor_model import STRENGTH_DB, EditModel
 from .history import Entry
 from .items import FileItem
@@ -755,21 +755,19 @@ class Doc(QObject):
         self.changed.emit()
 
     # ------------------------------------------------------------------------------------------------ what it takes
-    SPEECH_COST = 0.5  # seconds a second of speech takes to write down on an ordinary computer (a rough figure: Details says "about")
-
     def estimate(self) -> tuple[list[tuple[str, float]], float]:
-        """([(what, about how many seconds)], the total): what a run of the draft would do. Nothing is decoded to say it: the cost of each step
-        (editor_job.CPU_COSTS) times what it covers; a finished job's changes are quoted from the blocks it already has (`quote`)."""
+        """([(what, about how many seconds)], the total): what a run of the draft would take on this computer. Nothing is decoded to say it:
+        each step's time for what it covers, as this computer's runs measured it (speed.py); a finished job's changes are quoted from the
+        blocks it already has (`quote`)."""
         m = self.model
         if m is None or self.facts is None:
             return [], 0.0
-        cores = max(1.0, self.env.threads * editor_job.THREAD_EFFICIENCY)
         ch = min(max(self.facts.channels, 1), 2)
         rows: list[tuple[str, float]] = []
 
         def cost(step: str, covered: float) -> float:
-            fixed, per = editor_job.CPU_COSTS[step]
-            return (fixed + per * covered * ch) / cores if covered > 0 else 0.0
+            # (Voice rebuild runs once on the mix of a stereo recording whose sides are the same voice, as recordings of one voice are)
+            return speed.cost(step, covered * (1 if step == "rebuild" else ch)) if covered > 0 else 0.0
 
         def covered(layer: str, pred=lambda p: True) -> float:
             return sum(p.end - p.start for p in m.draft.layers[layer] if pred(p))
@@ -785,7 +783,7 @@ class Doc(QObject):
         if covered("leveling"):
             rows.append((f"Leveling · {say_clock(covered('leveling'))}", cost("leveling", covered("leveling"))))
         if self.subtitles != "off":
-            rows.append((f"Subtitles · {say_clock(self.seconds)}", self.SPEECH_COST * self.seconds))
+            rows.append((f"Subtitles · {say_clock(self.seconds)}", speed.cost("speech", self.seconds)))
         return rows, sum(s for _, s in rows)
 
     # ------------------------------------------------------------------------------------------------ output choices
