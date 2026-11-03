@@ -2,8 +2,12 @@
 place (no new window, no dialog), a run finishes on the same screen, a past job opens in it, and opening a long file or job never holds the window."""
 from __future__ import annotations
 
+import gc
+import sys
 import threading
 import time
+import traceback
+from collections import Counter
 
 import pytest
 from PySide6.QtCore import QPoint, QTimer
@@ -288,6 +292,56 @@ def test_a_long_file_shows_at_once_and_the_window_keeps_answering(window, tmp_pa
     assert fakes.calls[0] == "probe" and set(fakes.calls) == {"probe", "peaks", "decide"}  # (the waveform and Automatic are read side by side)
 
 
+class StallWatch:
+    """What to say when the window stalls: while the window's thread has not ticked for `quiet` seconds, a daemon thread notes (every 50 ms) the last
+    lines of that thread's stack, and a gc callback times every full (generation 2) collection."""
+
+    def __init__(self, last: list, quiet: float = 0.3) -> None:
+        self.last, self.quiet = last, quiet
+        self.main = threading.get_ident()  # (made on the window's thread)
+        self.stacks: Counter = Counter()
+        self.fulls: list[float] = []
+        self._began = 0.0
+        self._at = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _hook(self, phase: str, info: dict) -> None:
+        if info.get("generation") != 2:
+            return
+        if phase == "start":
+            self._at = time.perf_counter()
+        else:
+            self.fulls.append(time.perf_counter() - self._at)
+
+    def _run(self) -> None:
+        while not self._stop.wait(0.05):
+            if time.monotonic() - max(self.last[0], self._began) <= self.quiet:
+                continue
+            frame = sys._current_frames().get(self.main)
+            if frame is not None:
+                lines = "".join(traceback.format_stack(frame)).splitlines()
+                self.stacks[" | ".join(line.strip() for line in lines[-6:])] += 1
+
+    def start(self) -> None:
+        self._began = time.monotonic()
+        gc.callbacks.append(self._hook)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(2)
+        if self._hook in gc.callbacks:
+            gc.callbacks.remove(self._hook)
+
+    def report(self, wave_took: float, max_gap: float) -> str:
+        self.stop()
+        top = "".join(f"\n  x{n}: {stack}" for stack, n in self.stacks.most_common(3)) or f" (it never stood still for more than {self.quiet} s)"
+        return (f"waveform after {wave_took:.2f} s, longest gap {max_gap:.2f} s; full collections meanwhile: {len(self.fulls)}, longest "
+                f"{max(self.fulls, default=0.0):.2f} s; the window's thread during stalls:{top}")
+
+
 @pytest.mark.native
 def test_a_real_ten_minute_file_shows_its_waveform_in_seconds_and_the_window_keeps_answering(native_window, speech_wav, tmp_path):
     from conftest import bundled_ffmpeg, run_ffmpeg
@@ -305,16 +359,27 @@ def test_a_real_ten_minute_file_shows_its_waveform_in_seconds_and_the_window_kee
     timer = QTimer()
     timer.setInterval(10)
     timer.timeout.connect(tick)
-    began = time.monotonic()
-    w.add_paths([long])
-    assert time.monotonic() - began < 1.5  # (the editor shows at once: nothing is read on the window's thread)
-    timer.start()
-    shown = w.studio.stack.currentIndex() == 1 and w.studio.top.name.text() == "long.wav"
-    assert shown
-    doc = w.doc
-    assert wait_until(lambda: doc.wave == "ready", 90)
-    wave_took = time.monotonic() - began
-    assert wait_until(lambda: doc.applied and not doc.listening, 120)
-    timer.stop()
-    assert wave_took < 60 and max(gaps) < 1.5, (wave_took, max(gaps))  # (about 1 s and 0.1 s on a desktop machine; the margin is for CI runners)
-    assert len(doc.peaks) >= 1000 and doc.facts.duration == pytest.approx(600.0, abs=1) and w.studio.inspector.heading.text() == "0:00–10:00"
+    watch = StallWatch(last)
+    gc.collect()
+    gc.freeze()  # the leftovers of the earlier tests are not the app's heap: a full collection through them is not what this test is about
+    try:
+        began = time.monotonic()
+        w.add_paths([long])
+        assert time.monotonic() - began < 1.5  # (the editor shows at once: nothing is read on the window's thread)
+        timer.start()
+        watch.start()
+        shown = w.studio.stack.currentIndex() == 1 and w.studio.top.name.text() == "long.wav"
+        assert shown
+        doc = w.doc
+        assert wait_until(lambda: doc.wave == "ready", 90)
+        wave_took = time.monotonic() - began
+        assert wait_until(lambda: doc.applied and not doc.listening, 120)
+        timer.stop()
+        watch.stop()
+        # (about 1 s and 0.1 s on a desktop machine; the margin is for CI runners)
+        assert wave_took < 60 and max(gaps) < 1.5, watch.report(wave_took, max(gaps))
+        assert len(doc.peaks) >= 1000 and doc.facts.duration == pytest.approx(600.0, abs=1) and w.studio.inspector.heading.text() == "0:00–10:00"
+    finally:
+        timer.stop()
+        watch.stop()
+        gc.unfreeze()
