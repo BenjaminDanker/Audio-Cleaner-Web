@@ -333,13 +333,14 @@ class Inspector(QFrame):
             self.echo_card.set_auto(doc.auto_matches("echo"))
             # Leveling
             lv = m.level_of(a, b)
-            if lv == "on":
-                self.level.set_value(editor_job.loudness_key(m.loudness()))
+            loud = m.loudness_of(a, b) if lv == "on" else None
+            if lv == "on" and loud != "mixed":
+                self.level.set_value(editor_job.loudness_key(loud))
             elif lv == "off":
                 self.level.set_value("off")
             else:
-                self.level.clear()
-            self.level_card.set_mixed(lv == "mixed")
+                self.level.clear()  # off in some places, or leveled to different loudnesses
+            self.level_card.set_mixed(lv == "mixed" or loud == "mixed")
             self.level_card.set_auto(doc.auto_matches("leveling"))
             # Subtitles
             kind = doc.subtitles

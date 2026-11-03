@@ -36,10 +36,10 @@ def say_clock(seconds: float) -> str:
 
 
 def selection_title(sel: tuple[float, float] | None, seconds: float) -> str:
-    """"Whole file · 3:00" or "0:15–0:25 · 10 s" (the heading over the settings)."""
+    """The heading over the settings, just the range as on the website: "0:00–3:00" (the whole file) or "0:15–0:25"."""
     if sel is None or (sel[0] <= 0 and sel[1] >= seconds):
-        return f"Whole file · {say_clock(seconds)}"
-    return f"{say_clock(sel[0])}–{say_clock(sel[1])} · {len_text(sel[1] - sel[0])}"
+        return f"{say_clock(0)}–{say_clock(seconds)}"
+    return f"{say_clock(sel[0])}–{say_clock(sel[1])}"
 
 
 TIPS = {

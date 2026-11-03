@@ -276,6 +276,11 @@ class EditModel:
         on = self.switch_of("leveling", a, b)
         return "mixed" if on is None else "on" if on else "off"
 
+    def loudness_of(self, a: float, b: float):
+        """The loudness of the leveled parts in [a, b): one value (None keeps the level), or "mixed" when they differ."""
+        values = {p.settings["loudness_lufs"] for p in self.draft.layers["leveling"] if p.start < b - 1e-6 and p.end > a + 1e-6}
+        return "mixed" if len(values) > 1 else next(iter(values), self._loudness)
+
     def sections(self, layer: str) -> list[dict]:
         """The whole file as consecutive stretches of one layer: {"start", "end", "on", "label", "pending", "settings"}; the stretches the layer
         does not cover are "on": False. (The rows of the timeline.)"""
@@ -357,13 +362,12 @@ class EditModel:
         self._changed()
 
     def set_level(self, lufs: float | None, on: bool, a: float | None = None, b: float | None = None) -> None:
-        """Leveling on [a, b) at a loudness (every leveled part of the file gets it: it is one choice for the whole file), or Off."""
+        """Leveling on [a, b) at a loudness, or Off. Only [a, b) changes: each part can have its own loudness (as on the website);
+        the last one chosen is what Leveling turned on elsewhere starts with."""
         a, b = self._range(a, b)
         self._remember()
         if on:
             self._loudness = lufs
-            for p in list(self.draft.layers["leveling"]):
-                self.draft.paint("leveling", p.start, p.end, {"loudness_lufs": lufs})
             self.draft.paint("leveling", a, b, {"loudness_lufs": lufs})
         else:
             self.draft.erase("leveling", a, b)
