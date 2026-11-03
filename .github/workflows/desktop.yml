@@ -286,6 +286,7 @@ jobs:
       - name: Frozen selftest (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        timeout-minutes: 8  # (well under a minute; a hang fails here instead of holding the run)
         run: |
           # The exe is windowed: without a console it writes to audio-cleaner-cli.log in the temp folder.
           # --gui also builds the window, the preview and the About box, which finds a missing Qt plugin.
@@ -298,6 +299,7 @@ jobs:
 
       - name: Frozen selftest and a cleaned file under a non-ASCII profile name (Windows)
         if: runner.os == 'Windows'
+        timeout-minutes: 8
         shell: pwsh
         run: |
           # Profile folders with accents or CJK letters are common; the native libraries must cope with them.
@@ -378,34 +380,61 @@ jobs:
       - name: Install, start and uninstall the installer (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        timeout-minutes: 12  # (it takes under two minutes; each program below has its own, shorter limit)
         run: |
           # A silent install skips the model download page, so this checks the installer itself: the files, the
           # installed program, the uninstaller. Models are never downloaded here.
+          # Every program gets a time limit: once a silent setup hung on a runner and the step waited until the run was
+          # cancelled, 10 minutes later. On a limit the log and what was still running are shown, the programs are
+          # stopped, and a setup is tried once more (an install that hangs again is a real failure).
+          function Invoke-Limited([string]$file, [string[]]$arguments, [int]$seconds, [string]$what, [string]$logFile = '') {
+            $p = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
+            $null = $p.Handle  # (kept now, or PowerShell can lose the exit code of a process it did not wait for itself)
+            if ($p.WaitForExit($seconds * 1000)) { return $p.ExitCode }
+            Write-Host "::warning::$what did not finish in $seconds s"
+            if ($logFile -and (Test-Path $logFile)) { Get-Content $logFile -Tail 80 | Write-Host }  # (to the screen: a function's output is what it returns)
+            Get-Process | Where-Object { $_.ProcessName -like 'AudioCleaner*' -or $_.ProcessName -like 'unins*' } |
+              Format-Table Id, ProcessName, StartTime -AutoSize | Out-String | Write-Host
+            Get-Process | Where-Object { $_.ProcessName -like 'AudioCleaner*' -or $_.ProcessName -like 'unins*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+            return $null
+          }
+          function Invoke-Setup([string[]]$arguments, [string]$logFile, [string]$what) {
+            foreach ($try in 1, 2) {
+              $code = Invoke-Limited $setup ($arguments + "/LOG=$logFile") 240 "$what (try $try)" $logFile
+              if ($null -ne $code) { return $code }
+            }
+            throw "$what hung twice"
+          }
           $dir = Join-Path $env:RUNNER_TEMP 'acw-installed'
           $setup = Join-Path $env:GITHUB_WORKSPACE 'out\AudioCleaner-Setup-x64.exe'
-          $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=$dir", "/LOG=$env:RUNNER_TEMP\setup.log" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\setup.log"; throw "setup exited with code $($p.ExitCode)" }
+          $silent = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER'
+          $code = Invoke-Setup ($silent + "/DIR=$dir") "$env:RUNNER_TEMP\setup.log" 'setup'
+          if ($code -ne 0) { Get-Content "$env:RUNNER_TEMP\setup.log"; throw "setup exited with code $code" }
           $log = Join-Path $env:TEMP 'audio-cleaner-cli.log'
           Remove-Item $log -ErrorAction SilentlyContinue
-          $p = Start-Process -FilePath "$dir\AudioCleaner.exe" -ArgumentList '--selftest', '--gui' -Wait -PassThru
+          $code = Invoke-Limited "$dir\AudioCleaner.exe" @('--selftest', '--gui') 180 "the installed program's selftest" $log
           if (Test-Path $log) { Get-Content $log }
-          if ($p.ExitCode -ne 0) { throw "the installed program's selftest exited with code $($p.ExitCode)" }
+          if ($null -eq $code) { throw "the installed program's selftest hung" }
+          if ($code -ne 0) { throw "the installed program's selftest exited with code $code" }
           # Running setup again is an in-place update: no /DIR this time (it reuses the folder), a file that an older
           # version would have left in _internal is gone afterwards, and the models folder is untouched.
           Set-Content "$dir\_internal\left-by-an-older-version.txt" 'x'
           New-Item -ItemType Directory -Force -Path "$dir\models\keep" | Out-Null
           Set-Content "$dir\models\keep\downloaded.bin" 'x'
-          $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/LOG=$env:RUNNER_TEMP\setup2.log" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\setup2.log"; throw "the second setup exited with code $($p.ExitCode)" }
+          $code = Invoke-Setup $silent "$env:RUNNER_TEMP\setup2.log" 'the second setup'
+          if ($code -ne 0) { Get-Content "$env:RUNNER_TEMP\setup2.log"; throw "the second setup exited with code $code" }
           if (Test-Path "$dir\_internal\left-by-an-older-version.txt") { throw 'an update left a file of the older version behind' }
           if (-not (Test-Path "$dir\models\keep\downloaded.bin")) { throw 'an update removed the models folder' }
           Remove-Item $log -ErrorAction SilentlyContinue
-          $p = Start-Process -FilePath "$dir\AudioCleaner.exe" -ArgumentList '--selftest', '--gui' -Wait -PassThru
+          $code = Invoke-Limited "$dir\AudioCleaner.exe" @('--selftest', '--gui') 180 "the updated program's selftest" $log
           if (Test-Path $log) { Get-Content $log }
-          if ($p.ExitCode -ne 0) { throw "the updated program's selftest exited with code $($p.ExitCode)" }
-          $p = Start-Process -FilePath "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "the uninstaller exited with code $($p.ExitCode)" }
-          Start-Sleep -Seconds 3
+          if ($null -eq $code) { throw "the updated program's selftest hung" }
+          if ($code -ne 0) { throw "the updated program's selftest exited with code $code" }
+          $code = Invoke-Limited "$dir\unins000.exe" @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') 180 'the uninstaller'
+          if ($null -eq $code) { throw 'the uninstaller hung' }
+          if ($code -ne 0) { throw "the uninstaller exited with code $code" }
+          # (the uninstaller hands over to a copy of itself in the temp folder and exits: wait for the program to be gone)
+          foreach ($i in 1..60) { if (-not (Test-Path "$dir\AudioCleaner.exe")) { break }; Start-Sleep -Seconds 1 }
           if (Test-Path "$dir\AudioCleaner.exe") { throw 'the uninstaller left the program behind' }
 
       - name: Upload installer
@@ -419,6 +448,7 @@ jobs:
       # ----- macOS ------------------------------------------------------------------------------
       - name: Frozen selftest and version (macOS)
         if: runner.os == 'macOS'
+        timeout-minutes: 8
         run: |
           exe="dist/Audio Cleaner.app/Contents/MacOS/AudioCleaner"
           "$exe" --version
