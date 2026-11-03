@@ -184,19 +184,21 @@ await check('the editor of a finished job: the real waveform and the heard line,
   if (!(await page.getByTestId('heard-line').locator('path').getAttribute('d'))) throw new Error('no heard line');
   const names = (await page.locator('[data-testid^=track-]').evaluateAll((els) => els.map((e) => e.dataset.testid))).join('|');
   if (names !== 'track-voice|track-level|track-subs') throw new Error('tracks: ' + names);
+  const rowNames = (await page.locator('.studio .row .lab').allInnerTexts()).map((t) => t.trim()).filter(Boolean).join('|');
+  if (rowNames !== 'Voice|Leveling|Subtitles' || (await page.locator('.studio .row.na').count()) || /Music|Coming/.test(await studio(page).innerText())) throw new Error('the rows: ' + rowNames + ' (there is no Music row)');
   const T = await waveSeconds();
   near(T, 48.4, 0.3, 'length');
   if ((await say('voice')) !== 'Max 0:00–0:48' || (await say('level')) !== 'YouTube 0:00–0:48' || (await say('subs')) !== 'Off 0:00–0:48') throw new Error(`${await say('voice')} / ${await say('level')} / ${await say('subs')}`);
   if ((await page.getByTestId('hearing').innerText()) !== 'Hearing: everything') throw new Error('hearing: ' + await page.getByTestId('hearing').innerText());
-  if ((await selectionTitle(page)) !== 'Whole file · 0:48') throw new Error('title ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:00–0:48') throw new Error('title ' + await selectionTitle(page));
   await drag(10, 20);
   await page.getByRole('link', { name: /Available balance/ }).click();
   await page.waitForURL(/\/app\/billing$/);
   await page.goBack();
   await waitEditor();
-  if ((await selectionTitle(page)) !== '0:10–0:20 · 10 s') throw new Error('the chosen part was lost: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:10–0:20') throw new Error('the chosen part was lost: ' + await selectionTitle(page));
   await page.keyboard.press('Escape');
-  if ((await selectionTitle(page)) !== 'Whole file · 0:48') throw new Error('Escape did not clear the part: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:00–0:48') throw new Error('Escape did not clear the part: ' + await selectionTitle(page));
   await shot('editor-open');
   return 'waveform, three tracks, part kept across a visit to Billing';
 });
@@ -206,7 +208,7 @@ await check('the editor of a finished job: the real waveform and the heard line,
 await check('a part is chosen by dragging across the waveform and by its handles (mouse and arrow keys) and nothing else (the settings have no Start/End card: no steppers, Use playhead or Play part); a click sets the playhead and Play plays from it, Select all and Escape give the whole file back', async () => {
   const T = await waveSeconds();
   await drag(20, 30);
-  if ((await selectionTitle(page)) !== '0:20–0:30 · 10 s') throw new Error('drag: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:20–0:30') throw new Error('drag: ' + await selectionTitle(page));
   for (const id of ['range-box', 'time-s', 'time-e', 'nudge-s-minus', 'nudge-s-plus', 'nudge-e-minus', 'nudge-e-plus', 'use-playhead-s', 'use-playhead-e', 'play-part']) if (await page.getByTestId(id).count()) throw new Error(`${id} is back in the settings`);
   // the handles, with the mouse
   const box = await page.getByTestId('waveform').boundingBox();
@@ -216,25 +218,25 @@ await check('a part is chosen by dragging across the waveform and by its handles
   await page.mouse.down();
   await page.mouse.move(x(36), end.y + end.height / 2, { steps: 6 });
   await page.mouse.up();
-  if ((await selectionTitle(page)) !== '0:20–0:36 · 16 s') throw new Error('handle end: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:20–0:36') throw new Error('handle end: ' + await selectionTitle(page));
   const start = await page.getByTestId('handle-start').boundingBox();
   await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
   await page.mouse.down();
   await page.mouse.move(x(14), start.y + start.height / 2, { steps: 6 });
   await page.mouse.up();
-  if ((await selectionTitle(page)) !== '0:14–0:36 · 22 s') throw new Error('handle start: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:14–0:36') throw new Error('handle start: ' + await selectionTitle(page));
   // ... and with the arrow keys (a second at a time)
   await page.getByTestId('handle-end').focus();
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowLeft');
-  if ((await selectionTitle(page)) !== '0:14–0:37 · 23 s') throw new Error('handle end by keys: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:14–0:37') throw new Error('handle end by keys: ' + await selectionTitle(page));
   await page.getByTestId('handle-start').focus();
   await page.keyboard.press('ArrowRight');
-  if ((await selectionTitle(page)) !== '0:15–0:37 · 22 s') throw new Error('handle start by keys: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:15–0:37') throw new Error('handle start by keys: ' + await selectionTitle(page));
   // a new part by a drag elsewhere (no stepper is needed to move it)
   await drag(8, 11);
-  if ((await selectionTitle(page)) !== '0:08–0:11 · 3 s') throw new Error('a drag elsewhere: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:08–0:11') throw new Error('a drag elsewhere: ' + await selectionTitle(page));
   // a click sets the playhead; Play plays from there
   await seekTo(8);
   near(await timeNow(), 8, 0.7, 'playhead after a click');
@@ -245,11 +247,11 @@ await check('a part is chosen by dragging across the waveform and by its handles
   await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.dataset.playing === 'no', null, { timeout: 20000 });
   // Select all, and Escape
   await page.getByTestId('select-all').click();
-  if ((await selectionTitle(page)) !== 'Whole file · 0:48' || (await page.getByTestId('select-all').getAttribute('aria-pressed')) !== 'true') throw new Error('select all: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:00–0:48' || (await page.getByTestId('select-all').getAttribute('aria-pressed')) !== 'true') throw new Error('select all: ' + await selectionTitle(page));
   if ((await page.getByTestId('handle-start').count()) === 0 || (await page.getByTestId('handle-end').count()) === 0) throw new Error('the whole file has its handles at the ends');
   await drag(20, 30);
   await page.keyboard.press('Escape');
-  if ((await selectionTitle(page)) !== 'Whole file · 0:48') throw new Error('Escape: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:00–0:48') throw new Error('Escape: ' + await selectionTitle(page));
   return 'drag, handles (mouse, keys), a new drag, playhead and Play, Select all, Escape; no Start/End card';
 });
 
@@ -264,7 +266,7 @@ await check('the merge rules on a file that has not run yet: a change cuts at th
   if ((await say('voice')) !== 'Max 0:00–0:48' || (await say('level')) !== 'YouTube 0:00–0:48') throw new Error(`${await say('voice')} / ${await say('level')}`);
   // a change applies to the part and cuts at its edges; the other tracks stay as they are
   await drag(15, 25);
-  if ((await selectionTitle(page)) !== '0:15–0:25 · 10 s') throw new Error('the part was not chosen: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:15–0:25') throw new Error('the part was not chosen: ' + await selectionTitle(page));
   await setStrength(page, 'strong');
   if ((await say('voice')) !== 'Max 0:00–0:15 | Strong 0:15–0:25 | Max 0:25–0:48') throw new Error('cut: ' + await say('voice'));
   if ((await only('level')) !== 1 || (await only('subs')) !== 1) throw new Error('another track was cut too');
@@ -284,7 +286,7 @@ await check('the merge rules on a file that has not run yet: a change cuts at th
   await page.getByTestId('split').click();
   const v = await sections('voice');
   if (v.length !== 2 || !v[1].hard || (await only('level')) !== 2 || (await only('subs')) !== 2) throw new Error('split: ' + JSON.stringify(v));
-  if ((await selectionTitle(page)) !== '0:30–0:48 · 18 s') throw new Error('the piece after the split is chosen: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:30–0:48') throw new Error('the piece after the split is chosen: ' + await selectionTitle(page));
   await setStrength(page, 'strong');
   const after = await sections('voice');
   if ((await say('voice')) !== 'Max 0:00–0:30 | Strong 0:30–0:48' || after.some((x) => x.hard) || after.length !== 2) throw new Error('change at a split: ' + await say('voice'));
@@ -301,7 +303,7 @@ await check('the merge rules on a file that has not run yet: a change cuts at th
   await page.keyboard.down('Shift');
   await page.locator('[data-testid=track-voice] [data-testid=section]').nth(1).click();
   await page.keyboard.up('Shift');
-  if ((await selectionTitle(page)) !== '0:20–0:25 · 5 s') throw new Error('Shift-click took the range out: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:20–0:25') throw new Error('Shift-click took the range out: ' + await selectionTitle(page));
   await page.keyboard.down('Shift');
   await page.locator('[data-testid=track-voice] [data-testid=section]').nth(1).click();
   await page.keyboard.up('Shift');
@@ -352,14 +354,14 @@ await check('painting parts on a finished job: a new part replaces what it cover
   await shot('editor-parts');
   // the rows
   await page.locator('[data-testid=track-voice] [data-testid=section]').nth(2).click();
-  if ((await selectionTitle(page)) !== '0:15–0:25 · 10 s') throw new Error('a click on a section: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:15–0:25') throw new Error('a click on a section: ' + await selectionTitle(page));
   await dragOnRow('level', 30, 39);
-  const m = /^0:(\d\d)–0:(\d\d) · (\d+) s$/.exec(await selectionTitle(page));
+  const m = /^0:(\d\d)–0:(\d\d)$/.exec(await selectionTitle(page));
   if (!m) throw new Error('drag across a row: ' + await selectionTitle(page));
   near(+m[1], 30, 1, 'drag across a row: start');
   near(+m[2], 39, 1, 'drag across a row: end');
   await page.locator('[data-testid=track-subs] [data-testid=section]').first().click();
-  if ((await selectionTitle(page)) !== 'Whole file · 0:48') throw new Error('the whole-file section of another track: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:00–0:48') throw new Error('the whole-file section of another track: ' + await selectionTitle(page));
   return texts;
 });
 
@@ -431,7 +433,7 @@ await check('the price is worked out here at once (no request for it): Save chan
   await shot('editor-price');
   // the next change: Leveling off for the Gentle part makes the price smaller
   await drag(15, 25);
-  if ((await selectionTitle(page)) !== '0:15–0:25 · 10 s') throw new Error('the part was not chosen: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:15–0:25') throw new Error('the part was not chosen: ' + await selectionTitle(page));
   await setLeveling(page, 'off');
   if ((await say('level')) !== 'YouTube 0:00–0:15 | Off 0:15–0:25 | YouTube 0:25–0:48') throw new Error('Leveling off for the part: ' + await say('level'));
   const second = await savePrice();
@@ -497,7 +499,7 @@ await check('a job made through the API with whole-file options opens in the edi
   const before = requests.length;
   await openJob(id);
   if ((await say('voice')) !== 'Strong 0:00–0:11') throw new Error('Voice: ' + await say('voice'));
-  if (!/^(YouTube|Podcast|Broadcast|Keep|\-?\d+ LUFS) 0:00–0:11$/.test(await say('level'))) throw new Error('Leveling: ' + await say('level'));
+  if (!/^(YouTube|Podcast|Broadcast|Even|\-?\d+ LUFS) 0:00–0:11$/.test(await say('level'))) throw new Error('Leveling: ' + await say('level'));
   if (await page.getByTestId('save-changes').count() || (await studio(page).getAttribute('data-changed')) !== 'no') throw new Error('changes on a job nobody changed');
   await seekTo(5);
   near((await gains()).noise, 0.99, 0.002, 'Strong: noise removal');
@@ -539,13 +541,13 @@ p = jobs.update_params(${JSON.stringify(J2.id)}, edit={**json.loads(__import__("
   if (labels.join('|') !== 'Is noisier, 0:02 to 0:05|Has noise that needs a stronger setting, needs the other noise remover, 0:05 to 0:07|Sounds distorted here (clipped), 0:07 to 0:09') throw new Error('pins: ' + labels.join('|'));
   // the chip goes to the next suggestion and chooses its part; the card is in the inspector
   await chip.click();
-  if ((await selectionTitle(page)) !== '0:02–0:05 · 3 s') throw new Error('the chip did not choose the first part: ' + await selectionTitle(page));
+  if ((await selectionTitle(page)) !== '0:02–0:05') throw new Error('the chip did not choose the first part: ' + await selectionTitle(page));
   const card = page.getByTestId('sg-card');
   const t0 = (await card.innerText()).replace(/\s+/g, ' ');
   if (!/Is noisier · Strong suggested/.test(t0)) throw new Error('first card: ' + t0);
   await page.getByTestId('pin').nth(2).click();
   const t2 = (await card.innerText()).replace(/\s+/g, ' ');
-  if (!/Sounds distorted here \(clipped\) · Voice rebuild suggested/.test(t2) || (await selectionTitle(page)) !== '0:07–0:09 · 2 s') throw new Error('third card: ' + t2);
+  if (!/Sounds distorted here \(clipped\) · Voice rebuild suggested/.test(t2) || (await selectionTitle(page)) !== '0:07–0:09') throw new Error('third card: ' + t2);
   await shot('editor-suggestions');
   // Apply paints the part (and the pin is done); the chip counts what is left
   await page.getByTestId('pin').nth(0).click();
@@ -677,6 +679,47 @@ await check('the start screen with parts: every price is worked out here from th
   return `${startWhole} -> ${startNow}; made with parts ${strengths}`;
 });
 
+/** What the settings say now: Voice (off | noise | rebuild), the kind of noise removal and its strength, Leveling, the subtitles' quality, the translation chips. */
+const choices = () => page.evaluate(() => {
+  const pressed = (act) => [...document.querySelectorAll(`.studio button[data-act=${act}]`)].find((b) => b.getAttribute('aria-pressed') === 'true')?.dataset.v;
+  const voice = ['off', 'noise', 'rebuild'].find((m) => document.querySelector(`[data-testid=voice-${m}]`)?.getAttribute('aria-checked') === 'true');
+  return { voice, kind: pressed('v-kind'), str: pressed('v-str'), level: pressed('l-lvl'), subs: pressed('s-q'), chips: document.querySelectorAll('[data-testid=translation-chip]').length };
+});
+
+await check('Free only (beside the settings heading): on the whole file every paid choice becomes its free one (Standard noise removal at Max the Free one at Strong, Leveling off, Standard subtitles with a translation Free with none), Start is Free, the button is then off, and Undo puts every choice back; a part that is chosen stays chosen', async () => {
+  await gotoApp('/app');
+  await dropFile(page, join(FILES, 'speech-long.wav'));
+  await setKind(page, 'paid');
+  await setStrength(page, 'max');
+  await setLeveling(page, 'podcast');
+  await setSubs(page, 'standard');
+  await page.getByTestId('translate-add').selectOption('es');
+  const btn = page.getByTestId('free-only');
+  if ((await btn.innerText()).trim() !== 'Free only' || !(await btn.isEnabled())) throw new Error('the button: ' + (await btn.innerText()) + ', enabled ' + await btn.isEnabled());
+  if (!/^Start · \$/.test(await mainButton(page))) throw new Error('Start before: ' + await mainButton(page));
+  const paid = await choices();
+  if (JSON.stringify(paid) !== JSON.stringify({ voice: 'noise', kind: 'paid', str: '4', level: '1', subs: '2', chips: 1 })) throw new Error('the paid choices: ' + JSON.stringify(paid));
+  await btn.click();
+  const free = await choices();
+  if (JSON.stringify(free) !== JSON.stringify({ voice: 'noise', kind: 'free', str: '3', level: '0', subs: '1', chips: 0 })) throw new Error('after Free only: ' + JSON.stringify(free));
+  await page.waitForFunction(() => document.querySelector('[data-testid=start]')?.textContent.trim() === 'Start · Free', null, { timeout: 5000 });
+  if (!(await btn.isDisabled())) throw new Error('Free only is still on when everything is free');
+  if ((await selectionTitle(page)) !== '0:00–0:48') throw new Error('title ' + await selectionTitle(page));
+  await page.getByTestId('undo').click();
+  const back = await choices();
+  if (JSON.stringify(back) !== JSON.stringify(paid)) throw new Error('Undo: ' + JSON.stringify(back) + ' vs ' + JSON.stringify(paid));
+  if (!(await btn.isEnabled()) || !/^Start · \$/.test(await mainButton(page))) throw new Error('after Undo: ' + await mainButton(page));
+  // with a part chosen it is still for the whole file, and the part stays chosen
+  await drag(10, 20);
+  await btn.click();
+  if ((await selectionTitle(page)) !== '0:10–0:20') throw new Error('the part was lost: ' + await selectionTitle(page));
+  await page.getByTestId('select-all').click();
+  const whole = await choices();
+  if (whole.voice !== 'noise' || whole.kind !== 'free' || whole.level !== '0' || whole.subs !== '1' || whole.str !== '3' || !(await btn.isDisabled())) throw new Error('whole file after Free only on a part: ' + JSON.stringify(whole));
+  if ((await say('voice')) !== 'Free · Strong 0:00–0:48') throw new Error('voice row: ' + await say('voice'));
+  return `${JSON.stringify(paid)} -> ${JSON.stringify(free)}`;
+});
+
 await check('Voice Off for the whole file and noise removal on one part is only that part: nothing chosen stops Start with the plain note, the timeline holds only the part, and the price is smaller than the whole file\'s', async () => {
   await gotoApp('/app');
   await dropFile(page, join(FILES, 'speech-long.wav'));
@@ -765,7 +808,7 @@ await check('looking can be canceled, and a file over 30 minutes shows no lookin
   for (const id of ['sg-unavailable', 'sg-chip', 'sg-card', 'sg-error']) if (await page.getByTestId(id).count()) throw new Error(`${id} on a file that is not looked at`);
   if (/Suggestions appear after the first run/.test(await page.locator('main').innerText())) throw new Error('the old line about suggestions is back');
   await drag(600, 700);
-  if (!/^10:00–11:40 · 1 min 40 s$/.test(await selectionTitle(page))) throw new Error('choosing a part by hand: ' + await selectionTitle(page));
+  if (!/^10:00–11:40$/.test(await selectionTitle(page))) throw new Error('choosing a part by hand: ' + await selectionTitle(page));
   return 'canceled; over 30 minutes: not looked at, no line';
 });
 
@@ -801,7 +844,7 @@ for (const scheme of ['light', 'dark']) {
       // a tap on a section chooses exactly it and opens the sheet
       const gentle = p.locator('[data-testid=track-voice] [data-testid=section]').nth(2);
       await tap(gentle);
-      if ((await title()) !== '0:15–0:25 · 10 s' || (await insp.getAttribute('data-sheet')) !== 'open') throw new Error(`tap on a section: "${await title()}", sheet ${await insp.getAttribute('data-sheet')}`);
+      if ((await title()) !== '0:15–0:25' || (await insp.getAttribute('data-sheet')) !== 'open') throw new Error(`tap on a section: "${await title()}", sheet ${await insp.getAttribute('data-sheet')}`);
       await wide('with a part chosen');
       const geo = await p.evaluate(() => {
         const h = document.querySelector('[data-testid=inspector]'); const c = document.querySelector('[data-testid=bar]');
@@ -813,7 +856,7 @@ for (const scheme of ['light', 'dark']) {
       if (!(geo.hostBottom >= geo.h - 16) || !(geo.hostBottom <= geo.h) || !(geo.hostTop > geo.h * 0.2)) throw new Error('the sheet is not at the bottom of the screen: ' + JSON.stringify(geo));
       // the sheet folds with a tap on its title (the sections are behind it while it is open), the part stays
       await tap(p.locator('.studio .ih-main'));
-      if ((await insp.getAttribute('data-sheet')) !== 'min' || (await title()) !== '0:15–0:25 · 10 s') throw new Error('the sheet did not fold: ' + await insp.getAttribute('data-sheet'));
+      if ((await insp.getAttribute('data-sheet')) !== 'min' || (await title()) !== '0:15–0:25') throw new Error('the sheet did not fold: ' + await insp.getAttribute('data-sheet'));
       // a long press adds a range (Select more switches on); with Select more on a tap adds a range and a tap on a chosen range takes it out
       const sec = (i) => p.locator('[data-testid=track-voice] [data-testid=section]').nth(i);
       const c1 = await centre(sec(0));
@@ -823,17 +866,17 @@ for (const scheme of ['light', 'dark']) {
       await p.waitForTimeout(250);
       if ((await p.getByTestId('select-more').getAttribute('aria-pressed')) !== 'true' || (await title()) !== '2 ranges · 0:20 total') throw new Error(`long press: "${await title()}", Select more ${await p.getByTestId('select-more').getAttribute('aria-pressed')}`);
       await tap(sec(1));
-      if ((await title()) !== '0:00–0:25 · 25 s') throw new Error('Select more, a tap adds a range (it joins its neighbours): ' + await title());
+      if ((await title()) !== '0:00–0:25') throw new Error('Select more, a tap adds a range (it joins its neighbours): ' + await title());
       await tap(sec(1));
       if ((await title()) !== '2 ranges · 0:20 total') throw new Error('Select more, a tap on a chosen range takes it out: ' + await title());
       await tap(p.getByTestId('select-more'));
       if ((await p.getByTestId('select-more').getAttribute('aria-pressed')) === 'true') throw new Error('Select more stays on');
       await tap(p.getByTestId('select-all'));
-      if ((await title()) !== 'Whole file · 0:48') throw new Error('Select all: ' + await title());
+      if ((await title()) !== '0:00–0:48') throw new Error('Select all: ' + await title());
       await wide('after Select all');
       // a change in the sheet, with a finger: the price follows
       await tap(sec(2));
-      if ((await title()) !== '0:15–0:25 · 10 s') throw new Error('a tap on a section after Select more: ' + await title());
+      if ((await title()) !== '0:15–0:25') throw new Error('a tap on a section after Select more: ' + await title());
       await tap(p.locator('.studio button[data-act=v-str][data-v="3"]'));
       if ((await say('voice', p)) !== 'Max 0:00–0:10 | Strong 0:10–0:25 | Max 0:25–0:48') throw new Error('voice after a tap on Strong (it joins its neighbour): ' + await say('voice', p));
       await p.waitForFunction(() => /Save changes · /.test(document.querySelector('[data-testid=save-changes]')?.textContent || ''), null, { timeout: 15000 });
@@ -841,11 +884,11 @@ for (const scheme of ['light', 'dark']) {
       await shot(`phone-${scheme}-sheet`, p);
       // the sheet folds with a tap on its title, the part stays
       await tap(p.locator('.studio .ih-main'));
-      if ((await insp.getAttribute('data-sheet')) !== 'min' || (await title()) !== '0:15–0:25 · 10 s') throw new Error('the sheet did not fold: ' + await insp.getAttribute('data-sheet'));
+      if ((await insp.getAttribute('data-sheet')) !== 'min' || (await title()) !== '0:15–0:25') throw new Error('the sheet did not fold: ' + await insp.getAttribute('data-sheet'));
       await wide('with the sheet folded');
       // a finger moves a handle of the part
       await tap(sec(1));
-      if ((await title()) !== '0:10–0:25 · 15 s') throw new Error('a tap on the joined section: ' + await title());
+      if ((await title()) !== '0:10–0:25') throw new Error('a tap on the joined section: ' + await title());
       // the sheet is open and covers the lower half: scroll the page until the handle is above it
       await p.evaluate(() => window.scrollBy(0, Math.max(0, document.querySelector('[data-testid=handle-end]').getBoundingClientRect().top - 120)));
       await p.waitForTimeout(150);
@@ -877,7 +920,7 @@ for (const scheme of ['light', 'dark']) {
       await touch('touchEnd');
       await p.waitForTimeout(250);
       await tap(p.getByTestId('split'));
-      if (!/^0:0[5-6]–0:11 · \d s$/.test(await title()) || (await p.getByTestId('inspector').getAttribute('data-sheet')) !== 'open') throw new Error('split on the phone: ' + await title());
+      if (!/^0:0[5-6]–0:11$/.test(await title()) || (await p.getByTestId('inspector').getAttribute('data-sheet')) !== 'open') throw new Error('split on the phone: ' + await title());
       await wide('start screen with a part');
       await shot(`phone-${scheme}-start`, p);
       return 'no sideways scroll, sheet and bar placed, taps, long press, Select more, handle by finger';

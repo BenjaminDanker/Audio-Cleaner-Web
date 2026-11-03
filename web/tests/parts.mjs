@@ -74,7 +74,7 @@ await check('a job with a Free noise part and Free subtitles: create says what t
 await check('a new Free part on the finished job: Save changes asks for the price, process answers 409 needs_uploads, the page uploads exactly that range and calls process again; the job runs and is done again', async () => {
   await dragRange(page, 8, 10);
   const title = await page.locator('.studio .js-title').innerText();
-  if (!/^0:08–0:10 · 2 s$/.test(title)) throw new Error('the part was not chosen on the finished job: ' + title);
+  if (!/^0:08–0:10$/.test(title)) throw new Error('the part was not chosen on the finished job: ' + title);
   await setKind(page, 'free');
   await page.getByTestId('save-changes').waitFor({ timeout: 15000 });
   await page.waitForFunction(() => /Save changes ·/.test(document.querySelector('[data-testid=save-changes]')?.textContent || ''), null, { timeout: 15000 });

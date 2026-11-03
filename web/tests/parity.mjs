@@ -8,7 +8,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   BASE, FFMPEG, FILES, admin, apiCall, check, dragRange, dropFile, launch, mainButton, pick, selectionTitle, setAuto, setKind, setLeveling, setStrength, setSubs, setVoice,
-  settleRecommendation, signIn, summary, waitResult,
+  settleRecommendation, signIn, summary, waitResult, typeName,
 } from './helpers.mjs';
 
 const EMAIL = `parity-${Date.now()}@example.com`;
@@ -427,7 +427,7 @@ await check('Voice: "Good to know" lines (OBS filter, YouTube Create, captions, 
 await check('Leveling: Podcast −16 / YouTube −14 / Broadcast −23 LUFS: the buttons say the names, the tooltips say the LUFS, the timeline sent has the numbers', async () => {
   await open('noisy.wav');
   const names = await page.locator('.studio .bseg.lv button').allInnerTexts();
-  if (names.join() !== 'Off,Podcast,YouTube,Broadcast,Keep') throw new Error('names ' + names);
+  if (names.join() !== 'Off,Podcast,YouTube,Broadcast,Even') throw new Error('names ' + names);
   has(await tipOf(page.locator('.studio button[data-act=l-lvl][data-v="1"]')), /−16 LUFS/);
   has(await tipOf(page.locator('.studio button[data-act=l-lvl][data-v="2"]')), /−14 LUFS/);
   has(await tipOf(page.locator('.studio button[data-act=l-lvl][data-v="3"]')), /−23 LUFS/);
@@ -446,12 +446,24 @@ await check('Leveling: Podcast −16 / YouTube −14 / Broadcast −23 LUFS: the
   return '-16, -14, -23 in the timeline';
 });
 
-await check('Leveling: Keep original loudness is the fifth option, Keep (the timeline says null)', async () => {
+await check('Leveling: the fifth option is Even, which keeps the overall loudness (the timeline says null)', async () => {
   await open('noisy.wav');
-  has(await tipOf(page.locator('.studio button[data-act=l-lvl][data-v="4"]')), /^Keep loudness: evens out the volume but keeps the overall loudness as recorded\.$/);
+  has(await tipOf(page.locator('.studio button[data-act=l-lvl][data-v="4"]')), /^Even: evens out the volume but keeps the overall loudness as recorded\.$/);
   await setLeveling(page, 'keep');
-  has((await sectionTexts('level')).join(' '), /Keep/);
-  return 'Keep';
+  has((await sectionTexts('level')).join(' '), /Even/);
+  return 'Even';
+});
+
+await check('Leveling: "All the options" calls the fifth option Even and says what it does (it keeps the overall loudness); there is no Keep any more', async () => {
+  await open('noisy.wav');
+  await page.getByTestId('info-open').click();
+  const modal = await page.getByTestId('info-modal').innerText();
+  has(modal, /Even\s+Evens out the volume but keeps the overall loudness as recorded/);
+  if (/Keep loudness|Keep original loudness|\bKeep\s+Evens out/.test(modal)) throw new Error('the old name is in the window');
+  await page.getByTestId('info-close').click();
+  const labels = (await page.locator('.studio .bseg.lv button').allInnerTexts()).join();
+  if (/Keep/.test(labels)) throw new Error('the old name is on the buttons: ' + labels);
+  return 'Even';
 });
 
 await check('Leveling: Leveling on its own, without noise removal, makes a paid job whose timeline has Leveling alone, at the price the server gives for it (worked out here)', async () => {
@@ -564,10 +576,10 @@ await check('Subtitles: mixing browser and server work (Standard subtitles with 
 
 await check('Choosing parts: the whole file is the selection by default, drawn as one with its handles; changing one part leaves the rest', async () => {
   await open('speech.wav');
-  if (!/^Whole file · 0:1[01]$/.test(await selectionTitle(page))) throw new Error(await selectionTitle(page));
+  if (!/^0:00–0:1[01]$/.test(await selectionTitle(page))) throw new Error(await selectionTitle(page));
   if (!(await page.getByTestId('handle-start').isVisible()) || !(await page.getByTestId('handle-end').isVisible())) throw new Error('handles are not drawn on the whole file');
   await dragRange(page, 2, 5);
-  has(await selectionTitle(page), /^0:02–0:05 · 3 s$/);
+  has(await selectionTitle(page), /^0:02–0:05$/);
   await setStrength(page, 'max');
   const v = await sectionTexts('voice');
   if (v.length !== 3 || v[1] !== 'Max' || v[0] !== 'Balanced' || v[2] !== 'Balanced') throw new Error(v.join(' | '));
@@ -577,20 +589,20 @@ await check('Choosing parts: the whole file is the selection by default, drawn a
 await check('Choosing parts: drag on the waveform (even past the ends), the handles with the keyboard, tap a part', async () => {
   await open('speech.wav');
   await dragRange(page, 3, 8);
-  has(await selectionTitle(page), /^0:03–0:08 · 5 s$/);
+  has(await selectionTitle(page), /^0:03–0:08$/);
   await page.getByTestId('handle-end').focus();
   await page.keyboard.press('ArrowRight');
-  has(await selectionTitle(page), /^0:03–0:09 · 6 s$/);
+  has(await selectionTitle(page), /^0:03–0:09$/);
   await setStrength(page, 'strong');
   await page.getByTestId('select-all').click();
   await sections('voice').nth(1).click();
-  has(await selectionTitle(page), /^0:03–0:09 · 6 s$/); // a tap on a part selects exactly it
+  has(await selectionTitle(page), /^0:03–0:09$/); // a tap on a part selects exactly it
   const box = await page.getByTestId('waveform').boundingBox();
   await page.mouse.move(box.x + box.width * 0.5, box.y + box.height / 2);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width + 80, box.y + box.height / 2, { steps: 6 }); // past the end
   await page.mouse.up();
-  has(await selectionTitle(page), /–0:1[01] · /);
+  has(await selectionTitle(page), /–0:1[01]$/);
   return 'drag, handle key, tap, past the end';
 });
 
@@ -658,7 +670,7 @@ await check('Choosing parts: Undo and redo', async () => {
 await check('Choosing parts: a part is chosen on the timeline only: the handles move it with the keys, and the inspector has no Start/End card (no ±1 s buttons, Use playhead, Play part)', async () => {
   await open('speech.wav');
   await dragRange(page, 3, 8);
-  has(await selectionTitle(page), /^0:03–0:08 · 5 s$/);
+  has(await selectionTitle(page), /^0:03–0:08$/);
   for (const id of ['range-box', 'time-s', 'time-e', 'nudge-s-minus', 'nudge-s-plus', 'nudge-e-minus', 'nudge-e-plus', 'use-playhead-s', 'use-playhead-e', 'play-part']) {
     if (await page.getByTestId(id).count()) throw new Error(`${id} is back in the inspector`);
   }
@@ -666,7 +678,7 @@ await check('Choosing parts: a part is chosen on the timeline only: the handles 
   await page.keyboard.press('ArrowRight');
   await page.getByTestId('handle-end').focus();
   await page.keyboard.press('ArrowLeft');
-  has(await selectionTitle(page), /^0:04–0:07 · 3 s$/);
+  has(await selectionTitle(page), /^0:04–0:07$/);
   await page.getByTestId('waveform').click({ position: { x: 330, y: 40 } });
   await page.getByTestId('play').click();
   await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.dataset.playing === 'yes', null, { timeout: 8000 });
@@ -706,17 +718,21 @@ await check('Choosing parts: the strength slider for any strength (as on today\'
 
 /* ================================================================================================ The result file */
 
-await check('The result file: name and file type are in the output pane under the editor, in view without opening anything (the type follows the name\'s ending and the other way round)', async () => {
+await check('The result file: name and file type are in the output pane under the editor, in view without opening anything (the box holds the name, the list the ending; an ending typed into the box becomes the type as it is typed)', async () => {
   await open('noisy.wav');
   await page.getByTestId('output-pane').waitFor();
   if (await page.getByTestId('output-button').count() || await page.getByTestId('output-pop').count()) throw new Error('the Output menu is back');
-  has(await page.getByTestId('output-pane').getByTestId('out-name').inputValue(), /^noisy-cleaned\.flac$/);
+  has(await page.getByTestId('output-pane').getByTestId('out-name').inputValue(), /^noisy-cleaned$/);
+  has(await page.getByTestId('out-format').inputValue(), /^flac$/);
   await page.getByTestId('out-format').selectOption('mp3').catch(() => {});
   const name = await page.getByTestId('out-name').inputValue();
+  const listed = await page.getByTestId('out-format').inputValue();
   await page.getByTestId('out-name').fill('talk.flac');
-  if ((await page.getByTestId('out-format').inputValue()) !== 'flac') throw new Error('typing an ending did not pick the type');
-  has(await page.getByTestId('out-name').inputValue(), /^talk\.flac$/);
-  return `${name} -> talk.flac`;
+  if ((await page.getByTestId('out-format').inputValue()) !== 'flac') throw new Error('typing an ending did not pick the type as it was typed (the list was ' + listed + ')');
+  await page.getByTestId('out-name').blur();
+  if ((await page.getByTestId('out-format').inputValue()) !== 'flac') throw new Error('leaving the box changed the type');
+  has(await page.getByTestId('out-name').inputValue(), /^talk$/);
+  return `${name} -> talk, flac`;
 });
 
 await check('The result file: video size Same, 2160p, 1440p, 1080p, 720p, 480p with the size notes as the tooltip/hint', async () => {
@@ -731,11 +747,11 @@ await check('The result file: video size Same, 2160p, 1440p, 1080p, 720p, 480p w
 
 await check('The result file: this browser can\'t make some types; audio saved as a video gets a plain black picture — the notes stay', async () => {
   await open('noisy.wav');
-  await page.getByTestId('out-name').fill('clip.mkv');
+  await typeName(page.getByTestId('out-name'), 'clip.mkv');
   has(await txt(page.getByTestId('out-black-note')), /^There’s no picture in your recording, so the video gets a plain black one\.$/);
-  await page.getByTestId('out-name').fill('clip.xyz');
-  has(await txt(page.getByTestId('out-hint')), /We can’t make \.xyz files/);
-  return 'black picture note; unknown ending refused';
+  await typeName(page.getByTestId('out-name'), 'a/b');
+  has(await txt(page.getByTestId('out-hint')), /A file name can’t have any of these/);
+  return 'black picture note; a forbidden character refused';
 });
 
 /* ================================================================================================ Price, credit and limits */
@@ -1002,7 +1018,7 @@ await check('After processing: Change and save again — strength, rebuild, leve
     await page.waitForFunction(() => /Save changes · \$0\.0\d+/.test(document.querySelector('[data-testid=save-changes]')?.textContent || ''), null, { timeout: 8000 });
     has((await sectionTexts('voice')).join(' '), /Strong/);
     has((await sectionTexts('level')).join(' '), /Broadcast/);
-    await page.getByTestId('out-name').fill('again.mp3');
+    await typeName(page.getByTestId('out-name'), 'again.mp3');
     has(await page.getByTestId('out-format').inputValue(), /^mp3$/);
     return await txt(page.getByTestId('save-changes'));
   } finally { await s.off(); }
@@ -1013,7 +1029,7 @@ await check('After processing: Fix a moment is this editor (a part of a finished
   try {
     await gotoJob('pd6');
     await dragRange(page, 10, 20);
-    has(await selectionTitle(page), /^0:10–0:20 · 10 s$/);
+    has(await selectionTitle(page), /^0:10–0:20$/);
     await setStrength(page, 'max');
     const v = await sectionTexts('voice');
     if (v.length < 3) throw new Error('a part was not made: ' + v.join(' | '));

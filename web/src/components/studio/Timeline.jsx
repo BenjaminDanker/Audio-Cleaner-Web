@@ -16,7 +16,7 @@ function secView(tr, x) {
     return { l: (x.kind === 'free' ? 'Free · ' : '') + (x.db != null ? `${Math.round(x.db)} dB` : STR[x.str]), c: `sv-noise i${x.str}${x.kind === 'free' ? ' free' : ''}` };
   }
   if (tr === 'echo') return x.on ? { l: 'Echo', c: 'i3' } : { l: 'Off', c: 'off' };
-  if (tr === 'level') return x.lvl ? { l: x.lvl === 9 ? `${x.lufs} LUFS` : TARGETS[x.lvl - 1], sh: x.lvl === 4 ? 'Keep' : '', c: 'i3' } : { l: 'Off', c: 'off' };
+  if (tr === 'level') return x.lvl ? { l: x.lvl === 9 ? `${x.lufs} LUFS` : TARGETS[x.lvl - 1], sh: x.lvl === 4 ? 'Even' : '', c: 'i3' } : { l: 'Off', c: 'off' };
   if (!x.q) return { l: 'Off', c: 'off' };
   const t = trOf(x);
   return { l: SUBQ[x.q] + (x.lang !== 'auto' ? ` · ${LANG[x.lang]}` : '') + (t.length ? ` → ${t.map((l) => LANG[l]).join(', ')}` : ''), sh: x.q === 3 ? 'Extra' : x.q === 2 ? 'Std' : '', c: x.q === 1 ? 'free i1' : x.q === 2 ? 'i2' : 'i4' };
@@ -181,7 +181,6 @@ export default function Timeline({ ctx }) {
               </div>
             </div>
           ))}
-          <div className="row na"><div className="lab">Music</div><div className="trk pl tr na"><i className="bands" /><span><i>Coming</i></span></div></div>
         </div>
       </div>
     </div>

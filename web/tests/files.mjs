@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, barBalance, check, dragRange, dropFile, jobIdOf, launch, mainButton, pick, setLeveling, setStrength, setVoice, settleRecommendation, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, barBalance, check, dragRange, dropFile, jobIdOf, launch, mainButton, pick, setLeveling, setStrength, setVoice, settleRecommendation, signIn, summary, typeName } from './helpers.mjs';
 
 const EMAIL = `files-${Date.now()}@example.com`;
 const SERVER_RATES = { denoise: 0.009, leveling: 0.001, rebuild: 0.03 }; // the served list (GET /api/billing/pricing), per minute
@@ -340,7 +340,7 @@ await check('the line before Start names exactly what will download by itself: t
   if (!/noisy-cleaned\.flac/.test(t) || !/SRT, VTT, TXT/.test(t)) throw new Error('all three: ' + t);
   await page.getByTestId('cap-srt').uncheck();
   await page.getByTestId('cap-vtt').uncheck();
-  await page.getByTestId('out-name').fill('talk.mp3');
+  await typeName(page.getByTestId('out-name'), 'talk.mp3');
   t = await line();
   if (!/talk\.mp3/.test(t) || !/\(TXT\)/.test(t) || /SRT|VTT/.test(t)) throw new Error('after the changes: ' + t);
   await page.getByTestId('cap-txt').uncheck();

@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, rmSync, statSync, truncateSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, check, dropFile, launch, pick, signIn, summary, waitCardDone, waitResult } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, check, dropFile, launch, pick, signIn, summary, waitCardDone, waitResult, typeName } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || `e2e-convert-${Date.now()}@example.com`; // a fresh account: its job list starts empty
 const FFMPEG = process.env.FFMPEG || join(homedir(), 'audio-cleaner', 'bin', 'ffmpeg');
@@ -97,7 +97,7 @@ const runFree = async (file) => { await prepare(file); await startFree(); };
 async function saveAs(name, { format, size } = {}) {
   await openOutput();
   if (format) await field('out-format').selectOption(format);
-  if (name != null) await field('out-name').fill(name);
+  if (name != null) await typeName(field('out-name'), name);
   if (size) await field('out-size').selectOption(size);
   const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 120000 }), page.getByTestId('save-changes').click()]);
   const p = join(FILES, `conv-${dl.suggestedFilename()}`);
@@ -107,36 +107,55 @@ async function saveAs(name, { format, size } = {}) {
   return { p, name: dl.suggestedFilename(), note: await madeNote() };
 }
 
-await check('audio: the name starts as <name>-cleaned.<type> in the output pane, the type list is only what this browser can make, and the name and the list follow each other both ways', async () => {
+await check('audio: the name box holds the name and the list beside it the ending (<name>-cleaned + the type); the type list is only what this browser can make; an ending typed into the box becomes the type as it is typed (leaving the box changes nothing)', async () => {
   await prepare('noisy.wav');
-  if ((await formField('out-name').inputValue()) !== 'noisy-cleaned.wav') throw new Error('default name');
+  if ((await formField('out-name').inputValue()) !== 'noisy-cleaned' || (await formField('out-format').inputValue()) !== 'wav') throw new Error('default name ' + (await formField('out-name').inputValue()));
   const vals = await optionValues(formField);
   for (const need of ['wav', 'flac', 'mp3', 'ogg']) if (!vals.includes(need)) throw new Error(`${need} missing from ${vals}`);
   if (!vals.includes('m4a')) throw new Error(`m4a missing from ${vals} (AAC is written by the WebAssembly encoder when the browser has none: its own AAC encoder is ${enc.aac})`);
   await formField('out-name').fill('my talk.mp3');
-  if ((await formField('out-format').inputValue()) !== 'mp3') throw new Error('typing .mp3 did not switch the list');
+  if ((await formField('out-format').inputValue()) !== 'mp3') throw new Error('typing .mp3 did not switch the list as it was typed');
+  if ((await formField('out-name').inputValue()) !== 'my talk') throw new Error('the ending stayed in the box: ' + (await formField('out-name').inputValue()));
+  await formField('out-name').blur();
+  if ((await formField('out-format').inputValue()) !== 'mp3' || (await formField('out-name').inputValue()) !== 'my talk') throw new Error('leaving the box changed something');
   await formField('out-format').selectOption('flac');
-  if ((await formField('out-name').inputValue()) !== 'my talk.flac') throw new Error('list did not change the ending');
-  await formField('out-name').fill('my talk.opus');
-  if ((await formField('out-format').inputValue()) !== 'ogg') throw new Error('typing .opus did not switch the list to Ogg');
+  if ((await formField('out-name').inputValue()) !== 'my talk') throw new Error('the list changed what the box shows: ' + (await formField('out-name').inputValue()));
+  await typeName(formField('out-name'), 'my talk.opus');
+  if ((await formField('out-format').inputValue()) !== 'ogg' || (await formField('out-name').inputValue()) !== 'my talk') throw new Error('typing .opus did not switch the list to Ogg');
   await formField('out-format').selectOption('wav');
-  if ((await formField('out-name').inputValue()) !== 'my talk.wav') throw new Error('wav');
+  if ((await formField('out-name').inputValue()) !== 'my talk') throw new Error('wav');
+  await typeName(formField('out-name'), 'v1.2');
+  if ((await formField('out-format').inputValue()) !== 'wav' || (await formField('out-name').inputValue()) !== 'v1.2') throw new Error('.2 is no type: it is part of the name');
+  await typeName(formField('out-name'), 'song.xyz');
+  if ((await formField('out-format').inputValue()) !== 'wav' || (await formField('out-name').inputValue()) !== 'song.xyz' || (await formField('out-hint').innerText()).trim()) throw new Error('an ending this site does not know stays in the name');
+  if ((await page.locator('[data-testid=out-hint]', { hasText: 'Tip' }).count())) throw new Error('the tip line is back');
   return `list ${vals.join(', ')}`;
 });
 
-await check('a name that cannot be used (unknown ending, no ending, empty, a forbidden character) turns Start off with a short reason', async () => {
-  for (const bad of ['song.xyz', 'song', '', 'a/b.wav', 'what?.wav']) {
+await check('a name that cannot be used (empty, a forbidden character) turns Start off with a short reason, and the reason goes when it is fixed; no tip line otherwise', async () => {
+  for (const bad of ['', 'a/b', 'what?']) {
     await formField('out-name').fill(bad);
     const hint = (await formField('out-hint').innerText()).trim();
     if (!(await page.getByTestId('start').isDisabled()) || (await formField('out-name').getAttribute('aria-invalid')) !== 'true' || !hint || hint.length > 140) throw new Error(`"${bad}": hint="${hint}"`);
   }
-  await formField('out-name').fill('good.wav');
+  await typeName(formField('out-name'), 'good');
   if (await page.getByTestId('start').isDisabled()) throw new Error('a good name is refused');
+  if ((await formField('out-hint').innerText()).trim() || (await formField('out-name').getAttribute('aria-invalid')) !== 'false') throw new Error('the reason did not go');
   return 'refused, then accepted';
 });
 
+await check('the name box can be emptied: nothing appears in it (the type is the list\'s, not the box\'s), and the reason says a name is needed', async () => {
+  await formField('out-name').fill('something');
+  await formField('out-name').fill('');
+  const shown = await formField('out-name').inputValue();
+  if (shown !== '') throw new Error(`the box shows "${shown}" after it was emptied`);
+  if (!/name/i.test(await formField('out-hint').innerText()) || !(await page.getByTestId('start').isDisabled())) throw new Error('hint: ' + await formField('out-hint').innerText());
+  await typeName(formField('out-name'), 'good');
+  return 'empty box stays empty';
+});
+
 await check('free cleanup of a sound file: the chosen file comes down by itself as the only file; Your files lists it with its size, the bar has one Download again and no variant buttons', async () => {
-  await formField('out-name').fill('chosen name.flac');
+  await typeName(formField('out-name'), 'chosen name.flac');
   await startFree();
   const names = downloads.map((d) => d.suggestedFilename());
   if (names.join() !== 'chosen name.flac') throw new Error('downloaded by itself: ' + names);
@@ -184,7 +203,7 @@ await check('sound to video: a WebM with a plain black picture and the cleaned s
 
 await check('video kept as it is: MKV copies the picture unchanged (H.264 stays H.264) with the cleaned sound; the video to sound only (MP3, FLAC) has no picture', async () => {
   await prepare('test.mp4');
-  if ((await formField('out-name').inputValue()) !== 'test-cleaned.mp4') throw new Error('default name ' + (await formField('out-name').inputValue()));
+  if ((await formField('out-name').inputValue()) !== 'test-cleaned' || (await formField('out-format').inputValue()) !== 'mp4') throw new Error('default name ' + (await formField('out-name').inputValue()));
   await startFree();
   if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'test-cleaned.mp4') throw new Error('the video should come down by itself as the one file: ' + downloads.map((d) => d.suggestedFilename()));
   const before = probe(join(FILES, 'test.mp4'));
@@ -195,6 +214,17 @@ await check('video kept as it is: MKV copies the picture unchanged (H.264 stays 
   const m = await saveAs('podcast.mp3');
   if (probe(m.p).v) throw new Error('a picture is in the MP3');
   return `${r.name} ${i.v.codec_name} ${i.v.width}x${i.v.height} + ${i.a.codec_name}; note: ${r.note}`;
+});
+
+await check('a name typed with another ending (video to sound: ".mp3") and then Save changes pressed straight away, with no click elsewhere first, still saves it: the type moved while typing, so nothing moves under the click', async () => {
+  await prepare('test.mp4');
+  await startFree();
+  await openOutput();
+  await field('out-name').fill('direct.mp3');
+  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 20000 }), page.getByTestId('save-changes').click()]);
+  if (dl.suggestedFilename() !== 'direct.mp3') throw new Error('saved as ' + dl.suggestedFilename());
+  await waitResult(page, 'result', 120000);
+  return dl.suggestedFilename();
 });
 
 await check('an MP4 made in the browser has AAC sound and the picture copied as it is (H.264), never Opus: the video comes down as one MP4, and the note does not talk about Opus', async () => {
@@ -310,7 +340,7 @@ await check('file type alone: with the file\'s own type and size Start says what
   await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).waitFor({ timeout: 5000 });
   if (await page.getByTestId('start').isEnabled()) throw new Error('Start is on with nothing chosen');
   await field('out-format').selectOption('mkv');
-  await field('out-name').fill('only the type.mkv');
+  await typeName(field('out-name'), 'only the type.mkv');
   await startReady();
   if ((await startLabel()) !== 'Start · Free') throw new Error('button: ' + (await startLabel()));
   const hint = await page.getByTestId('will-download').innerText().catch(() => '');
@@ -361,7 +391,7 @@ await check('video size alone: a 720p video at 480p is made again in the browser
   await prepareConversion('noisy.wav');
   await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).waitFor({ timeout: 5000 });
   await field('out-format').selectOption('flac');
-  await field('out-name').fill('only the type.flac');
+  await typeName(field('out-name'), 'only the type.flac');
   await startReady();
   downloads.length = 0;
   await page.getByTestId('start').click();
@@ -554,7 +584,7 @@ await check('paid job: a Denoising job for a sound file with a chosen name and t
   await dropFile(page, join(FILES, 'noisy.wav'));
   await pick(page, 'noise', 'denoise');
   await openOutput();
-  await formField('out-name').fill('episode one.mp3');
+  await typeName(formField('out-name'), 'episode one.mp3');
   const hint = await page.getByTestId('will-download').innerText();
   if (!/episode one\.mp3/.test(hint)) throw new Error('the line before Start: ' + hint);
   downloads.length = 0;

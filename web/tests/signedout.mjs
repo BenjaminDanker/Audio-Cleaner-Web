@@ -17,7 +17,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { noisy, wavBytes } from './reco-audio.mjs';
 import {
-  BASE, FILES, check, dragRange, dropFile, launch, loginLink, mainButton, mirror, pick, resultAttr, selectionTitle, setLeveling, signIn, summary, waitResult,
+  BASE, FILES, check, dragRange, dropFile, launch, loginLink, mainButton, mirror, pick, resultAttr, selectionTitle, setLeveling, signIn, summary, waitResult, typeName,
 } from './helpers.mjs';
 
 const EMAIL = `signedout-${Date.now()}@example.com`;
@@ -133,7 +133,7 @@ async function freeOnly(p, { str, subs }, what) {
   if (s.level !== '0') throw new Error(`${what}: Leveling ${s.level}`);
   const title = await selectionTitle(p);
   const lines = await detailLines(p);
-  if (!/^Whole file/.test(title) || lines.length !== (subs === '1' ? 2 : 1) || lines.some((l) => !FREE_LINE.test(l))) throw new Error(`${what}: ${title}; ${lines.join(' | ')}`);
+  if (!/^0:00–\d/.test(title) || lines.length !== (subs === '1' ? 2 : 1) || lines.some((l) => !FREE_LINE.test(l))) throw new Error(`${what}: ${title}; ${lines.join(' | ')}`);
   if ((await mainButton(p)).trim() !== 'Start · Free') throw new Error(`${what}: button ${await mainButton(p)}`);
   return `${title}; ${lines.join(' | ')}`;
 }
@@ -147,7 +147,7 @@ async function planAndLeave(p, { keepAuto = false } = {}) {
   await p.getByTestId('waveform').scrollIntoViewIfNeeded();
   await dragRange(p, 2, 6);
   await setLeveling(p, 'podcast');
-  await p.getByTestId('out-name').fill('my-take.flac');
+  await typeName(p.getByTestId('out-name'), 'my-take.flac');
 }
 /** What the output pane says: the file type and the name ("flac my-take.flac"). */
 const outputOf = async (p) => `${await p.getByTestId('out-format').inputValue()} ${await p.getByTestId('out-name').inputValue()}`;
@@ -173,6 +173,8 @@ await check('signed out: /app opens (no redirect), the header says Sign in, the 
   const above = await page.evaluate(() => document.querySelector('[data-testid=free-no-account]').getBoundingClientRect().bottom <= document.querySelector('[data-testid=studio-empty] .ed').getBoundingClientRect().top + 1);
   if (!above) throw new Error('the note is not above the editor');
   if (await page.getByTestId('jobs-note').count() || await page.locator('.jobs-col').count() || await page.getByTestId('bar-balance').count()) throw new Error('the jobs list or the balance is shown');
+  const ghostRows = (await page.getByTestId('studio-empty').locator('.ghost-row span').allInnerTexts()).join('|');
+  if (ghostRows !== 'Voice|Leveling|Subtitles') throw new Error('the rows of the empty editor: ' + ghostRows + ' (there is no Music row)');
   await page.waitForTimeout(800);
   onlyPublic('while the empty page was open');
   return text.replace(/\s+/g, ' ').slice(0, 90);
@@ -279,6 +281,31 @@ await check('signed out, Automatic started off: switching it on later sets the c
   return got.join(' || ');
 });
 
+await check('signed out: Free only is off while everything is already free, turns on when a choice needs our side (Standard noise removal, Standard subtitles, Leveling), and one press makes every choice a free one (Start is Free, no sign-in) that Undo takes back; nothing is sent', async () => {
+  const w = await watched('off');
+  try {
+    await openSignedOut(w.p, NOISY, { automatic: false });
+    const btn = w.p.getByTestId('free-only');
+    if (!(await btn.isDisabled())) throw new Error('Free only is on while every choice is free');
+    await pick(w.p, 'noise', 'denoise');
+    await pick(w.p, 'subs', 'standard');
+    await setLeveling(w.p, 'podcast');
+    if ((await mainButton(w.p)).trim() !== 'Sign in to start' || !(await btn.isEnabled())) throw new Error(`with paid choices: "${await mainButton(w.p)}", Free only enabled: ${await btn.isEnabled()}`);
+    await btn.click();
+    const s = await editorState(w.p);
+    if (s.voice !== 'noise' || s.kind !== 'free' || s.subs !== '1' || s.level !== '0') throw new Error('after Free only: ' + JSON.stringify(s));
+    await w.p.waitForFunction(() => document.querySelector('[data-testid=start]')?.textContent.trim() === 'Start · Free', null, { timeout: 5000 });
+    if (!(await btn.isDisabled())) throw new Error('Free only is still on');
+    await w.p.getByTestId('undo').click();
+    const back = await editorState(w.p);
+    if (back.kind !== 'paid' || back.subs !== '2' || back.level !== '1' || (await mainButton(w.p)).trim() !== 'Sign in to start' || !(await btn.isEnabled())) throw new Error('after Undo: ' + JSON.stringify(back));
+    if (sentToUs(w.seen).length) throw new Error('asked of our side: ' + sentToUs(w.seen).join(', '));
+    return `${JSON.stringify({ kind: s.kind, subs: s.subs, level: s.level })}, then Undo`;
+  } finally {
+    await w.ctx.close();
+  }
+});
+
 await check('signed out, Automatic on: the suggestions for moments offer Free strengths (never Voice rebuild or Standard) and applying them leaves everything free', async () => {
   const w = await watched();
   try {
@@ -369,7 +396,7 @@ await check('signed out: another file type or video size with nothing else chose
   if (await page.getByTestId('start').isEnabled()) throw new Error('Start is on with nothing chosen');
   await openOutput(page);
   await outField(page, 'out-format').selectOption('mkv');
-  await outField(page, 'out-name').fill('converted copy.mkv');
+  await typeName(outField(page, 'out-name'), 'converted copy.mkv');
   await page.waitForFunction(() => !document.querySelector('[data-testid=notes] .banner-warn') && document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 5000 });
   const label = (await mainButton(page)).trim();
   if (label !== 'Start · Free') throw new Error('button: ' + label);

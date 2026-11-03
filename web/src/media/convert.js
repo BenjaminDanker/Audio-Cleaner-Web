@@ -61,6 +61,13 @@ export function formatOfName(name) {
   return EXT_TO_ID.get(endingOf(name)) || '';
 }
 
+/** The name without its ending when that is how `id` is written ("talk-cleaned.mp4" -> "talk-cleaned"): what the name box shows. */
+export function nameStem(name, id) {
+  const n = String(name ?? '');
+  const end = FORMAT[id]?.exts.find((e) => n.toLowerCase().endsWith(`.${e}`)); // (also a name that is only the ending: ".wav" -> "")
+  return end ? n.slice(0, n.length - end.length - 1) : n;
+}
+
 /** The name with its ending changed to `id`'s (a name already ending the way that format is written stays as typed). */
 export function nameForFormat(name, id) {
   const f = FORMAT[id];

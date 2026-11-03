@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { stem } from '../format.js';
 import {
-  buildLimit, checkName, defaultFormatId, FORMAT, formatOfName, listOutputs, listSizes, nameForFormat, SIZES,
+  buildLimit, checkName, defaultFormatId, FORMAT, formatOfName, listOutputs, listSizes, nameForFormat, nameStem, SIZES,
 } from '../media/convert.js';
 
 // "What should the result be called, and what kind of file?" A name box with a file-type list attached to its right,
-// and (for a video) the picture size. Typing another ending changes the list; picking from the list changes the ending.
+// and (for a video) the picture size. The box holds the name, the list gives the ending; an ending typed into the box becomes the type as it
+// is typed (one this browser can't make stays in the box, with a hint). Not when the box is left: that moved the page under a click on Start.
 // What this browser can really make for this file is in the list; a video type or size it can't make for a video is made on our side
 // (marked so: the whole video is then uploaded). Used in the editor's Output menu (the choice is made before Start and can be changed on a
 // finished result; the result is downloaded by itself). Nothing here uploads anything.
@@ -144,8 +145,9 @@ export default function OutputFields({ choice, info, idPrefix = 'out', disabled 
         <label htmlFor={`${idPrefix}-name`}>Name of the result</label>
         <div className="namefmt">
           <input
-            id={`${idPrefix}-name`} className="input" type="text" value={name} data-testid="out-name"
-            onChange={(e) => choice.typeName(e.target.value)} disabled={disabled}
+            id={`${idPrefix}-name`} className="input" type="text" value={nameStem(name, format)} data-testid="out-name"
+            onChange={(e) => { const typed = e.target.value; choice.typeName(formatOfName(typed) ? typed : `${typed}.${FORMAT[format]?.ext || 'wav'}`); }}
+            disabled={disabled}
             spellCheck={false} autoComplete="off" autoCapitalize="off"
             aria-invalid={hint ? 'true' : 'false'} aria-describedby={`${idPrefix}-hint`}
           />
@@ -172,7 +174,7 @@ export default function OutputFields({ choice, info, idPrefix = 'out', disabled 
           </select>
         </div>
         <span id={`${idPrefix}-hint`} className={hint ? 'hint hint-bad' : 'hint'} data-testid="out-hint" role={hint ? 'alert' : undefined}>
-          {hint || 'Tip: type another ending (.mp3, .flac, .mkv…) or pick a file type from the list. Each follows the other.'}
+          {hint}
         </span>
       </div>
 

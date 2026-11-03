@@ -142,5 +142,22 @@ await check('buildLimit: none where the browser can write to disk, 1.5 GB where 
   }
 });
 
+await check('nameStem: the name box shows the name without the ending of the type that is picked, and only that ending', async () => {
+  const m = await loadConvert(CAN);
+  assert.equal(m.nameStem('talk-cleaned.mp4', 'mp4'), 'talk-cleaned');
+  assert.equal(m.nameStem('talk-cleaned.wav', 'wav'), 'talk-cleaned');
+  assert.equal(m.nameStem('talk-cleaned.WAV', 'wav'), 'talk-cleaned'); // (capitals are the same ending)
+  assert.equal(m.nameStem('talk.opus', 'ogg'), 'talk'); // (Ogg is written .ogg, .opus or .oga)
+  assert.equal(m.nameStem('talk.m4v', 'mp4'), 'talk');
+  assert.equal(m.nameStem('talk.mp3.wav', 'wav'), 'talk.mp3'); // (an ending typed into the box is part of the name until the box is left)
+  assert.equal(m.nameStem('talk.mp3', 'wav'), 'talk.mp3'); // (the ending of another type is not this type's: it stays)
+  assert.equal(m.nameStem('v1.2', 'wav'), 'v1.2');
+  assert.equal(m.nameStem('talk', 'mp3'), 'talk');
+  assert.equal(m.nameStem('.wav', 'wav'), ''); // (nothing typed: the box is empty)
+  assert.equal(m.nameStem('', 'wav'), '');
+  assert.equal(m.nameStem(undefined, 'wav'), '');
+  assert.equal(m.nameStem('talk.wav', 'nope'), 'talk.wav');
+});
+
 console.log(failed ? `\n${failed} check(s) failed` : '\nall passed');
 process.exit(failed ? 1 : 0);

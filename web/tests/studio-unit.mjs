@@ -39,7 +39,7 @@ const m = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputF
 const {
   Timeline, TimelineError, makeState, edit, splitAll, setSel, toggleRange, selTitle, cost, delta, valSig, sameTracks, ratesFrom, money, toTimeline, fromTimeline,
   freshTracks, vkey, uni, overl, applyToSel, freePatch, echoBlocked, undo, redo, pushUndo, recoPatches, applyReco, toSuggestion, autoDone, needsServer, serverSound,
-  changesSound, freeNoiseRanges, freeSubRanges, priceOf, convertPrice, fmt, lenTxt, perMinute, heardSeries, layerPeaks, rangePeaks, overlayPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
+  changesSound, freeNoiseRanges, freeSubRanges, priceOf, convertPrice, fmt, lenTxt, perMinute, freeOnly, isFreeOnly, TARGETS, heardSeries, layerPeaks, rangePeaks, overlayPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
   browserVerdict, inGigabytes, fitPcm, samplesOf, piecesIn, rangeFor, tipsFor, priceWords, dbOf, lvlOfLufs,
   needsAccount, editorNeedsAccount, liveNeedsServer, liveProducts, livePerMinute, hasWork,
   convertsFile, videoOutOf, Finish, finishSeconds, listSizes, serverSize, formatOfName, SIZES, videoSourceHint, convertFactor, serverPictureWork,
@@ -120,10 +120,10 @@ await check('tracks: a change applies to the selection and cuts at its edges; ne
   assert.equal(S.tracks.voice[0].auto, true);
   applyToSel(S, 'voice', { str: 2 }); // the same as its neighbours again: one section
   assert.deepEqual(S.tracks.voice.map((x) => [x.s, x.e]), [[0, 180]]);
-  assert.equal(selTitle(S), '0:15–0:25 · 10 s');
+  assert.equal(selTitle(S), '0:15–0:25');
   setSel(S, [{ s: 0, e: 180 }]);
   assert.equal(S.sel, null); // the whole file is no selection: the default
-  assert.equal(selTitle(S), 'Whole file · 3:00');
+  assert.equal(selTitle(S), '0:00–3:00');
 });
 
 await check('tracks: a split stays until a change touches it; Select more adds and takes out ranges', () => {
@@ -176,6 +176,153 @@ await check('tracks: Free is Gentle to Strong and has no choice of remover; echo
   assert.equal(echoBlocked(S), true);
   S.sel = [{ s: 100, e: 120 }];
   assert.equal(echoBlocked(S), false);
+});
+
+await check('tracks: the settings heading is just the range: the whole file 0:00–3:00, one part 0:15–0:25 (no length), two or more ranges as before', () => {
+  const S = state(3 * 3600 + 5 * 60 + 9);
+  assert.equal(selTitle(S), '0:00–3:05:09'); // (hours when the file has them)
+  const T = state(58 * 60 + 19);
+  assert.equal(selTitle(T), '0:00–58:19');
+  assert.ok(!/Whole file|·/.test(selTitle(T)));
+  setSel(T, [{ s: 15, e: 25 }]);
+  assert.equal(selTitle(T), '0:15–0:25');
+  setSel(T, [{ s: 90, e: 3600 }]);
+  assert.equal(selTitle(T), '1:30–1:00:00');
+  setSel(T, [{ s: 0, e: 20 }, { s: 40, e: 100 }, { s: 200, e: 230 }]);
+  assert.equal(selTitle(T), '3 ranges · 1:50 total');
+  setSel(T, [{ s: 0, e: 58 * 60 + 19 }]); // everything chosen is no selection
+  assert.equal(selTitle(T), '0:00–58:19');
+  setSel(T, [{ s: 0, e: 58 * 60 + 18 }]); // (a second short of everything is a part)
+  assert.equal(selTitle(T), '0:00–58:18');
+});
+
+await check('words: the fifth Leveling option is Even (the choice itself, no loudness target, is the same as before)', () => {
+  assert.deepEqual(TARGETS, ['Podcast', 'YouTube', 'Broadcast', 'Even']);
+  const tips = tipsFor(PRICING);
+  assert.match(tips['l.4'], /^Even: evens out the volume but keeps the overall loudness as recorded\.$/);
+  assert.ok(!Object.values(tips).some((t) => /Keep loudness/.test(t)));
+  const S = state(60);
+  applyToSel(S, 'level', { lvl: 4, lufs: null });
+  assert.equal(toTimeline(S.tracks, 60).toJSON().layers.leveling[0].loudness_lufs, null);
+  assert.deepEqual(fromTimeline(toTimeline(S.tracks, 60), 60).level.map((x) => [x.lvl, x.lufs]), [[4, null]]);
+});
+
+/** Everything on that costs: Strong+ paid noise removal with a chosen remover, Voice rebuild on a part, echo, Leveling, Standard subtitles with translations. */
+function paidState(T = 180, o = {}) {
+  const S = state(T, { second: true, ...o });
+  edit(S, 'voice', 0, 60, { mode: 1, kind: 'paid', str: 4, rem: 2, db: null });
+  edit(S, 'voice', 60, 90, { mode: 2 });
+  edit(S, 'voice', 90, 120, { mode: 1, kind: 'paid', str: 2, rem: 1, db: 31 });
+  edit(S, 'voice', 120, 150, { mode: 1, kind: 'paid', str: 4, rem: 0, db: 85 });
+  edit(S, 'voice', 150, 180, { mode: 0 });
+  edit(S, 'echo', 0, T, { on: 1 });
+  edit(S, 'level', 0, T, { lvl: 1, lufs: null });
+  edit(S, 'subs', 0, T, { q: 2, lang: 'en', tr: ['es', 'de'] });
+  return S;
+}
+
+await check('Free only: noise removal becomes the Free one (at most Strong, no remover), Voice rebuild the Free one at Strong, Off stays off; echo and Leveling go off; subtitles Free without translations', () => {
+  const S = paidState();
+  assert.equal(isFreeOnly(S), false);
+  assert.equal(cost(S.tracks, R).paidAny, true);
+  freeOnly(S, { noiseOk: true, subsOk: true });
+  const v = S.tracks.voice.map((x) => [x.s, x.e, x.mode, x.kind, x.str, x.rem, x.db]);
+  // 0-60: Max paid Heavy -> Free Strong; 60-90: Voice rebuild -> Free Strong (the two are the same now: one section 0-90); 90-120: Balanced 31 dB stays; 120-150: Max 85 dB -> Strong 40 dB
+  assert.deepEqual(v.slice(0, 4), [[0, 90, 1, 'free', 3, 0, null], [90, 120, 1, 'free', 2, 0, 31], [120, 150, 1, 'free', 3, 0, 40], v[3]]);
+  assert.equal(S.tracks.voice.length, 4);
+  assert.deepEqual(v[3].slice(0, 3), [150, 180, 0]); // Off stays off
+  assert.deepEqual(S.tracks.echo.map((x) => [x.s, x.e, x.on]), [[0, 180, 0]]);
+  assert.deepEqual(S.tracks.level.map((x) => [x.s, x.e, x.lvl, x.lufs]), [[0, 180, 0, null]]);
+  assert.deepEqual(S.tracks.subs.map((x) => [x.s, x.e, x.q, x.lang, x.tr]), [[0, 180, 1, 'en', []]]);
+  assert.equal(isFreeOnly(S), true);
+  const c = cost(S.tracks, R);
+  assert.equal(c.paidAny, false); // nothing left costs anything
+  assert.equal(c.total, 0);
+  assert.equal(needsServer(S.tracks), false);
+});
+
+await check('Free only: it is for the whole file even when a part is chosen, and a part chosen stays chosen', () => {
+  const S = paidState();
+  setSel(S, [{ s: 100, e: 110 }]);
+  freeOnly(S, { noiseOk: true, subsOk: true });
+  assert.deepEqual(S.sel, [{ s: 100, e: 110 }]);
+  assert.equal(isFreeOnly(S), true);
+  assert.ok(S.tracks.voice.every((x) => x.mode === 0 || (x.mode === 1 && x.kind === 'free' && x.str <= 3 && x.rem === 0)));
+});
+
+await check('Free only: where this browser cannot make the Free noise removal or subtitles that layer goes off', () => {
+  const S = paidState();
+  freeOnly(S, { noiseOk: false, subsOk: true });
+  assert.ok(S.tracks.voice.every((x) => x.mode === 0));
+  assert.deepEqual(S.tracks.subs.map((x) => [x.q, x.tr]), [[1, []]]);
+  assert.equal(isFreeOnly(S), true);
+  const U = paidState();
+  freeOnly(U, { noiseOk: true, subsOk: false });
+  assert.deepEqual(U.tracks.subs.map((x) => [x.q, x.tr]), [[0, []]]);
+  assert.ok(U.tracks.voice.some((x) => x.mode === 1 && x.kind === 'free'));
+  assert.equal(isFreeOnly(U), true);
+  const V = state(60); // (subtitles that were off stay off, also where the browser can)
+  freeOnly(V, { noiseOk: true, subsOk: true });
+  assert.equal(V.tracks.subs[0].q, 0);
+});
+
+await check('Free only: isFreeOnly is false while any layer costs or needs our side, and true for Free noise removal alone, nothing at all, and Free subtitles', () => {
+  const S = state(120, { second: false });
+  assert.equal(isFreeOnly(S), false); // (the usual start: paid noise removal and Leveling)
+  edit(S, 'level', 0, 120, { lvl: 0 });
+  assert.equal(isFreeOnly(S), false); // noise removal is still the paid one
+  edit(S, 'voice', 0, 120, freePatch);
+  assert.equal(isFreeOnly(S), true);
+  edit(S, 'voice', 0, 120, { mode: 0 });
+  assert.equal(isFreeOnly(S), true);
+  edit(S, 'subs', 0, 120, { q: 1 });
+  assert.equal(isFreeOnly(S), true);
+  edit(S, 'subs', 0, 120, { q: 2, tr: [] });
+  assert.equal(isFreeOnly(S), false);
+  edit(S, 'subs', 0, 120, { q: 1, tr: [] });
+  edit(S, 'voice', 30, 40, { mode: 2 });
+  assert.equal(isFreeOnly(S), false);
+  edit(S, 'voice', 30, 40, { mode: 0 });
+  edit(S, 'echo', 50, 60, { on: 1 });
+  assert.equal(isFreeOnly(S), false);
+  edit(S, 'echo', 50, 60, { on: 0 });
+  edit(S, 'level', 70, 80, { lvl: 4 });
+  assert.equal(isFreeOnly(S), false);
+});
+
+await check('Free only: translations that are still in the choices after the subtitles went from Standard to Free are not made or charged, so the button has nothing to do', () => {
+  const S = state(120);
+  edit(S, 'level', 0, 120, { lvl: 0 });
+  edit(S, 'voice', 0, 120, freePatch);
+  edit(S, 'subs', 0, 120, { q: 2, lang: 'en', tr: ['es'] });
+  assert.equal(isFreeOnly(S), false);
+  edit(S, 'subs', 0, 120, { q: 1 }); // (what the Free button does: only the quality changes, the translations stay for when Standard comes back)
+  assert.deepEqual(S.tracks.subs[0].tr, ['es']);
+  assert.equal(cost(S.tracks, R).paidAny, false); // nothing is charged...
+  assert.equal(isFreeOnly(S), true); // ...so everything is free already and Free only is off
+});
+
+await check('Free only: Undo puts every choice back, Redo does it again', () => {
+  const S = paidState();
+  const before = JSON.stringify(S.tracks);
+  pushUndo(S);
+  freeOnly(S, { noiseOk: true, subsOk: true });
+  const after = JSON.stringify(S.tracks);
+  assert.notEqual(before, after);
+  assert.equal(undo(S), true);
+  assert.equal(JSON.stringify(S.tracks), before);
+  assert.equal(isFreeOnly(S), false);
+  assert.equal(redo(S), true);
+  assert.equal(JSON.stringify(S.tracks), after);
+  assert.equal(isFreeOnly(S), true);
+});
+
+await check('Free only: pressed again changes nothing', () => {
+  const S = paidState();
+  freeOnly(S, { noiseOk: true, subsOk: true });
+  const once = JSON.stringify(S.tracks);
+  freeOnly(S, { noiseOk: true, subsOk: true });
+  assert.equal(JSON.stringify(S.tracks), once);
 });
 
 /* ------------------------------------------------------------------------------------------------ prices */
@@ -274,7 +421,7 @@ await check('mapping: a custom strength from the slider is the noise part\'s str
   assert.equal(j.version, 1);
 });
 
-await check('mapping: a timeline read back from a job becomes the tracks it was made from (named strengths, a strength of its own, Voice rebuild over noise, Keep, a loudness of its own)', () => {
+await check('mapping: a timeline read back from a job becomes the tracks it was made from (named strengths, a strength of its own, Voice rebuild over noise, Even, a loudness of its own)', () => {
   const t = new Timeline(100);
   t.paint('noise', 0, 100, { strength_db: 24, remover: 'light' });
   t.paint('noise', 10, 20, { strength_db: 30, remover: 'auto' });

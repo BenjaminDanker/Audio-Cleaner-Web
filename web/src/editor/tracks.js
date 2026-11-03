@@ -18,7 +18,7 @@ export const REM = ['Auto', 'Light', 'Heavy'];
 export const REMOVERS = ['auto', 'light', 'heavy'];
 export const SUBQ = ['Off', 'Free', 'Standard', 'Extra accurate'];
 export const QUALITY = [null, 'free', 'standard', 'accurate'];
-export const TARGETS = ['Podcast', 'YouTube', 'Broadcast', 'Keep loudness'];
+export const TARGETS = ['Podcast', 'YouTube', 'Broadcast', 'Even'];
 export const LUFS = [null, -16, -14, -23, null]; // by lvl; 0 is off and 4 keeps the level
 export const TRACKS = [['voice', 'Voice'], ['echo', 'Echo'], ['level', 'Leveling'], ['subs', 'Subtitles']];
 export const MAX_TRANSLATIONS = 3;
@@ -98,11 +98,11 @@ export function toggleRange(S, s, e) {
     setSel(S, out);
   } else { cur.push({ s, e }); setSel(S, cur); }
 }
-/** "Whole file · 3:00", "0:15–0:25 · 10 s", "2 ranges · 1:10 total". */
+/** "0:00–3:00" (the whole file), "0:15–0:25", "2 ranges · 1:10 total". */
 export function selTitle(S) {
   const R = ranges(S);
-  if (!S.sel) return `Whole file · ${fmt(S.T)}`;
-  if (R.length === 1) return `${fmt(R[0].s)}–${fmt(R[0].e)} · ${lenTxt(R[0].e - R[0].s)}`;
+  if (!S.sel) return `${fmt(0)}–${fmt(S.T)}`;
+  if (R.length === 1) return `${fmt(R[0].s)}–${fmt(R[0].e)}`;
   return `${R.length} ranges · ${fmt(R.reduce((a, r) => a + r.e - r.s, 0))} total`;
 }
 
@@ -170,6 +170,24 @@ export function autoDone(S) {
 
 /** What Free (in the browser) can do for a section: Gentle to Strong, no choice of remover. */
 export const freePatch = (x) => ({ kind: 'free', str: Math.min(x.str, FREE_MAX_STR), db: x.db != null ? Math.min(x.db, STR_DB[FREE_MAX_STR]) : null });
+
+/** "Free only": every part's choices made the free ones. Noise removal becomes the Free one in this browser (at most Strong), and Voice rebuild
+ * too (Strong, as its free suggestion); echo removal and Leveling go off (they are made on our side); subtitles become the Free ones, without
+ * translations. `noiseOk` / `subsOk`: this browser can make the Free noise removal / subtitles for this file (else those go off). */
+export function freeOnly(S, { noiseOk, subsOk }) {
+  edit(S, 'voice', 0, S.T, (x) => {
+    if (x.mode === 0) return {};
+    if (!noiseOk) return { mode: 0 };
+    return x.mode === 2 ? { mode: 1, kind: 'free', str: FREE_MAX_STR, rem: 0, db: null } : { ...freePatch(x), rem: 0 };
+  });
+  edit(S, 'echo', 0, S.T, { on: 0 });
+  edit(S, 'level', 0, S.T, { lvl: 0, lufs: null });
+  edit(S, 'subs', 0, S.T, (x) => (x.q ? { q: subsOk ? 1 : 0, tr: [] } : {}));
+}
+
+/** Nothing chosen costs anything: every part's choices are free ones (or off). */
+export const isFreeOnly = (S) => S.tracks.voice.every((x) => x.mode === 0 || (x.mode === 1 && x.kind === 'free'))
+  && S.tracks.echo.every((x) => !x.on) && S.tracks.level.every((x) => !x.lvl) && S.tracks.subs.every((x) => (x.q || 0) <= 1);  // (translations count only for paid subtitles: trOf)
 
 /** The Free noise removal and echo removal can't be on the same stretch (the free cleanup can't use the second track). */
 export function echoBlocked(S, list) {

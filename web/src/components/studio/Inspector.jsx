@@ -2,7 +2,7 @@ import { LANGUAGES } from '../../jobs.js';
 import { dbAt, posOf, strengthName } from '../../media/blend.js';
 import { human } from '../../format.js';
 import {
-  echoBlocked, fmt, lenTxt, MAX_TRANSLATIONS, overl, ranges, REM, selTitle, STR, STR_DB, SUBQ, trOf, uni,
+  echoBlocked, fmt, isFreeOnly, lenTxt, MAX_TRANSLATIONS, overl, ranges, REM, selTitle, STR, STR_DB, SUBQ, trOf, uni,
 } from '../../editor/tracks.js';
 import { LONG_SECONDS } from '../../studio/plan.js';
 import { IcChevron, IcSpark } from './icons.jsx';
@@ -136,6 +136,7 @@ export default function Inspector({ ctx }) {
           <span className="ih-sum">{summary(S)}</span>
           <span className="chv"><IcChevron /></span>
         </button>
+        <button type="button" className="btn btn-ghost btn-sm freeb" data-act="free-only" disabled={locked || isFreeOnly(S)} data-testid="free-only" {...tipAttr(tips.freeOnly)}>Free only</button>
         <button type="button" className="ibtn" data-act="info" aria-haspopup="dialog" aria-label="Compare all the options" data-testid="info-open" {...tipAttr(tips.info)}>i</button>
       </div>
       <div className="ib-body" aria-disabled={locked ? 'true' : undefined}>
@@ -179,7 +180,7 @@ export default function Inspector({ ctx }) {
         )}
         <section className="ctl l-level">
           <div className="cl"><i className="mk" /><b {...tipAttr(tips.level)}>Leveling</b>{tag('level')}<Mixed show={lv === null} /></div>
-          <Seg items={[[0, 'Off'], [1, 'Podcast'], [2, 'YouTube'], [3, 'Broadcast'], [4, 'Keep']].map(([k, n]) => [k, n, false, tips[`l.${k}`]])} cur={lv} act="l-lvl" label="Leveling" cls="lv" />
+          <Seg items={[[0, 'Off'], [1, 'Podcast'], [2, 'YouTube'], [3, 'Broadcast'], [4, 'Even']].map(([k, n]) => [k, n, false, tips[`l.${k}`]])} cur={lv} act="l-lvl" label="Leveling" cls="lv" />
           {lv === 9 && <p className="note mt0">{lufs} LUFS (as before)</p>}
         </section>
         <section className="ctl l-subs">

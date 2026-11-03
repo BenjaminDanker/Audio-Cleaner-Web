@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BASE, FILES, check, dropFile, launch, mirror, pick, resultAttr, signIn, summary, waitResult } from './helpers.mjs';
+import { BASE, FILES, check, dropFile, launch, mirror, pick, resultAttr, signIn, summary, waitResult, typeName } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 
@@ -140,7 +140,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await waitResult(page, 'result', 120000);
     if (Number(await resultAttr(page, 'rms')) < 0.001) throw new Error('silent under CSP');
     // Save changes as an MP3 (the encoder is a worker)
-    await page.getByTestId('out-name').fill('csp.mp3');
+    await typeName(page.getByTestId('out-name'), 'csp.mp3');
     const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.getByTestId('save-changes').click()]);
     await dl.saveAs(join(FILES, 'csp-out.mp3'));
     await page.goto(`${BASE}/app`);

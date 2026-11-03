@@ -7,7 +7,7 @@ import { usePricing } from '../../hooks.js';
 import FileDrop, { SERVER_FORMATS } from '../FileDrop.jsx';
 import InfoModal from './InfoModal.jsx';
 
-const LANES = ['Voice', 'Leveling', 'Subtitles', 'Music'];
+const LANES = ['Voice', 'Leveling', 'Subtitles'];
 const CARDS = [
   ['l-noise', 'Voice', 'Noise removal or Voice rebuild'],
   ['l-level', 'Leveling', 'Podcast, YouTube or Broadcast loudness'],

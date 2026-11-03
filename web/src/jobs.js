@@ -31,7 +31,7 @@ export const LOUDNESS = [
   { id: '-16', label: 'Podcast (−16 LUFS)', value: -16 },
   { id: '-14', label: 'YouTube (−14 LUFS)', value: -14 },
   { id: '-23', label: 'Broadcast (−23 LUFS)', value: -23 },
-  { id: 'keep', label: 'Keep original loudness', value: null },
+  { id: 'keep', label: 'Even (keeps the overall loudness)', value: null },
 ];
 
 // Background noise in the recording: "auto" measures it and picks the noise remover that suits it.

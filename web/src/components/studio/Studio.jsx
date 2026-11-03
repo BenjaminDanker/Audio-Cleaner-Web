@@ -12,7 +12,7 @@ import { heardSeries, pcmPeaks } from '../../editor/peaks.js';
 import { dismiss as dismissSuggestion } from '../../editor/suggest.js';
 import { describe, prepare } from '../../editor/mix.js';
 import {
-  applyToSel, cost as costOf, dbOf, echoBlocked, edit, freePatch, fmt, hasWork, needsServer, overl, pushUndo, ratesFrom, sameOut, sameTracks,
+  applyToSel, cost as costOf, dbOf, echoBlocked, edit, freeOnly, freePatch, fmt, hasWork, needsServer, overl, pushUndo, ratesFrom, sameOut, sameTracks,
   setSel, toggleRange, toTimeline, uni,
 } from '../../editor/tracks.js';
 import { buildLimit } from '../../media/convert.js';
@@ -431,6 +431,12 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
       case 's-q': if (+v === 1) warmUpSpeech(); apply('subs', { q: +v }); break;
       case 'tr-del': apply('subs', (x) => ({ tr: (x.tr || []).filter((l) => l !== v) })); break;
       case 'info': setModal(true); break;
+      case 'free-only':
+        if (processing || locked || !session.hasAudio) break;
+        if (verdict.ok && S.tracks.voice.some((x) => x.mode)) warmUpDenoiser();
+        if (sVerdict.ok && S.tracks.subs.some((x) => x.q)) warmUpSpeech();
+        commit((st) => freeOnly(st, { noiseOk: verdict.ok, subsOk: sVerdict.ok }));
+        break;
       case 'hear': setHear((hh) => ({ ...hh, [b.dataset.tr]: !hh[b.dataset.tr] })); break;
       case 'cancel': cancelJob(); break;
       case 'del': setDelAsk(true); break;

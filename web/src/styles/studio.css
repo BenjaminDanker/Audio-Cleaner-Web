@@ -125,12 +125,9 @@
 .studio .sec.off { --bg: var(--surface-2); background-color: var(--bg); border: 1px dashed var(--border); color: var(--muted); font-weight: 600; }
 .studio .sec.tiny b { display: none; }
 .studio .sec:hover { filter: brightness(0.97); }
-.studio .row.na .lab { color: color-mix(in srgb, var(--muted) 70%, transparent); }
-.studio .trk.tr.na { cursor: default; background-image: repeating-linear-gradient(90deg, transparent 0 11px, var(--border) 11px 12px); }
-.studio .trk.tr.na span { position: absolute; inset: 0; display: grid; place-items: center; font-size: 0.7rem; color: var(--muted); }
-.studio .trk.tr.na span i { font-style: normal; position: relative; z-index: 5; background: var(--surface-2); padding: 1px 8px; border-radius: 4px; }
 .studio .ih { display: flex; align-items: center; gap: 10px; width: 100%; padding: 14px 16px 10px; position: relative; }
 .studio .ih-main { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 0; background: none; border: 0; text-align: left; color: var(--text); font: inherit; cursor: default; }
+.studio .freeb { flex: none; white-space: nowrap; }
 .studio .ibtn { flex: none; position: relative; width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--link); background: none; color: var(--link); padding: 0; font: 800 0.86rem/1 var(--font); display: grid; place-items: center; }
 .studio .ibtn::before { content: ""; position: absolute; inset: -9px; }
 .studio .ibtn:hover { background: var(--brand-soft); }

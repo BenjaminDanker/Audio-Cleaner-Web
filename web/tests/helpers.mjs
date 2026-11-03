@@ -157,7 +157,13 @@ export async function dragRange(page, s, e) {
   await page.mouse.move(x(e), y, { steps: 4 });
   await page.mouse.up();
 }
-/** The selection's title ("Whole file · 0:11", "0:03–0:08 · 5 s"). */
+/** Types a name into the name box and leaves the box. The box holds the name only (the file type list beside it gives the ending); an ending typed
+ * into it becomes the type as it is typed, if this browser can make that type. `box`: the locator of the name box. */
+export async function typeName(box, text) {
+  await box.fill(text);
+  await box.blur();
+}
+/** The selection's title ("0:00–0:11" for the whole file, "0:03–0:08" for a part, "2 ranges · 1:10 total"). */
 export const selectionTitle = (page) => page.locator('.studio .js-title').innerText();
 /** The balance in the start row ("Balance $5.00"; the link to Billing), on the empty editor and with a file or a job. The amount alone: `barBalance(page)`. */
 export const barBalance = (page) => page.locator('[data-testid=bar-balance] b');

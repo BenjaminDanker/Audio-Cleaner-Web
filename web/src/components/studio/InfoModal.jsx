@@ -71,7 +71,7 @@ export default function InfoModal({ open, onClose, pricing }) {
                     <Row a="Podcast">−16 LUFS, the usual loudness for podcasts</Row>
                     <Row a="YouTube">−14 LUFS, the loudness YouTube plays videos at</Row>
                     <Row a="Broadcast">−23 LUFS, the TV and radio standard</Row>
-                    <Row a="Keep">Evens out the volume but keeps the overall loudness as recorded</Row>
+                    <Row a="Even">Evens out the volume but keeps the overall loudness as recorded</Row>
                   </tbody>
                 </table>
               </div>
