@@ -94,17 +94,21 @@ def test_typing_x_mp3_makes_the_type_mp3_at_once_and_the_box_shows_x_and_leaving
     assert o.format.currentData() == ".mp3" and doc.out_name == "x.mp3" and o.name.text() == "x"
 
 
-def test_an_ending_the_file_cannot_become_stays_in_the_name_and_the_hint_says_so(window, tmp_path):
+def test_an_ending_the_file_cannot_become_stays_in_the_name_box_with_its_hint_and_typing_on_gives_a_type_it_can_have(window, tmp_path):
     window.fakes.facts.update(video=True, ext=".mp4")
     doc = open_file(window, tmp_path, "clip.mp4")
     o = window.studio.output
     assert o.name.text() == "clip-cleaned" and o.format.currentData() == ".mp4"
     type_name(window, "clip.m4v")  # (only an .m4v video can become .m4v)
-    assert doc.out_name == "clip.m4v" and o.format.currentIndex() == -1 and "can't be saved as .m4v" in o.hint.text() and o.hint.isVisibleTo(o)
-    assert not window.studio.start.button.isEnabled()
-    assert o.name.text() == "clip"  # (the box shows the name; the list is empty: the type is picked from it)
-    pick(window, ".mp4")  # fixed by picking a type the file can become
-    assert doc.out_name == "clip.mp4" and o.format.currentData() == ".mp4" and not o.hint.isVisibleTo(o) and window.studio.start.button.isEnabled()
+    assert o.name.text() == "clip.m4v" and doc.out_name == "clip.m4v" and o.format.currentIndex() == -1  # (it stays in the box: it is not a type in the list)
+    assert "can't be saved as .m4v" in o.hint.text() and o.hint.isVisibleTo(o) and not window.studio.start.button.isEnabled()
+    type_name(window, "clip")  # deleting back and typing on: the name gets the usual type, and the hint goes
+    assert o.name.text() == "clip" and doc.out_name == "clip.mp4" and o.format.currentData() == ".mp4"
+    assert not o.hint.isVisibleTo(o) and window.studio.start.button.isEnabled()
+    type_name(window, "clip.m4v")
+    pick(window, ".mkv")  # or a type picked from the list
+    assert doc.out_name == "clip.mkv" and o.name.text() == "clip"
+    assert o.format.currentData() == ".mkv" and window.studio.start.button.isEnabled() and not o.hint.isVisibleTo(o)
 
 
 def test_the_name_box_and_the_file_type_list_are_one_joined_control(window, tmp_path):

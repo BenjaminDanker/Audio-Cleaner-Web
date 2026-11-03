@@ -15,10 +15,11 @@ from .theme import set_property
 from .widgets import ElidedLabel
 
 
-def name_stem(name: str) -> str:
-    """The name without its ending ("talk-cleaned.mp3" -> "talk-cleaned"): what the name box shows (the ending is the type in the list)."""
+def name_stem(name: str, endings=None) -> str:
+    """The name without its ending ("talk-cleaned.mp3" -> "talk-cleaned"): what the name box shows (the ending is the type in the list). With
+    `endings` (the types in the list), an ending that is not one of them stays in the box, where the hint under it says so."""
     stem, ending = engine.split_name(name)
-    return stem if ending in engine.ENDING_NAMES else name
+    return stem if ending in (engine.ENDING_NAMES if endings is None else endings) else name
 
 
 class OutputPane(Pane):
@@ -146,8 +147,9 @@ class OutputPane(Pane):
                         elif not source.has_video:
                             label += " (plain black picture)"
                         self.format.addItem(label, ending)
-                if self.name.text() != name_stem(doc.out_name):  # (a changed text would move the cursor: only when it differs)
-                    self.name.setText(name_stem(doc.out_name))
+                shown = name_stem(doc.out_name, endings)
+                if self.name.text() != shown:  # (a changed text would move the cursor: only when it differs)
+                    self.name.setText(shown)
                 self.format.setCurrentIndex(self.format.findData(engine.split_name(doc.out_name)[1]))
                 picture = engine.split_name(doc.out_name)[1] in (*engine.VIDEO_ENDINGS, ".m4v")  # (a sound made into a video has a plain black one)
                 self.size_box.setVisible(bool(picture))

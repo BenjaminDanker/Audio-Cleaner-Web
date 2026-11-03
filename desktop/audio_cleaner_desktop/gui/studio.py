@@ -467,9 +467,10 @@ class Studio(QWidget):
         if doc is not None:
             if engine.split_name(text)[1] in engine.ENDING_NAMES:
                 name = text
-            else:
+            else:  # the type in the list (one the file can't be saved as was typed earlier: the usual one)
+                ok = engine.available_endings(doc.facts.source()) if doc.facts is not None else engine.ENDING_NAMES
                 ending = engine.split_name(doc.out_name)[1] if doc.out_name else ""
-                if ending not in engine.ENDING_NAMES:
+                if ending not in ok:
                     ending = engine.split_name(self._usual_name(doc))[1]
                 name = text + ending
             doc.set_out_name(name, custom=name.strip() != self._usual_name(doc) or doc.is_job)
