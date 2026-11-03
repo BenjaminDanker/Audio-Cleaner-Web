@@ -397,6 +397,8 @@ def test_the_time_on_start_follows_what_this_computers_runs_measured(loaded):
     assert speed._ratios["light"] == pytest.approx(6.0) and "leveling" not in speed._ratios  # (the tiny leveling run is not counted)
     after = doc.estimate()[1]
     assert after == pytest.approx(speed.cost("light", 11.0) + speed.cost("leveling", 11.0)) and after > before
+    loaded.studio._schedule()  # the screen redraws a moment later: ask for it, then wait for it
+    settle(loaded)
     assert s.start.button.text() == f"Start · {editor_job.say_time(after)}"
 
 

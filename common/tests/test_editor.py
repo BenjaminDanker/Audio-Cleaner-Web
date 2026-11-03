@@ -555,7 +555,7 @@ def test_a_render_with_timings_says_how_long_each_step_took_and_how_much_audio_i
     editor.render(tl, inp, cache, editor.Runner(heavy_model_path="stand-in", threads=2, timings=timings))
     assert list(timings) == ["heavy"]
     wall, seconds = timings["heavy"]
-    assert wall >= 0.05 and wall < 30.0 and seconds == pytest.approx(want) and seconds >= 20.0  # (the model reads its context too)
+    assert wall >= 0.03 and wall < 30.0 and seconds == pytest.approx(want) and seconds >= 20.0  # (the model reads its context too; Windows' clock ticks about 15.6 ms)
     # a second render finds every block in the cache: nothing ran, so nothing more is said
     editor.render(tl, inp, cache, editor.Runner(heavy_model_path="stand-in", threads=2, timings=timings))
     assert timings["heavy"] == [wall, seconds]
