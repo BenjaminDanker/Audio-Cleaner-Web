@@ -204,14 +204,17 @@ class Throttle:
             await asyncio.sleep(-self.tokens / self.rate)
 
 
-TRANSFER_MBPS_DEFAULT = 5.0
+TRANSFER_MBPS_DEFAULT = 15.0
+UPLOAD_MBPS_USER_DEFAULT = 10.0
 
 
 def transfer_budget() -> Throttle | None:
     """The one byte-rate budget that uploads and result downloads of a process share (ACW_TRANSFER_MBPS_TOTAL, megabytes
     per second; 0 = none). Every transferred byte crosses the VPS twice (a download goes home -> VPS -> user, an upload
-    user -> VPS -> home) on a link of about 9 MB/s in and 11 MB/s out that live audio uses too, so separate caps of 8 and 6
-    added up to more than the link. The older ACW_DOWNLOAD_MBPS_TOTAL / ACW_UPLOAD_MBPS_TOTAL are still read when the new
+    user -> VPS -> home) through the SSH tunnels that live audio uses too. Measured 2026-11-03 after a bad Ethernet cable was
+    replaced (it had held the home link to 100 Mbit/s, about 9-11 MB/s): one tunnel connection carries about 25 MB/s home -> VPS
+    and 31 MB/s VPS -> home, so 15 MB/s for all transfers together still leaves 10 MB/s or more each way for live and the site
+    (it was 5 on the old link). The older ACW_DOWNLOAD_MBPS_TOTAL / ACW_UPLOAD_MBPS_TOTAL are still read when the new
     variable is not set (the smaller one counts)."""
     raw = os.environ.get("ACW_TRANSFER_MBPS_TOTAL")
     if raw is None:
@@ -230,7 +233,7 @@ class UploadBandwidth:
 
     def __init__(self, budget: Throttle | None | str = "own") -> None:
         self.total = transfer_budget() if budget == "own" else budget
-        self.per_user = float(os.environ.get("ACW_UPLOAD_MBPS_USER", "5")) * 1e6
+        self.per_user = float(os.environ.get("ACW_UPLOAD_MBPS_USER", str(UPLOAD_MBPS_USER_DEFAULT))) * 1e6
         self._users: dict[str, Throttle] = {}
 
     def for_user(self, user_id: str) -> Throttle:

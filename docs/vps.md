@@ -13,9 +13,10 @@ Nothing else of ours is on the VPS: no data, no secrets beyond the frp token. Th
 Hugging Face, not from here.
 
 Measured 2026-10-18: the VPS's own link does about 1.3 Gbit/s down and 0.5-0.9 Gbit/s up (to Cloudflare);
-primary-ram reaches only about 90 Mbit/s down and 85 up to anywhere (even with 4 connections at once, its network
-card at 1 Gbit/s and the line idle), so the ~60-90 Mbit/s between home and the VPS is the home side, not the VPS.
-TCP round trip from home: about 27 ms.
+primary-ram then reached only about 90 Mbit/s down and 85 up to anywhere: a faulty Ethernet cable held its link to
+100 Mbit/s. Measured 2026-11-03 with the cable replaced (link 1000 Mbit/s full duplex): about 230-260 Mbit/s down on one
+connection and 420+ on four, about 350 up; over SSH to the VPS (what the tunnels carry) about 200 Mbit/s home->VPS and
+250 back on one connection. TCP round trip from home: about 27 ms.
 
 ## What runs there
 
