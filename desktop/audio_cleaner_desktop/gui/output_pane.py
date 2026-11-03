@@ -1,6 +1,6 @@
 """The output pane under the editor (the web's OutputPane): the name of the result with its file type, the video size, where it is saved, and what
-the run saves by itself. The box holds the name, the list joined to it the type (its ending); an ending typed into the box moves to the list
-when the box is left."""
+the run saves by itself. The box holds the name, the list joined to it the type (its ending); an ending typed into the box becomes the type as
+it is typed."""
 from __future__ import annotations
 
 from pathlib import Path

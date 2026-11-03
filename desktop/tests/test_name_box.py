@@ -62,20 +62,17 @@ def test_the_box_holds_only_the_name_and_the_list_the_ending_and_typing_or_picki
     assert doc.out_custom and doc.item.out_name == "interview.wav"
     pick(window, ".mp3")  # picking changes the ending, not what the box shows
     assert o.name.text() == "interview" and doc.out_name == "interview.mp3" and doc.item.out_name == "interview.mp3"
-    type_name(window, "talk.flac")  # an ending typed into the box does not change the type while it is typed...
-    assert o.name.text() == "talk.flac" and o.format.currentData() == ".mp3" and doc.out_name == "talk.flac.mp3"
-    leave_the_box(window)  # ...it moves to the list when the box is left
+    type_name(window, "talk.flac")  # an ending typed into the box becomes the type as it is typed (not when the box is left)
+    assert o.name.text() == "talk" and o.format.currentData() == ".flac" and doc.out_name == "talk.flac"
+    leave_the_box(window)  # (leaving the box changes nothing more)
     assert o.name.text() == "talk" and o.format.currentData() == ".flac" and doc.out_name == "talk.flac"
     type_name(window, "interview.OGG")  # capitals are fine
-    leave_the_box(window)
-    assert o.name.text() == "interview" and o.format.currentData() == ".ogg" and doc.out_name == "interview.ogg"
+    assert o.name.text() == "interview" and o.format.currentData() == ".ogg" and doc.out_name.lower() == "interview.ogg"
     type_name(window, "v1.2")  # ".2" is no type: it is part of the name
-    leave_the_box(window)
     assert o.name.text() == "v1.2" and o.format.currentData() == ".ogg" and doc.out_name == "v1.2.ogg"
     pick(window, ".wav")
     assert o.name.text() == "v1.2" and doc.out_name == "v1.2.wav"
     type_name(window, "talk.xyz")  # a type this app does not know stays in the name
-    leave_the_box(window)
     assert o.name.text() == "talk.xyz" and o.format.currentData() == ".wav" and doc.out_name == "talk.xyz.wav"
     type_name(window, "interview")
     pick(window, ".m4a")
@@ -84,28 +81,30 @@ def test_the_box_holds_only_the_name_and_the_list_the_ending_and_typing_or_picki
     assert o.name.text() == "interview" and doc.out_name == "interview.mp4" and "(plain black picture)" in o.format.itemText(o.format.currentIndex())
     assert o.size_box.isVisibleTo(o)  # and then it has a picture size to choose
     type_name(window, "clip.mp3")  # a sound is also fine as the type of what was a video
-    leave_the_box(window)
     assert doc.out_name == "clip.mp3" and not o.size_box.isVisibleTo(o)
 
 
-def test_leaving_the_box_with_x_mp3_switches_the_type_to_mp3_and_the_box_shows_x(window, tmp_path):
+def test_typing_x_mp3_makes_the_type_mp3_at_once_and_the_box_shows_x_and_leaving_it_changes_nothing(window, tmp_path):
     doc = open_file(window, tmp_path)
     o = window.studio.output
     type_name(window, "x.mp3")
-    assert o.format.currentData() == ".wav" and doc.out_name == "x.mp3.wav"  # (still being typed: the type is as it was)
-    leave_the_box(window)
-    assert o.format.currentData() == ".mp3" and doc.out_name == "x.mp3" and o.name.text() == "x" and doc.item.out_name == "x.mp3"
+    assert o.format.currentData() == ".mp3" and doc.out_name == "x.mp3" and o.name.text() == "x" and doc.item.out_name == "x.mp3"  # (before the box is left)
     assert "MP3" in o.format.itemText(o.format.currentIndex()).upper()
+    leave_the_box(window)
+    assert o.format.currentData() == ".mp3" and doc.out_name == "x.mp3" and o.name.text() == "x"
 
 
-def test_leaving_the_box_with_an_ending_that_the_file_cannot_become_leaves_the_type(window, tmp_path):
+def test_an_ending_the_file_cannot_become_stays_in_the_name_and_the_hint_says_so(window, tmp_path):
     window.fakes.facts.update(video=True, ext=".mp4")
     doc = open_file(window, tmp_path, "clip.mp4")
     o = window.studio.output
     assert o.name.text() == "clip-cleaned" and o.format.currentData() == ".mp4"
     type_name(window, "clip.m4v")  # (only an .m4v video can become .m4v)
-    leave_the_box(window)
-    assert o.format.currentData() == ".mp4" and doc.out_name == "clip.m4v.mp4" and o.name.text() == "clip.m4v"
+    assert doc.out_name == "clip.m4v" and o.format.currentIndex() == -1 and "can't be saved as .m4v" in o.hint.text() and o.hint.isVisibleTo(o)
+    assert not window.studio.start.button.isEnabled()
+    assert o.name.text() == "clip"  # (the box shows the name; the list is empty: the type is picked from it)
+    pick(window, ".mp4")  # fixed by picking a type the file can become
+    assert doc.out_name == "clip.mp4" and o.format.currentData() == ".mp4" and not o.hint.isVisibleTo(o) and window.studio.start.button.isEnabled()
 
 
 def test_the_name_box_and_the_file_type_list_are_one_joined_control(window, tmp_path):

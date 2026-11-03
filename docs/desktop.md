@@ -392,7 +392,7 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
   * *Left:* the editor (the picture or the poster of a sound, the file name and facts with "Different file", the Automatic switch and its line, the tools:
     play, split at the playhead, undo, redo, zoom, select all; the timeline with the rows Voice, Echo removal (a file with a second audio track),
     Leveling and Subtitles, as in the web), and under it the output pane (the name of the result in a box joined to its file type, which gives the
-    ending; an ending typed into the box moves to the list when the box is left; the video size, where it is saved, what is saved by itself). The output pane stretches so the column ends level with the settings.
+    ending; an ending typed into the box becomes the type as it is typed; the video size, where it is saved, what is saved by itself). The output pane stretches so the column ends level with the settings.
   * *Right:* the settings for the part that is chosen (heading "Whole file · 0:11" or the part), the cards Voice (Off, Noise removal with strength and
     remover, Voice rebuild; a click anywhere on an option's row picks it), Echo removal, Leveling (Off, Podcast, YouTube, Broadcast, Even: evens out the volume
     and keeps the overall loudness as recorded) and Subtitles (Off / On, language, the files SRT / VTT / TXT / Embed under their label). Parts are chosen by dragging on the timeline (or clicking a section, or a pin); there is no separate Start / End card.

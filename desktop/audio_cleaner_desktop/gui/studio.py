@@ -202,7 +202,7 @@ class Studio(QWidget):
         o = self.output
         o.nameEdited.connect(self._name_typed)
         o.endingPicked.connect(self._ending_picked)
-        o.nameDone.connect(self._name_done)
+        o.nameDone.connect(self._refresh_all)
         o.sizePicked.connect(lambda k: self.doc and self.doc.set_video_size(k))
         o.changeFolder.connect(self.changeFolder)
         o.nextToOriginal.connect(self.nextToOriginal)
@@ -460,26 +460,20 @@ class Studio(QWidget):
         return engine.default_output_name(doc.path, doc.facts.source(), self.prefs.job_options()) if doc.facts is not None else ""
 
     def _name_typed(self, text: str) -> None:
-        """The box holds the name; the ending is the type picked in the list beside it."""
+        """The box holds the name; the ending is the type picked in the list beside it. An ending typed into the box ("talk.mp3") becomes the type
+        as it is typed (one this file can't be saved as stays, and the hint says so); not when the box is left, which moved the screen under a
+        click on Start."""
         doc = self.doc
         if doc is not None:
-            ending = engine.split_name(doc.out_name)[1] if doc.out_name else ""
-            if ending not in engine.ENDING_NAMES:
-                ending = engine.split_name(self._usual_name(doc))[1]
-            name = text + ending
+            if engine.split_name(text)[1] in engine.ENDING_NAMES:
+                name = text
+            else:
+                ending = engine.split_name(doc.out_name)[1] if doc.out_name else ""
+                if ending not in engine.ENDING_NAMES:
+                    ending = engine.split_name(self._usual_name(doc))[1]
+                name = text + ending
             doc.set_out_name(name, custom=name.strip() != self._usual_name(doc) or doc.is_job)
             self._after_output()
-
-    def _name_done(self) -> None:
-        """Leaving the box: an ending typed into it ("talk.mp3") becomes the type in the list, when this file can be saved as that."""
-        doc = self.doc
-        if doc is not None and doc.facts is not None:
-            stem, ending = engine.split_name(self.output.name.text().strip())
-            if stem and ending in engine.available_endings(doc.facts.source()):
-                name = stem + ending
-                doc.set_out_name(name, custom=name != self._usual_name(doc) or doc.is_job)
-                self._after_output()
-        self._refresh_all()
 
     def _ending_picked(self, ending: str) -> None:
         doc = self.doc
