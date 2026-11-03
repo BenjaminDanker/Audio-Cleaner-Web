@@ -22,6 +22,7 @@ const FFPROBE = process.env.FFPROBE || join(homedir(), 'audio-cleaner', 'bin', '
 const { page, logs, browser } = await launch();
 await signIn(page, EMAIL);
 
+const videoPackets = (p) => Number(execFileSync(FFPROBE, ['-v', 'error', '-select_streams', 'v:0', '-count_packets', '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0', p], { encoding: 'utf8' }).trim());
 const probe = (p) => {
   const j = JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', p], { encoding: 'utf8' }));
   const v = j.streams.find((s) => s.codec_type === 'video');
@@ -45,6 +46,15 @@ if (!existsSync(big)) {
     execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=25', '-i', join(FILES, 'noisy.wav'), '-t', '4', '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', big]);
   } catch (e) {
     console.log('could not make the 720p fixture:', e.message.split('\n')[0]);
+  }
+}
+
+const late = join(FILES, 'conv-late.mp4'); // 4 s of video whose picture starts 0.5 s after the sound (as in many phone videos)
+if (!existsSync(late)) {
+  try {
+    execFileSync(FFMPEG, ['-v', 'error', '-y', '-itsoffset', '0.5', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=25', '-i', join(FILES, 'noisy.wav'), '-t', '4', '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', late]);
+  } catch (e) {
+    console.log('could not make the late-picture fixture:', e.message.split('\n')[0]);
   }
 }
 
@@ -204,6 +214,34 @@ await check('an MP4 made in the browser has AAC sound and the picture copied as 
   const mkv = await saveAs(null, { format: 'mkv' });
   if (probe(mkv.p).a.codec_name !== 'aac') throw new Error(`MKV sound ${probe(mkv.p).a.codec_name}`);
   return `mp4 ${got.v.codec_name} ${got.v.width}x${got.v.height} + ${got.a.codec_name}, ${got.dur.toFixed(1)} s; MKV sound aac; note: ${note}`;
+});
+
+await check('a picture that starts after the sound (0.5 s later, as in many phone videos) keeps its place against the cleaned sound in an MP4 and an MKV: the picture copied as it is, not moved to 0', async () => {
+  if (!existsSync(late)) return 'SKIP (no late-picture fixture: ffmpeg missing)';
+  const src = probe(late);
+  const gap = Number(src.v.start_time) - Number(src.a.start_time); // the picture starts this long after the sound
+  if (gap < 0.4 || gap > 0.6) throw new Error(`fixture: the picture starts ${gap} s after the sound`);
+  await prepare('conv-late.mp4');
+  await startFree();
+  if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'conv-late-cleaned.mp4') throw new Error('downloaded by itself: ' + downloads.map((d) => d.suggestedFilename()));
+  const out = [];
+  for (const type of ['mp4', 'mkv']) {
+    let p;
+    if (type === 'mp4') {
+      p = join(FILES, 'conv-late-result.mp4');
+      await downloads[0].saveAs(p);
+    } else {
+      p = (await saveAs(null, { format: 'mkv' })).p;
+    }
+    const got = probe(p);
+    const kept = Number(got.v.start_time) - Number(got.a.start_time);
+    if (Math.abs(kept - gap) > 0.04) throw new Error(`${type}: the picture starts ${kept.toFixed(3)} s after the sound, the original ${gap.toFixed(3)} s (picture at ${got.v.start_time}, sound at ${got.a.start_time})`);
+    if (got.v.codec_name !== src.v.codec_name || videoPackets(p) !== videoPackets(late) || got.a.codec_name !== 'aac') throw new Error(`${type}: ${got.v.codec_name} ${videoPackets(p)} pictures + ${got.a?.codec_name}, the original ${src.v.codec_name} ${videoPackets(late)}`);
+    out.push(`${type}: picture ${Number(got.v.start_time).toFixed(2)} s, sound ${Number(got.a.start_time).toFixed(2)} s`);
+  }
+  const note = await madeNote();
+  if (!/copied as it is/.test(note)) throw new Error(`note: ${note}`);
+  return `original: picture ${Number(src.v.start_time).toFixed(2)} s, sound ${Number(src.a.start_time).toFixed(2)} s; ${out.join('; ')}`;
 });
 
 await check('a browser that cannot write H.264 (its VideoEncoder says no to avc1): an MP4 at a new size is offered as made on our side (never VP9 inside an MP4), MKV at that size is still made here; the size "same" copies the picture as before', async () => {

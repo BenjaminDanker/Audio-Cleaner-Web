@@ -512,7 +512,7 @@ async function asWav(mb, source, { signal, onProgress }) {
  * output.start() (it resolves when all sound has been written). `codecs`: what may be encoded (this browser can);
  * `copyOk`: what a sound file's own codec may be to be copied as it is (copying needs no encoder).
  */
-async function addCleanSound(mb, output, source, codecs, { signal, onProgress, copyOk = codecs }) {
+async function addCleanSound(mb, output, source, codecs, { signal, onProgress, copyOk = codecs, fromZero = false }) {
   const format = output.format;
   const allowed = codecs.filter((c) => format.getSupportedAudioCodecs().includes(c));
   if (allowed.includes('aac')) await ensureAac();
@@ -564,7 +564,8 @@ async function addCleanSound(mb, output, source, codecs, { signal, onProgress, c
       throw new RemuxUnsupported('This browser can’t write the sound for this kind of file. Try another format.');
     }
   }
-  const init = (opts) => mb.Conversion.init({ input, output, composable: true, tracks: 'primary', video: { discard: true }, showWarnings: false, ...opts });
+  // fromZero: the sound keeps its own place on the file's timeline (it is the original's own sound, its picture keeps its place too)
+  const init = (opts) => mb.Conversion.init({ input, output, composable: true, tracks: 'primary', video: { discard: true }, showWarnings: false, ...(fromZero ? { trim: { start: 0 } } : {}), ...opts });
   let conv = null;
   if (!pick) {
     // Copy it as it is. 'forced' also copies AAC whose first (priming) packet starts a little before zero, which
@@ -665,7 +666,11 @@ export async function buildMedia({ format, size = 'same', videoFile = null, info
   const cancels = [];
   let vin = null;
   try {
-    const sound = await addCleanSound(mb, output, source, audioCodecsFor(caps, format), { signal, copyOk: AUDIO_PREFS[format] });
+    // The sound made in this browser lies on the original's timeline from 0 (decode.js pads a late start with silence), and so does the
+    // original's own sound: then the picture keeps its own times too. Without `trim`, mediabunny starts each track at its first frame,
+    // and a picture starting after 0 (often so in a phone's video) came out early against the sound.
+    const fromZero = !!source.pcm || (!!audioFile && audioFile === videoFile);
+    const sound = await addCleanSound(mb, output, source, audioCodecsFor(caps, format), { signal, copyOk: AUDIO_PREFS[format], fromZero });
     cancels.push(sound.cancel);
     let pictureRun;
     let pictureNote = null;
@@ -683,7 +688,7 @@ export async function buildMedia({ format, size = 'same', videoFile = null, info
       if (plan.reencode) video.codec = plan.codec;
       if (dims) { video.width = dims.width; video.height = dims.height; video.fit = 'fill'; }
       const vconv = await mb.Conversion.init({
-        input: vin, output, composable: true, tracks: 'primary', audio: { discard: true }, video, showWarnings: false,
+        input: vin, output, composable: true, tracks: 'primary', audio: { discard: true }, video, showWarnings: false, ...(fromZero ? { trim: { start: 0 } } : {}),
       });
       if (!vconv.isValid || vconv.utilizedTracks.length === 0) {
         throw new RemuxUnsupported('The picture of this video can’t be put into this kind of file by this browser.');
