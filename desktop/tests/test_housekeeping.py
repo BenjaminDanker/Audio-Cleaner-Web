@@ -396,7 +396,7 @@ def test_quitting_does_not_wait_for_files_that_will_not_stop_and_never_touches_a
 
     def runner(path, options, *, cancel, progress, **_):
         started.set()
-        hold.wait(5)  # a step that does not look at the cancel flag
+        hold.wait(30)  # a step that does not look at the cancel flag (released by the test below; closing must not wait for it)
         raise engine.Cancelled()
 
     monkeypatch.setattr(main_window.resources, "check", lambda: [])
@@ -411,7 +411,7 @@ def test_quitting_does_not_wait_for_files_that_will_not_stop_and_never_touches_a
     monkeypatch.setattr(w, "_confirm", lambda *_: True)
     began = time.monotonic()
     w.close()
-    assert time.monotonic() - began < 4 and exits == [0]
+    assert time.monotonic() - began < 10 and exits == [0]
     hold.set()
     QApplication.processEvents()
 

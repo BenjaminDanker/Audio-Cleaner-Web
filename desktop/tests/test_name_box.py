@@ -114,6 +114,11 @@ def test_an_ending_the_file_cannot_become_stays_in_the_name_box_with_its_hint_an
 def test_the_name_box_and_the_file_type_list_are_one_joined_control(window, tmp_path):
     open_file(window, tmp_path)
     o = window.studio.output
+    def joined():
+        n, f = o.name.geometry(), o.format.geometry()
+        return n.top() == f.top() and n.height() == f.height() and n.right() + 1 == f.left()
+
+    wait_until(joined, 5)  # (the layout of the row is finished a few events after the file was taken in, on some platforms)
     n, f = o.name.geometry(), o.format.geometry()
     assert n.top() == f.top() and n.height() == f.height()  # as tall as each other
     assert n.right() + 1 == f.left()  # no gap between the two: the list begins where the box ends

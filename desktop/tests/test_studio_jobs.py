@@ -60,7 +60,7 @@ def open_job(w, eid, *, live=True):
     w.open_entry(eid)
     if live:
         assert wait_until(lambda: w.doc.session_state == "ready", 10)
-    QApplication.processEvents()
+    settle(w)
     return w.doc
 
 
@@ -628,7 +628,7 @@ def clean(w, tmp_path, name):
     assert wait_until(lambda: item.doc.model is not None, 5)
     w.start()
     assert wait_until(lambda: item.state in ("done", "failed", "cancelled"), 20)
-    QApplication.processEvents()
+    settle(w)
     return item
 
 

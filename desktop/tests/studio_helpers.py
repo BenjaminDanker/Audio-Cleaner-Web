@@ -367,3 +367,16 @@ def settle(w) -> None:
     QApplication.processEvents()
     wait_until(lambda: not w.studio._refresh_timer.isActive() and not w.studio._live_timer.isActive(), 3)
     QApplication.processEvents()
+
+
+def resized(window, width: int, height: int, until=lambda: True, timeout: float = 5.0) -> None:
+    """Resize the window and wait until the screen has taken it over: the window's own size and whatever `until()` says the layout does with it.
+    On some platforms (Windows) the new size reaches the widgets inside a few events later, not by the next processEvents."""
+    from PySide6.QtWidgets import QApplication
+
+    from conftest import wait_until
+
+    window.resize(width, height)
+    taken = wait_until(lambda: window.width() == width and window.height() == height and bool(until()), timeout)
+    assert taken, f"the window did not take {width}x{height} (it is {window.width()}x{window.height()}) or the screen did not follow within {timeout} s"
+    QApplication.processEvents()

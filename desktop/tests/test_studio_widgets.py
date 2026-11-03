@@ -134,13 +134,16 @@ def test_the_waveforms_bars_are_drawn_once_and_reused_by_every_repaint_until_the
     plot.grab()
     plot.grab()
     assert all(plot._bars.get(k) is v for k, v in first.items()) and set(plot._bars) == set(first)
-    loaded.resize(1000, 900)  # another width: drawn again for it
-    QApplication.processEvents()
+    old_width = plot.width()
+    sh.resized(loaded, 1000, 900, lambda: plot.width() < old_width)  # another width: drawn again for it (the resize reaches the timeline a few events later)
+    settle(loaded)
+    new_width = plot.width()
+    assert new_width < old_width, (old_width, new_width)  # (the plot is narrower now: the window is)
     plot_of(loaded).grab()
-    assert any(k not in first for k in plot._bars)
+    assert any(k not in first for k in plot._bars) and any(k[4] == new_width for k in plot._bars)
     for extra in range(1, 12):  # (what is kept does not grow with every width the window has had)
-        loaded.resize(800 + 37 * extra, 900)
-        QApplication.processEvents()
+        before = plot.width()
+        sh.resized(loaded, 800 + 37 * extra, 900, lambda before=before: plot.width() != before)
         plot_of(loaded).grab()
     assert len(plot._bars) <= 6
 
@@ -394,8 +397,9 @@ def test_the_subtitles_say_on_and_embed_and_the_files_row_has_its_label_above_th
     row = i.files_row
     assert row.isVisibleTo(i)
     label = next(w for w in row.findChildren(QLabel) if w.text() == "Files")
-    assert label.geometry().bottom() <= i.files.geometry().top() and label.geometry().left() <= i.files.geometry().left()  # (above, not beside)
     pills = list(i.files._buttons.values())
+    wait_until(lambda: label.geometry().bottom() <= i.files.geometry().top() and pills[-1].geometry().right() <= i.files.width(), 5)  # (the row is laid out)
+    assert label.geometry().bottom() <= i.files.geometry().top() and label.geometry().left() <= i.files.geometry().left()  # (above, not beside)
     assert all(b.isVisibleTo(i) for b in pills)
     assert pills[-1].geometry().right() <= i.files.width() and i.files.geometry().right() <= row.width()  # (every pill is inside the row)
     assert i.files.minimumSizeHint().width() <= row.width()
@@ -468,11 +472,13 @@ def test_details_and_your_files_sit_beside_the_start_button_and_their_popover_op
     assert order.index(bar.details) > stretch and order.index(bar.files) > stretch and order.index(bar.button) > order.index(bar.files)  # (after the stretch)
     assert order.index(bar.progress_box) < stretch
     assert bar.details.isVisibleTo(bar) and not bar.files.isVisibleTo(bar)
+    wait_until(lambda: bar.details.geometry().right() < bar.button.geometry().left() and bar.details.geometry().left() > bar.width() // 2, 5)  # (laid out)
     d, b = bar.details.geometry(), bar.button.geometry()
     assert d.right() < b.left() and b.left() - d.right() <= 30  # (right beside the button, not at the left of the bar)
     assert d.left() > bar.width() // 2
     bar.set_mode("files")  # Your files is in the same place
     settle(loaded)
+    wait_until(lambda: bar.button.geometry().left() - bar.files.geometry().right() <= 30, 5)  # (laid out)
     assert bar.files.isVisibleTo(bar) and not bar.details.isVisibleTo(bar) and bar.button.geometry().left() - bar.files.geometry().right() <= 30
 
 
@@ -487,6 +493,7 @@ def test_the_popover_of_details_and_your_files_opens_above_the_link_with_its_rig
     link_widget.click()
     pop = bar.popover
     assert pop.isVisible()
+    wait_until(lambda: abs(pop.x() + pop.width() - (link.x() + link_widget.width())) <= 2, 3)  # (a popup window takes its place a few events after it shows, on some platforms)
     assert pop.x() + pop.width() == pytest.approx(link.x() + link_widget.width(), abs=2), (  # (its right side is the link's right side)
         f"{which}: the popover's right edge is at {pop.x() + pop.width()}, the link's at {link.x() + link_widget.width()} "
         f"(the popover is {pop.width()} wide, its size hint {pop.sizeHint().width()})")
@@ -560,15 +567,17 @@ def test_the_jobs_column_cards_say_where_each_file_stands(window, tmp_path):
 
 def test_the_screen_is_two_columns_wide_and_one_column_narrow(window):
     s = window.studio
-    window.resize(1440, 900)
-    QApplication.processEvents()
     from PySide6.QtWidgets import QBoxLayout
 
-    assert window.body.direction() == QBoxLayout.Direction.LeftToRight and s.ed.direction() == QBoxLayout.Direction.LeftToRight
-    window.resize(780, 900)
-    QApplication.processEvents()
-    assert window.body.direction() == QBoxLayout.Direction.TopToBottom and s.ed.direction() == QBoxLayout.Direction.TopToBottom
+    wide, narrow = QBoxLayout.Direction.LeftToRight, QBoxLayout.Direction.TopToBottom
+
+    def directions():
+        return window.body.direction(), s.ed.direction()
+
+    sh.resized(window, 1440, 900, lambda: directions() == (wide, wide))
+    assert directions() == (wide, wide)
+    sh.resized(window, 780, 900, lambda: directions() == (narrow, narrow) and window.jobs.maximumWidth() > 300 and s.inspector.maximumWidth() > 356)
+    assert directions() == (narrow, narrow)
     assert window.jobs.maximumWidth() > 300 and s.inspector.maximumWidth() > 356  # (under the editor: the whole width)
-    window.resize(1440, 900)
-    QApplication.processEvents()
-    assert window.body.direction() == QBoxLayout.Direction.LeftToRight and window.jobs.maximumWidth() == 300
+    sh.resized(window, 1440, 900, lambda: directions() == (wide, wide) and window.jobs.maximumWidth() == 300)
+    assert directions() == (wide, wide) and window.jobs.maximumWidth() == 300

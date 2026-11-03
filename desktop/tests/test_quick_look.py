@@ -40,7 +40,7 @@ def test_the_waveform_of_a_long_file_is_read_in_a_few_seconds_and_fills_in_as_it
     seen: list[float] = []
     began = time.monotonic()
     peaks, seconds = quick_look.quick_peaks(ff, tone_file, info, buckets=600, partial=lambda pk, f: seen.append(f))
-    assert time.monotonic() - began < 10
+    assert time.monotonic() - began < 30  # (about a second on a desktop machine; the margin is for CI runners)
     assert len(peaks) == 600 and max(peaks) == 100 and seconds == pytest.approx(180.0, abs=0.5)
     loudest = int(np.argmax(peaks))
     assert abs(loudest - 400) <= 8  # the burst at two thirds
@@ -109,10 +109,10 @@ def test_the_engines_ffmpeg_does_not_wait_for_its_cancel_watcher_after_every_pro
     ff = engine._DesktopFFmpeg(Path("no-programs-are-run-here"), 1, cancel=threading.Event())
     quick = subprocess.Popen([sys.executable, "-c", "pass"])
     began = time.monotonic()
-    for _ in range(20):
+    for _ in range(60):
         with ff._guard(quick):
             pass
-    assert time.monotonic() - began < 1.0  # (the shared one: 20 x up to 0.1 s, so 1 to 2 s)
+    assert time.monotonic() - began < 2.0  # (the shared one: 60 x up to 0.1 s, so 3 to 6 s; this takes milliseconds)
     quick.wait()
     slow = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
@@ -207,7 +207,7 @@ def test_the_leveling_gains_are_worked_out_in_the_background_and_applied_when_re
     monkeypatch.setattr(clarity, "integrated_loudness", slow)
     began = time.monotonic()
     mix = live_mix.LiveMix(layers, tl, background=True)
-    assert time.monotonic() - began < 1.0  # built at once: it can play now, without Leveling, until the gains are there
+    assert time.monotonic() - began < 5.0  # built at once: it can play now, without Leveling, until the gains are there (waiting for them would take 10 s)
     assert mix.level_gains_db() == [] and mix.read(0, 100).shape == (100, 1)
     release.set()
     assert mix.wait_gains(30) and len(mix.level_gains_db()) == 1

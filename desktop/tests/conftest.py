@@ -223,6 +223,17 @@ def _no_windows_left_behind():
     app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
+@pytest.fixture(autouse=True)
+def _live_sound_stand_in_starts_clean():
+    """The stand-in for a job's live sound (studio_helpers.py) keeps how long it takes to open and the sessions it made at module level: a test that
+    slowed it down (or failed before it put it back) must not slow the next test on the same worker."""
+    yield
+    helpers = sys.modules.get("studio_helpers")
+    if helpers is not None:
+        helpers.SESSION_DELAY[0] = 0.0
+        helpers.FakeSession.made.clear()
+
+
 @pytest.fixture(scope="session")
 def qapp():
     try:

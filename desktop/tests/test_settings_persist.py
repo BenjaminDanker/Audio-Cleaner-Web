@@ -100,8 +100,9 @@ def test_every_choice_survives_closing_and_reopening(qapp, tmp_path, monkeypatch
     want = {"auto": False, "strength": "gentle", "remover": "heavy", "voice": "noise", "leveling": "broadcast", "subtitles": "on", "kind": "vtt",
             "language": "de", "echo": True, "size": "same", "format": "flac", "parallel": 0, "where": "folder", "folder": str(folder)}
     assert _shown(w) == want
-    w.resize(905, 641)
+    sh.resized(w, 905, 641)
     height = w.height()
+    assert height == 641
     _close(w)
 
     again = _open(tmp_path)
@@ -116,6 +117,7 @@ def test_every_choice_survives_closing_and_reopening(qapp, tmp_path, monkeypatch
         assert (o.strength, o.leveling, o.loudness, o.subtitles, o.language, o.noise) == ("gentle", True, "broadcast", "vtt", "de", "heavy")
         assert (o.echo_track, o.rebuild_voice, o.audio_format) == (True, False, "flac")
         assert again.prefs.parallel == 0 and again.prefs.output_dir() == folder
+        wait_until(lambda: again.height() == height, 5)
         assert again.height() == height and again.width() >= 640  # (not the 900 of a first start: the offscreen screen clamps the width, not the height)
         # the folder is offered again without asking when "Next to original" is picked and then "folder" again
         again._settings_dialog._where._buttons["next"].click()

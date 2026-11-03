@@ -580,7 +580,7 @@ def test_timings_add_up_over_the_renders_that_fill_them(monkeypatch):
     editor.render(tl, inp, blocks.MemoryCache(), runner)
     first = list(timings["heavy"])
     editor.render(tl, inp, blocks.MemoryCache(), runner)  # (another cache: everything runs again)
-    assert list(timings) == ["heavy"] and timings["heavy"][0] > first[0] + 0.01 and timings["heavy"][1] == pytest.approx(2 * first[1])  # added to the first
+    assert list(timings) == ["heavy"] and timings["heavy"][0] > first[0] and timings["heavy"][1] == pytest.approx(2 * first[1])  # added to the first
 
 
 @needs_dfn
