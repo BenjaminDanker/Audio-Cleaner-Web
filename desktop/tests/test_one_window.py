@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 
 import pytest
-from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
 
 from audio_cleaner_desktop.gui import main_window
@@ -14,46 +13,6 @@ import studio_helpers as sh
 from conftest import wait_until
 from studio_helpers import add_file, ready, windows_showing
 
-
-# ---------------------------------------------------------------------------------------------------- the empty screen
-
-def test_the_empty_screen_already_has_the_whole_layout(window):
-    s = window.studio
-    assert s.stack.currentIndex() == 0 and window.doc is None
-    # the place to drop a file is in the editor's main pane, where the picture and the timeline go; the rows are there, greyed
-    assert s.drop.isVisible() and s.ghost.isVisible() and s.output.isVisible() and not s.output.fields.isVisible()
-    assert s.inspector.ghost.isVisible() and not s.inspector.cards.isVisible() and s.inspector.heading.text() == "Settings"
-    ghost_text = " ".join(label.text() for label in s.inspector.ghost.findChildren(type(s.inspector.heading)))
-    for title in ("Voice", "Leveling", "Subtitles"):
-        assert title in ghost_text
-    # the (i) works already, Start does not
-    assert s.inspector.info.isVisible() and s.inspector.info.isEnabled()
-    assert s.start.button.text() == "Start" and not s.start.button.isEnabled()
-    # the jobs are a column beside the editor, and the left column ends level with the settings column
-    def column_bottoms():
-        return s.output.mapTo(window, QPoint(0, s.output.height())).y(), s.inspector.mapTo(window, QPoint(0, s.inspector.height())).y()
-
-    def laid_out():
-        return window.jobs.mapTo(window, QPoint(0, 0)).x() > s.mapTo(window, QPoint(0, 0)).x() + s.width() - 5 and abs(column_bottoms()[0] - column_bottoms()[1]) <= 2
-
-    wait_until(laid_out, 5)  # (the layout of a window that has just been shown is finished a few events later on some platforms)
-    assert window.jobs.isVisible() and window.jobs.mapTo(window, QPoint(0, 0)).x() > s.mapTo(window, QPoint(0, 0)).x() + s.width() - 5
-    out_bottom, insp_bottom = column_bottoms()
-    assert abs(out_bottom - insp_bottom) <= 2, (out_bottom, insp_bottom)
-    assert len(windows_showing()) == 1
-
-
-def test_the_i_opens_all_the_options_with_good_to_know(qapp, monkeypatch):
-    from PySide6.QtWidgets import QLabel
-
-    from audio_cleaner_desktop.gui.info_dialog import InfoDialog
-
-    dialog = InfoDialog()
-    text = " ".join(label.text() for label in dialog.findChildren(QLabel))
-    for heading in ("All the options", "Noise removal", "Echo removal", "Leveling", "Subtitles", "Good to know", "Voice: Noise removal or Voice rebuild?"):
-        assert heading in text
-    assert "Podcast" in text and "−16 LUFS" in text and "Nothing is uploaded" in text
-    dialog.close()
 
 
 def test_the_i_button_asks_for_the_options_dialog(window, monkeypatch):

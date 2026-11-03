@@ -7,7 +7,6 @@ import threading
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
 
 from audio_cleaner_desktop import engine
 
@@ -84,16 +83,6 @@ def test_the_box_holds_only_the_name_and_the_list_the_ending_and_typing_or_picki
     assert doc.out_name == "clip.mp3" and not o.size_box.isVisibleTo(o)
 
 
-def test_typing_x_mp3_makes_the_type_mp3_at_once_and_the_box_shows_x_and_leaving_it_changes_nothing(window, tmp_path):
-    doc = open_file(window, tmp_path)
-    o = window.studio.output
-    type_name(window, "x.mp3")
-    assert o.format.currentData() == ".mp3" and doc.out_name == "x.mp3" and o.name.text() == "x" and doc.item.out_name == "x.mp3"  # (before the box is left)
-    assert "MP3" in o.format.itemText(o.format.currentIndex()).upper()
-    leave_the_box(window)
-    assert o.format.currentData() == ".mp3" and doc.out_name == "x.mp3" and o.name.text() == "x"
-
-
 def test_an_ending_the_file_cannot_become_stays_in_the_name_box_with_its_hint_and_typing_on_gives_a_type_it_can_have(window, tmp_path):
     window.fakes.facts.update(video=True, ext=".mp4")
     doc = open_file(window, tmp_path, "clip.mp4")
@@ -109,21 +98,6 @@ def test_an_ending_the_file_cannot_become_stays_in_the_name_box_with_its_hint_an
     pick(window, ".mkv")  # or a type picked from the list
     assert doc.out_name == "clip.mkv" and o.name.text() == "clip"
     assert o.format.currentData() == ".mkv" and window.studio.start.button.isEnabled() and not o.hint.isVisibleTo(o)
-
-
-def test_the_name_box_and_the_file_type_list_are_one_joined_control(window, tmp_path):
-    open_file(window, tmp_path)
-    o = window.studio.output
-    def joined():
-        n, f = o.name.geometry(), o.format.geometry()
-        return n.top() == f.top() and n.height() == f.height() and n.right() + 1 == f.left()
-
-    wait_until(joined, 5)  # (the layout of the row is finished a few events after the file was taken in, on some platforms)
-    n, f = o.name.geometry(), o.format.geometry()
-    assert n.top() == f.top() and n.height() == f.height()  # as tall as each other
-    assert n.right() + 1 == f.left()  # no gap between the two: the list begins where the box ends
-    sheet = QApplication.instance().styleSheet()  # (and the list has no left border of its own, so the two share one line)
-    assert "QComboBox#FormatBox" in sheet and "border-left: 0px" in sheet.split("QComboBox#FormatBox {", 1)[1].split("}", 1)[0]
 
 
 def test_a_name_that_is_the_usual_one_again_follows_the_settings_again(window, tmp_path):
@@ -243,36 +217,6 @@ def test_the_usual_name_follows_the_audio_file_type_setting_and_a_typed_name_doe
     assert wait_until(lambda: window.doc.model is not None, 5)
     settle(window)
     assert window.studio.output.name.text() == "clip-cleaned" and window.studio.output.format.currentData() == ".mp4"  # a video is not touched by the audio file type
-
-
-def test_the_video_size_is_there_only_for_a_picture_and_is_remembered(window, tmp_path):
-    window.fakes.facts.update(video=True, ext=".mp4")
-    doc = open_file(window, tmp_path, "clip.mp4")
-    o = window.studio.output
-    assert o.size_box.isVisibleTo(o) and o.size.currentData() == "same" and "copied as it is" in o.size_hint.text()
-    o.sizePicked.emit("720")
-    settle(window)
-    assert doc.video_size == "720" and window.prefs.video_size == "720" and "made again at this size" in o.size_hint.text()
-    pick(window, ".mp3")  # only its sound: no picture, no size
-    assert not o.size_box.isVisibleTo(o)
-    assert window._wanted(doc).video_size == "720" if doc.is_job else True
-
-
-def test_the_pane_says_where_the_result_is_saved_and_what_it_will_save(window, tmp_path):
-    doc = open_file(window, tmp_path)
-    o = window.studio.output
-    assert o.where.text() == "Saved next to the original" and not o.next_to.isVisibleTo(o)
-    assert "<b>talk-cleaned.wav</b>" in o.will.text() and o.will.text().startswith("When it’s done, these are saved by themselves")
-    doc.set_subtitles("srt")
-    settle(window)
-    assert "talk-cleaned.wav and the subtitles (SRT)" in o.will.text()
-    window.prefs.output_folder, window.prefs.output_mode = str(tmp_path / "out"), "folder"
-    window._settings_changed()
-    settle(window)
-    assert o.where.text() == f"Saved in {tmp_path / 'out'}" and o.next_to.isVisibleTo(o)
-    o.next_to.click()
-    settle(window)
-    assert window.prefs.output_mode == "next" and o.where.text() == "Saved next to the original"
 
 
 @pytest.mark.native

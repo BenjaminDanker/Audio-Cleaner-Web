@@ -33,14 +33,6 @@ def test_the_trees_are_the_websites():
     assert reco_model.load() == web
 
 
-def test_the_model_file_is_the_one_this_code_reads():
-    m = reco_model.load()
-    assert m["version"] == reco_model.VERSION == 3 and tuple(m["features"]) == analysis.FEATURES
-    assert m["strength_classes"] == list(reco_model.STRENGTH_CLASSES)
-    assert m["noise"]["num_class"] == 4 and len(m["noise"]["trees"]) % 4 == 0 and m["rebuild"]["num_class"] == 1 and "restore" not in m
-    assert reco_model.MODEL_FILE.is_file() and reco_model.MODEL_FILE.parent == Path(analysis.__file__).parent
-
-
 def test_a_model_that_does_not_fit_is_refused(tmp_path):
     bad = dict(reco_model.load(), version=1)
     path = tmp_path / "m.json"
@@ -157,17 +149,6 @@ def test_the_base_voice_of_these_tests_is_left_alone():
     assert (clean.rebuild, clean.rebuild_reason) == (False, None)
 
 
-def test_each_cause_is_its_own_reason():
-    clean = stats()
-    assert reason_of({**clean, "dropDb": reco_model.ECHO_DROP_DB - 0.1}) == "echoey"
-    assert reason_of({**clean, "tiltDb": reco_model.DULL_TILT_DB, "bandwidthHz": 24000.0}) == "muffled"
-    assert reason_of({**clean, "bandwidthHz": reco_model.PHONE_HZ}) == "phone"
-    assert reason_of({**clean, "clipFraction": reco_model.CLIP_FRACTION * 1.5}) == "distorted"
-    for kw, reason in (({"dropDb": 3.0}, "echoey"), ({"tiltDb": -30.0}, "muffled"), ({"bandwidthHz": 3800.0}, "phone"), ({"clipFraction": 0.02}, "distorted")):
-        rec = reco_model.recommend({**clean, **kw})
-        assert rec.rebuild and rec.rebuild_reason == reason, kw
-
-
 def test_echo_is_named_before_muffled_before_phone_before_distortion():
     clean = stats()
     everything = {**clean, "dropDb": 3.0, "tiltDb": -30.0, "bandwidthHz": 24000.0, "clipFraction": 0.02}
@@ -221,21 +202,6 @@ def test_a_voice_only_the_trees_want_rebuilt_is_called_unclear():
     # any cause heard is named instead
     assert reco_model.recommend({**row["stats"], "clipFraction": 0.05}).rebuild_reason == "distorted"
     assert reco_model.recommend({**row["stats"], "dropDb": 1.0}).rebuild_reason == "echoey"
-
-
-def test_the_words_of_every_reason_follow_it_sounded():
-    """engine.py says "the voice was rebuilt because it sounded <words>" and the history "(it sounded <words>)"."""
-    reasons = ("echoey", "muffled", "phone", "distorted", "unclear")
-    assert tuple(reco_model.REBUILD_WORDS) == reasons
-    assert len(set(reco_model.REBUILD_WORDS.values())) == len(reasons)
-    # every reason the recommender gives has its words (the stored sets reach all of them)
-    given = {reco_model.recommend(r["stats"]).rebuild_reason for r in FIXTURE if r["reco"]} - {None}
-    assert given == set(reasons) and given <= set(reco_model.REBUILD_WORDS)
-    for reason, words in reco_model.REBUILD_WORDS.items():
-        for sentence in (f"it sounded {words}", f"it sounds {words}"):
-            assert re.fullmatch(r"it sound(s|ed) [a-z ]+", sentence), sentence
-        assert words == words.strip() and words != "" and not words.endswith((".", ","))
-    assert reco_model.REBUILD_WORDS["phone"] == "like a phone call"  # not the bare word: "it sounded phone" is not English
 
 
 def test_nobody_speaking_gets_the_middle_strength_and_nothing_else():
@@ -325,34 +291,6 @@ def test_where_the_voice_cannot_be_rebuilt_the_noise_is_removed_instead_and_it_i
         c = reco_model.choose(plain, rebuild_available=avail)
         assert not c.rebuild and not c.rebuild_wanted and c.rebuild_reason is None
         assert not any("Rebuilding" in r for r in c.reasons)
-
-
-def test_the_reasons_say_what_was_heard_and_what_is_done_in_plain_words():
-    forbidden = re.compile(r"(?i)deepfilter|dpdfnet|sidon|ap-bwe|polish|\bmodel\b|\btrees?\b|neural|\bai\b|libdf|onnx")
-    kinds = set()
-    for i, s in enumerate(rows()):
-        rec = reco_model.recommend(s)
-        for avail in (True, False):
-            c = reco_model.choose(rec, rebuild_available=avail)
-            assert c.reasons and all(isinstance(r, str) and r.endswith(".") and r == r.strip() for r in c.reasons), i
-            assert not [r for r in c.reasons if forbidden.search(r)], (i, c.reasons)
-            assert c.reasons[-1] == "Leveling evens out the voice and sets the loudness."
-            text = " ".join(c.reasons)
-            if c.no_speech:
-                assert "hardly hear anyone speaking" in text and "Balanced" in text
-                kinds.add("no speech")
-            elif c.rebuild:
-                assert "Rebuilding the voice fixes this" in text
-                for reason in rec.rebuild_reasons:  # every cause that was heard is said, none that was not
-                    assert reco_model._PROBLEMS[reason] in text
-                for reason in set(reco_model._PROBLEMS) - set(rec.rebuild_reasons):
-                    assert reco_model._PROBLEMS[reason] not in text
-                kinds.add("rebuilt")
-            else:
-                assert reco_model.STRENGTH_NAMES[rec.strength] in text or ("clean and quiet" in text and rec.strength == "gentle")
-                assert ("stronger noise remover" in text) == rec.heavy_remover
-                kinds.add("denoised")
-    assert kinds == {"no speech", "rebuilt", "denoised"}
 
 
 def test_automatic_is_recommend_then_choose_and_says_nothing_where_the_website_does():

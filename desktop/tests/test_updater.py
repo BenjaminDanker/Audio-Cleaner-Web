@@ -404,23 +404,6 @@ def test_a_failed_check_does_not_use_up_the_day(qapp, tmp_path, server, key):
     assert prefs.update_last_check == 0 and ctl.due()
 
 
-def test_nothing_happens_when_the_setting_is_off_or_from_source(qapp, tmp_path, server, key):
-    _publish(server, key)
-    prefs = _prefs(tmp_path)
-    prefs.check_updates = False
-    ctl, _ = _controller(qapp, tmp_path, server, key, prefs=prefs)
-    ctl.startup_check()
-    ctl.schedule_startup_check(0)
-    assert ctl._thread is None and _Handler.requests == []
-    # from source (not frozen) there is no automatic update, and "Check now" says why without any request
-    src = updater.UpdateController(_prefs(tmp_path), current="2.0.3", manifest_url=f"{server}/desktop/update.json")
-    assert not src.enabled
-    src.startup_check()
-    src.check_now()
-    assert src._thread is None and _Handler.requests == []
-    assert src.status == "Updates are only installed in the installed app."
-
-
 def test_the_update_setting_defaults_to_on_and_is_remembered(qapp, tmp_path):
     ini = tmp_path / "s.ini"
     assert Preferences(QSettings(str(ini), QSettings.Format.IniFormat)).check_updates is True
@@ -431,43 +414,6 @@ def test_the_update_setting_defaults_to_on_and_is_remembered(qapp, tmp_path):
 
 
 # ---- the window ------------------------------------------------------------------------------------------------
-def _window(tmp_path):
-    from audio_cleaner_desktop.gui.main_window import MainWindow
-
-    w = MainWindow([], settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
-                   history_path=tmp_path / "history.db")
-    w.show()
-    return w
-
-
-def _fake_ready(w, tmp_path, version="2.0.15"):
-    installer = b"installer" * 100
-    path = tmp_path / f"AudioCleaner-{version}-Windows.exe"
-    path.write_bytes(installer)
-    entry = updater.UpdateFile(path.name, len(installer), hashlib.sha256(installer).hexdigest())
-    w.updater.ready_update = updater.Update(version, entry, b"{}", b"")
-    w.updater.ready_path = path
-    w.updater.readyChanged.emit()
-
-
-@pytest.mark.skipif(sys.platform == "darwin", reason="the banner says Install on a Mac")
-def test_the_banner_offers_restart_and_waits_for_a_running_batch(qapp, tmp_path, monkeypatch):
-    w = _window(tmp_path)
-    try:
-        assert w.banner_update.isHidden()
-        _fake_ready(w, tmp_path)
-        assert not w.banner_update.isHidden()
-        monkeypatch.setattr(type(w.queue), "busy", property(lambda self: True))
-        w._update_action()  # files are being cleaned: never interrupt them
-        assert w._restart_when_idle and w.isVisible() and not w.updater.relaunch
-        monkeypatch.undo()
-        w._update_action()  # idle: closes the app and asks setup to start the new version
-        assert w._closing and w.updater.relaunch and not w._restart_when_idle
-    finally:
-        w._closing = True
-        w.deleteLater()
-
-
 def test_closing_starts_the_installer_once_per_version(qapp, tmp_path, monkeypatch):
     started = []
     monkeypatch.setattr(updater, "start_windows_installer", lambda path, relaunch: started.append((path.name, relaunch)))

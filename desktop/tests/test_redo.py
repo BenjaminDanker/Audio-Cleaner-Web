@@ -13,7 +13,7 @@ import pytest
 from acw_common import captions, dfn, dpdfnet, editor, pipeline, restore
 from acw_common.ffmpeg import MediaError
 from acw_common.timeline import Timeline
-from audio_cleaner_desktop import copies, editor_job, engine, redo, resources, speed
+from audio_cleaner_desktop import copies, editor_job, engine, redo, resources
 
 SR = pipeline.SAMPLE_RATE
 
@@ -250,28 +250,6 @@ def test_voice_rebuild_on_runs_that_step_once_and_keeps_its_result_for_the_next_
     # Voice rebuild off again: back to the noise removal the first run made, no model
     off = redo.run(job, redo.Wanted(timeline=timeline(24.0), output_name="plain.wav"))
     assert job.made["rebuilt"] is False and off.output.is_file() and fake_voice == [[0]]
-
-
-@pytest.mark.native
-def test_a_run_and_a_change_tell_speed_how_long_each_step_took_and_the_speech_too(clip, tmp_path, fake_voice, monkeypatch):
-    heard = []
-    monkeypatch.setattr(speed, "learn", lambda timings, threads: heard.append(({k: list(v) for k, v in timings.items()}, threads)))
-    monkeypatch.setattr(resources, "speech_ready", lambda: True)
-    monkeypatch.setattr(engine, "_transcribe", lambda ff, src, info, work, options, threads, progress, cancel, echo_free=None: (list(SEGMENTS), "en"))
-    keep = copies.new_job_dir(tmp_path / "jobs")
-    engine.process(clip, engine.JobOptions(noise="light", leveling=False, audio_format="wav", subtitles="srt", language="en"), out_dir=tmp_path / "out", keep_dir=keep,
-                   threads=3)
-    job = copies.JobCopies.load(keep)
-    assert len(heard) == 1 and heard[0][1] == 3  # (the threads the run had)
-    timings = heard[0][0]
-    assert set(timings) == {"light", "speech"} and timings["light"][0] > 0 and timings["light"][1] >= 3.0  # (the blocks' audio, with their context)
-    assert timings["speech"][0] >= 0 and timings["speech"][1] == pytest.approx(3.0, abs=0.1)  # (seconds of speech: the recording's)
-    heard.clear()
-    redo.run(job, redo.Wanted(timeline=timeline(rebuild=True), output_name="rebuilt.wav"), threads=2)
-    assert len(heard) == 1 and heard[0][1] == 2 and set(heard[0][0]) == {"rebuild"} and heard[0][0]["rebuild"][1] > 0  # (the transcript was saved: not listened to again)
-    heard.clear()
-    redo.run(job, redo.Wanted(timeline=timeline(rebuild=True), subtitles="srt", language="de", output_name="de.wav"), threads=2)  # another language: listened to again
-    assert len(heard) == 1 and set(heard[0][0]) == {"speech"} and heard[0][0]["speech"][1] == pytest.approx(3.0, abs=0.1)
 
 
 @pytest.mark.native

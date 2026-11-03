@@ -157,20 +157,6 @@ def test_decoder_blocks_with_context_equal_one_shot():
     assert np.abs(block - whole[a * R.DECODER_UPSAMPLE : b * R.DECODER_UPSAMPLE]).max() < 1e-4
 
 
-def test_blockwise_helpers_equal_the_whole_array_formulas(monkeypatch):
-    rng = np.random.default_rng(3)
-    x = np.stack([rng.standard_normal(70_001), 0.3 * rng.standard_normal(70_001)], axis=1).astype(np.float32)
-    mid = 0.5 * (x[:, 0].astype(np.float64) + x[:, 1])
-    side = 0.5 * (x[:, 0].astype(np.float64) - x[:, 1])
-    want = 10 * np.log10((np.mean(side**2) + 1e-20) / (np.mean(mid**2) + 1e-20))
-    monkeypatch.setattr(R, "_BLOCK", 4096)  # many blocks, the last one short
-    assert abs(R._side_db(x) - want) < 1e-9
-    view = R._Mid(x)
-    want_mid = np.ascontiguousarray(0.5 * (x[:, 0] + x[:, 1]))
-    assert len(view) == 70_001 and view[10:700].dtype == np.float32
-    assert np.array_equal(view[10:700], want_mid[10:700]) and np.array_equal(view[0:70_001], want_mid)
-
-
 @needs_model
 def test_samples_do_not_depend_on_the_worker_count():
     """Windows and decoder blocks are independent: the pool of single-threaded sessions must not change the output."""

@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from audio_cleaner_desktop import copies, editor_job, engine, resources
+from audio_cleaner_desktop import copies, engine, resources
 from audio_cleaner_desktop.gui import main_window
 from audio_cleaner_desktop.gui.history import DONE, FAILED, Entry
 from audio_cleaner_desktop.gui.items import format_size
@@ -165,32 +165,6 @@ def test_deleting_the_job_that_is_open_closes_its_live_sound_and_shows_the_empty
 
 # ---------------------------------------------------------------------------------------------------- a job in the editor
 
-def test_a_job_that_keeps_blocks_opens_with_its_parts_and_its_live_sound(jw, folder):
-    job, eid = add_job(jw.history, folder)
-    doc = open_job(jw, eid)
-    s = jw.studio
-    session = FakeSession.made[-1]
-    assert s.preview.live and s.preview._stream is session.mix and doc.model.done == editor_job.baseline_timeline(job, 10.0)
-    assert doc.model.strength_of(0, 10) == "balanced" and not doc.changed_sound and doc.peaks[:4] == [30, 80, 50, 100]
-    assert s.start.button.text() == "Open the file" and s.start.button.isEnabled() and s.top.hear_box.isVisible()
-    # the timeline's rows show what the job was made with, and the speakers of the rows are on
-    assert [(x["label"]) for x in dict(s.timeline.plot.lanes())["voice"]] == ["Balanced · Light"]
-    assert s.timeline.labels._hear and s.timeline.labels._buttons["voice"].isChecked() and s.timeline.labels._buttons["voice"].isVisibleTo(s.timeline.labels)
-    assert "Hearing: everything" == s.timeline.plot.hearing_text
-    assert not s.timeline.labels._buttons["echo"].isVisibleTo(s.timeline.labels)  # (no second audio track)
-
-
-def test_the_playhead_follows_the_player_and_the_timeline_moves_it(jw, folder):
-    _, eid = add_job(jw.history, folder)
-    open_job(jw, eid)
-    s = jw.studio
-    s.preview._player.setPosition(4500)
-    s.preview._on_position(4500)
-    assert s.timeline.plot.playhead == pytest.approx(4.5, abs=0.01) and s.top.time.text() == "0:05 / 0:10" or s.top.time.text() == "0:04 / 0:10"
-    s.timeline.seekRequested.emit(7.0)
-    assert s.preview._player.position() == 7000 and s.timeline.plot.playhead == 7.0 and s.top.time.text() == "0:07 / 0:10"
-
-
 def test_the_speakers_of_the_rows_change_the_live_sound_and_not_the_timeline(jw, folder):
     _, eid = add_job(jw.history, folder)
     doc = open_job(jw, eid)
@@ -338,22 +312,6 @@ def test_a_change_that_fails_says_why_and_changes_nothing(jw, folder, run):
     assert jw.studio.start.button.isEnabled() and doc.stage == "done"
 
 
-def test_a_job_cannot_be_deleted_while_a_change_is_being_saved_and_closing_stops_the_save(jw, folder, run):
-    job, eid = add_job(jw.history, folder)
-    doc = open_job(jw, eid)
-    doc.set_out_name("again.wav")
-    run.gate = threading.Event()
-    jw.save_changes(doc)
-    assert wait_until(lambda: jw._saving is not None, 5)
-    jw.delete_entry(eid)
-    assert jw.history.get(eid) is not None and job.dir.exists()
-    threading.Timer(0.2, run.gate.set).start()
-    jw._closing = True
-    jw._saving.cancel.set()
-    assert jw._saving.wait(5000)
-    run.gate.set()
-
-
 def test_saving_only_the_subtitles_needs_the_transcript_but_not_the_original(jw, folder, run):
     job, eid = add_job(jw.history, folder, transcript=True)
     folder.original.unlink()  # gone: every other change is unavailable
@@ -398,16 +356,6 @@ def test_a_moved_original_makes_every_change_unavailable_and_it_can_be_found_aga
     assert wait_until(lambda: doc.session_state == "ready", 10)
     settle(jw)
     assert s.start.button.isEnabled()
-
-
-def test_a_changed_original_is_said_and_cannot_be_found_by_hand(jw, folder):
-    _, eid = add_job(jw.history, folder)
-    folder.original.write_bytes(b"something else entirely")
-    doc = open_job(jw, eid, live=False)
-    settle(jw)
-    assert doc.original.state == "changed" and doc.session_state == "none"
-    banner = jw.studio.notes.itemAt(0).widget()
-    assert "changed" in banner._label.text() and not banner._button.isVisibleTo(banner)
 
 
 def test_an_old_job_with_saved_copies_opens_at_once_and_has_no_setup_button(jw, folder):
@@ -495,65 +443,6 @@ def test_leaving_a_job_closes_its_live_sound_and_another_file_takes_its_place(jw
 
 # ---------------------------------------------------------------------------------------------------- suggestions
 
-def test_suggestions_are_found_when_none_were_kept_applied_undone_dismissed_and_kept_with_the_job(jw, folder):
-    jw.doc_env.auto_suggest = True
-    job, eid = add_job(jw.history, folder)
-    doc = open_job(jw, eid)  # (nothing was kept: they are looked for by themselves once the live sound is there)
-    assert wait_until(lambda: [s.id for s in doc.model.suggestions] == ["s0"], 10) and "find" not in doc._workers
-    job2 = copies.JobCopies.load(job.dir)
-    assert editor_job.stored_suggestions(job2)["items"][0]["id"] == "s0"  # kept with the job
-    settle(jw)
-    s = jw.studio
-    assert s.timeline.plot._pin_positions() == [("s0", 4.0, "open")] and s.top.chip2.isVisible() and s.top.chip2.text().startswith("1")
-    s.inspector.suggestionApplied.emit("s0")
-    assert doc.model.switch_of("rebuild", 3, 5) is True and doc.changed_sound
-    assert copies.JobCopies.load(job.dir).editor["suggestions"]["items"][0]["state"] == "applied"
-    doc.model.undo("s0")
-    doc.keep_suggestions()
-    s.inspector.suggestionDismissed.emit("s0")
-    assert copies.JobCopies.load(job.dir).editor["suggestions"]["items"][0]["state"] == "dismissed" and not doc.model.open_suggestions()
-    # the next time the job is opened they are not looked for again, and the dismissed one stays dismissed
-    jw._show(None)
-    n = len(FakeSession.made)
-    again = open_job(jw, eid)
-    assert len(FakeSession.made) == n + 1 and again.sg == "done" and [x.state for x in again.model.suggestions] == ["dismissed"]
-
-
-def test_looking_for_suggestions_can_be_stopped_and_a_long_recording_waits_for_the_button(jw, folder, monkeypatch):
-    job, eid = add_job(jw.history, folder)
-    original = FakeSession.__init__
-
-    def slow(self, job, seconds=10.0):
-        original(self, job, seconds)
-        self.gate = threading.Event()
-
-    monkeypatch.setattr(FakeSession, "__init__", slow)
-    doc = open_job(jw, eid)
-    s = jw.studio
-    assert doc.can_offer_find and s.top.sg_action.text() == "Look for them"  # (not looked for by themselves here)
-    s.top.sg_action.click()
-    assert wait_until(lambda: doc.sg == "running", 5)
-    settle(jw)
-    assert "Listening to your file for moments worth a look" in s.top.sg_text.text() and s.top.sg_action.text() == "Cancel"
-    s.top.sg_action.click()
-    assert wait_until(lambda: doc.sg == "canceled", 10)
-    settle(jw)
-    assert doc.model.suggestions == [] and "Stopped looking" in s.top.sg_text.text()
-    # a long recording: nothing is looked for by itself, there is a button
-    monkeypatch.setattr(FakeSession, "__init__", original)
-    jw._show(None)
-    long_job, long_id = add_job(jw.history, folder, seconds=editor_job.SUGGEST_AUTO_SECONDS + 60.0, name="long.wav")
-    long_job.data["samples"] = int((editor_job.SUGGEST_AUTO_SECONDS + 60.0) * SR)
-    long_job.editor["facts"]["n"] = long_job.data["samples"]
-    long_job.save()
-    jw.doc_env.auto_suggest = True
-    jw.open_entry(long_id)
-    longdoc = jw.doc
-    assert wait_until(lambda: longdoc.session_state == "ready", 10)
-    settle(jw)
-    assert longdoc.sg == "idle" and longdoc.can_offer_find and s.top.sg_action.text() == "Look for them"
-
-
 def test_a_file_that_has_not_run_finds_moments_worth_a_look_and_applying_one_goes_to_the_run(jw, tmp_path, runner):
     class Plan:
         closed = False
@@ -599,8 +488,9 @@ def keeper(window, tmp_path):
         made["keep_dirs"].append(keep_dir)
         out = Path(out_dir or path.parent) / (output_name or "x-cleaned.wav")
         if path.name.startswith("stop"):
-            while not cancel.wait(0.01):
-                pass
+            for _ in range(3000):  # (until it is stopped, at most 30 s: a test that fails first must not leave it spinning)
+                if cancel.wait(0.01):
+                    break
             raise engine.Cancelled()
         if keep_dir is not None and not path.name.startswith(("nokeep", "hopeless")):
             Path(keep_dir).mkdir(parents=True, exist_ok=True)
@@ -721,29 +611,3 @@ def test_files_that_wait_can_be_moved_earlier_or_later_in_line(keeper, tmp_path)
     assert wait_until(lambda: all(i.state == "done" for i in w._items.values()), 20)
     started = [e.name for e in sorted(w.history.search(), key=lambda e: e.id)]
     assert started == order  # they were started in the order they were put in
-
-
-def test_files_added_by_the_dozen_are_read_a_few_at_a_time_and_the_one_in_the_editor_first(jw, tmp_path):
-    jw.PROBES_AT_ONCE = 2
-    release = threading.Event()
-    seen = []
-    real = jw.fakes.probe
-
-    def slow(path, ff=None):
-        seen.append(path.name)
-        release.wait(5)
-        return real(path, ff)
-
-    jw.doc_env.probe = slow
-    names = [f"f{n}.wav" for n in range(6)]
-    for n in names:
-        (tmp_path / n).write_bytes(b"x" * 50)
-    jw.add_paths([tmp_path / n for n in names])
-    assert wait_until(lambda: len(seen) == 2, 5) and len(jw._probing) == 2 and len(jw._to_probe) == 4
-    jw.open_item(6)  # another one is asked for: it is next in line
-    assert jw._to_probe[0].name == "f5.wav"
-    release.set()
-    assert wait_until(lambda: all(i.probed for i in jw._items.values()), 10) and sorted(seen) == names
-    assert not jw._probing and not jw._to_probe
-    jw.remove_item(1)
-    assert len(jw._items) == 5

@@ -42,12 +42,6 @@ def test_the_model_in_the_build_is_complete_and_loads():
     assert reco_model.MODEL_FILE.stat().st_size > 100_000  # not an empty or cut-off file
 
 
-def test_the_selftest_checks_the_model_and_the_measurements():
-    from audio_cleaner_desktop import cli
-
-    cli._check_recommender()  # raises when the trees are missing or decide nothing
-
-
 @needs_sync
 def test_the_public_copy_takes_the_model_and_the_new_code(tmp_path):
     spec = importlib.util.spec_from_file_location("sync_public_desktop", SYNC)

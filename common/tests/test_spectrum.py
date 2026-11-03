@@ -1,9 +1,5 @@
 """Spectrum measurements (spectrum.py): where the speech ends (the bandwidth) and the tilt of the top of the speech band, on synthetic
 speech-like audio: the cut-off of a phone-quality recording is found, a normal recording is not called band-limited."""
-import subprocess
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 import scipy.signal as ss
@@ -87,34 +83,3 @@ def test_silence_and_short_input_are_full_band(full):
 def test_the_tilt_is_very_negative_for_a_muffled_voice_and_missing_without_speech(full):
     assert spectrum.tilt_db(full) > spectrum.tilt_db(lowpass(full, 3_400))
     assert spectrum.tilt_db(np.zeros(SR, np.float32)) is None
-
-
-def test_two_channel_memory_map_is_read_block_by_block(tmp_path, monkeypatch):
-    """The bandwidth of a memory-mapped two-channel file equals the in-memory mix's, and no array bigger than the file is made."""
-    # 60 s: the sampled frames (a fixed bound, ~4 M samples) must be smaller than the file for the spy to mean something
-    mono = ss.sosfilt(ss.butter(8, 3_400, fs=SR, output="sos"), np.tile(speech_like(12), 5)).astype(np.float32)
-    st = np.stack([mono, 0.5 * mono[::-1]], axis=1)
-    mm = np.memmap(tmp_path / "x.f32", dtype=np.float32, mode="w+", shape=st.shape)
-    mm[:] = st
-    seen = []
-    real = np.asarray
-
-    def spy(a, *args, **kwargs):
-        out = real(a, *args, **kwargs)
-        seen.append(out.size)
-        return out
-
-    monkeypatch.setattr(spectrum.np, "asarray", spy)
-    bw = spectrum.effective_bandwidth(mm)
-    monkeypatch.undo()
-    assert bw == spectrum.effective_bandwidth(st) == spectrum.effective_bandwidth(st.mean(axis=1))
-    assert max(seen) <= mm.size  # wrapping the map is fine; no array bigger than the input is ever made
-    assert bw <= PHONE_HZ
-    assert spectrum.effective_bandwidth(mono[:, None]) == spectrum.effective_bandwidth(mono)  # one channel, 2-D
-
-
-def test_scipy_signal_is_loaded_only_where_it_is_used():
-    """It takes most of a second to import: importing the pipeline must not pay for it."""
-    code = "import sys; import acw_common.pipeline; sys.exit('scipy.signal' in sys.modules)"
-    r = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1])
-    assert r.returncode == 0

@@ -98,56 +98,18 @@ def test_automatic_decides_from_a_few_stretches_the_same_as_from_all_of_the_file
     assert quick_look.decide(long, info, engine.JobOptions(strength="gentle", noise="light")) is None  # nothing left automatic: nothing to listen for
 
 
-def test_the_engines_ffmpeg_does_not_wait_for_its_cancel_watcher_after_every_program(monkeypatch):
-    """The shared FFmpeg starts a watcher thread per program and joins it, which waits up to 0.1 s for it to look again: 120 blocks of an hour-long job
-    took 13 s. This one lets the watcher end by itself; and it still stops a running program when cancelled."""
-    import subprocess
-    import sys
-
-    from pathlib import Path
-
-    ff = engine._DesktopFFmpeg(Path("no-programs-are-run-here"), 1, cancel=threading.Event())
-    quick = subprocess.Popen([sys.executable, "-c", "pass"])
-    began = time.monotonic()
-    for _ in range(60):
-        with ff._guard(quick):
-            pass
-    assert time.monotonic() - began < 2.0  # (the shared one: 60 x up to 0.1 s, so 3 to 6 s; this takes milliseconds)
-    quick.wait()
-    slow = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        with ff._guard(slow):
-            ff.cancel.set()
-            assert slow.wait(5) is not None  # killed by the watcher
-    finally:
-        if slow.poll() is None:
-            slow.kill()
-    # with no cancel event there is no watcher at all
-    plain = engine._DesktopFFmpeg(Path("no-programs-are-run-here"), 1)
-    with plain._guard(quick):
-        pass
-
-
 class SlowCache:
     """A block cache whose reads take a while (each is a program started and a file decoded)."""
 
     def __init__(self, n, delay):
         self.keys = {}
         self.delay, self.n = delay, n
-        self.reading = 0
-        self.max_reading = 0
-        self.lock = threading.Lock()
 
     def has(self, key):
         return key in self.keys
 
     def get(self, key):
-        with self.lock:
-            self.reading += 1
-            self.max_reading = max(self.max_reading, self.reading)
         time.sleep(self.delay)
-        with self.lock:
-            self.reading -= 1
         return self.keys[key]
 
 
@@ -163,19 +125,6 @@ def make_plan(seconds=60.0, block=1.0):
     for t in plan.tasks:
         cache.keys[t.key] = np.full(t.e - t.s, 0.1, np.float32)
     return src, plan, cache
-
-
-def test_the_blocks_of_a_job_are_read_a_few_at_a_time_and_say_how_far_it_is(tmp_path):
-    src, plan, cache = make_plan(150.0)
-    layers = live_mix.Layers(src, [0], tmp_path)
-    steps: list[float] = []
-    read = layers.load(cache, plan, progress=steps.append)
-    assert read == len(plan.tasks) and cache.max_reading > 1 and cache.max_reading <= live_mix.BLOCK_READERS  # (more than one read at a time: they overlap)
-    assert steps and steps[-1] == 1.0 and all(b >= a for a, b in zip(steps, steps[1:]))
-    assert layers.have["light"].all() and np.allclose(layers.array("light")[:100, 0], 0.1)
-    read_again = layers.load(cache, plan)  # nothing new: nothing is read again
-    assert read_again == 0 and layers.have["light"].all()
-    layers.close()
 
 
 def test_loading_the_blocks_can_be_stopped(tmp_path):

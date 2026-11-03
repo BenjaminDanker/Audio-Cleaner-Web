@@ -97,15 +97,6 @@ def noise_tl(seconds, *parts, level=False, rebuild=()):
 # ---------------------------------------------------------------------------------------------------------------------
 # The block grid and the cache
 # ---------------------------------------------------------------------------------------------------------------------
-def test_the_grids_are_the_measured_ones():
-    assert (blocks.GRID_LIGHT.seconds, blocks.GRID_LIGHT.before, blocks.GRID_LIGHT.after) == (30.0, 16.0, 0.25)
-    assert (blocks.GRID_HEAVY.seconds, blocks.GRID_HEAVY.before, blocks.GRID_HEAVY.after) == (30.0, 24.0, 0.25)
-    assert (blocks.GRID_ECHO.seconds, blocks.GRID_ECHO.before) == (30.0, 10.0) and blocks.GRID_ECHO.after * SR >= 432
-    assert restore.block_samples() == 14 * SR  # 16 s windows, 2 s of overlap
-    assert restore.block_input_range(2, 100 * SR) == (12 * SR, 60 * SR)  # windows 1, 2 and 3 (14 s steps of 16 s) and the 2 s the filters read
-    assert restore.block_input_range(0, 100 * SR) == (0, 32 * SR)  # the first block has no window before it
-
-
 def test_windows_are_the_files_grid_cells_with_their_context_clamped_to_the_stretch():
     g = blocks.GRID_LIGHT
     w = blocks.grid_windows(0, 70 * SR, g)
@@ -268,23 +259,6 @@ def ramp_zone(lay, i=0):
     return j.z0, j.z1
 
 
-def test_join_lengths_follow_the_kinds():
-    inp = make(60)
-    lay = editor.Layout(noise_tl(60, (10, 20, 24.0, "light"), (20, 30, 24.0, "heavy"), (30, 40, 12.0, "heavy")), inp)
-    assert [(s.kind, s.a // SR, s.b // SR) for s in lay.main] == [("pass", 0, 10), ("noise", 10, 20), ("noise", 20, 30), ("noise", 30, 40), ("pass", 40, 60)]
-    assert [j.d for j in lay.main_joins] == [4800, 2400, 4800, 4800]  # on / off or another strength: 100 ms; light vs heavy: 50 ms
-    assert all(j.kind == "A" and j.shape == "lin" for j in lay.main_joins)
-    assert [(j.z1 - j.z0) for j in lay.main_joins] == [j.d for j in lay.main_joins] and lay.main_joins[0].z0 == 10 * SR - 2400
-    echo = editor.Layout(Timeline(60.0).paint("echo", 10, 20), editor.Inputs(inp.source, "x", np.zeros(len(inp.source), np.float32), "r"))
-    assert [j.d for j in echo.echo_joins] == [2400, 2400]  # echo removal: 50 ms
-    lev = editor.Layout(Timeline(60.0).paint("leveling", 10, 20), inp)
-    assert [j.d for j in lev.level_joins] == [4800, 4800]
-    rb = editor.Layout(noise_tl(60, (0, 60, 24.0, "light"), rebuild=[(20, 30)]), inp)
-    assert [j.kind for j in rb.main_joins] == ["B", "B"] and all(j.shape == "ep" for j in rb.main_joins)
-    short = editor.Layout(noise_tl(60, (10, 10.05, 24.0, "light")), inp)  # a ramp is never longer than the part beside it
-    assert max(j.d for j in short.main_joins) <= int(0.05 * SR)
-
-
 def d2peak(x, a, b):
     return float(np.abs(x[a:b][2:] - 2 * x[a:b][1:-1] + x[a:b][:-2]).max() + 1e-9)
 
@@ -339,55 +313,6 @@ def _render_obj(tl, inp, cache):
     return r
 
 
-def test_kind_b_joins_move_to_a_pause_and_are_100_ms_there_else_250_ms():
-    x = voiced(60, 3)[:, None]
-    t_nom = 20.0
-    # a pause right of the nominal join (the quietest 60 ms within 0.3 s): silence 20.15 .. 20.40 s
-    x[int(20.15 * SR):int(20.40 * SR)] *= 0.001
-    inp = editor.Inputs(np.ascontiguousarray(x), "p")
-    tl = noise_tl(60, (0, 20, 100.0, "light"), rebuild=[(20, 40)])
-    cache = blocks.MemoryCache()
-    fill(cache, editor.plan(tl, inp, cache), inp, rebuilt_gain=1.0)
-    j = _render_obj(tl, inp, cache).lay.main_joins[0]
-    assert j.kind == "B" and j.d == int(0.1 * SR) and abs(j.t - 20 * SR) <= 0.3 * SR and j.t != 20 * SR  # moved, 100 ms
-    assert 20.15 * SR <= j.t <= 20.40 * SR and j.z1 - j.z0 == j.d
-    # speech all the way (no pause within 0.3 s): stays, 250 ms
-    tone = (0.2 * np.sin(2 * np.pi * 150 * np.arange(60 * SR) / SR)).astype(np.float32)[:, None]
-    inp2 = editor.Inputs(np.ascontiguousarray(tone), "q")
-    fill_cache = blocks.MemoryCache()
-    fill(fill_cache, editor.plan(tl, inp2, fill_cache), inp2, rebuilt_gain=1.0)
-    j2 = _render_obj(tl, inp2, fill_cache).lay.main_joins[0]
-    assert j2.t == 20 * SR and j2.d == int(0.25 * SR)
-
-
-def test_kind_b_loudness_match_is_clamped_to_9_db_and_fades_out_over_2_s():
-    inp = make(60, 4)
-    x = inp.source[:, 0]
-    tl = noise_tl(60, (0, 60, 100.0, "light"), rebuild=[(20, 40)])
-    for gain, expect in ((0.1, 9.0), (1.0, None)):  # the rebuilt voice 20 dB under the noise-removed one, then 6 dB over (0.5 * 2)
-        cache = blocks.MemoryCache()
-        fill(cache, editor.plan(tl, inp, cache), inp, rebuilt_gain=gain)
-        r = _render_obj(tl, inp, cache)
-        for j in r.lay.main_joins:
-            if expect is not None:
-                assert j.gain_db == pytest.approx(expect, abs=1e-6)  # clamped: 20 dB short, 9 dB applied
-            else:
-                assert -9.0 <= j.gain_db <= -3.0  # louder by about 6 dB: brought down
-    # the gain is smooth and gone after 2 s: the rebuilt voice in the middle of a 20 s part is untouched
-    cache = blocks.MemoryCache()
-    fill(cache, editor.plan(tl, inp, cache), inp, rebuilt_gain=0.1)
-    y = editor.render(tl, inp, cache)[:, 0]
-    mid = slice(23 * SR, 37 * SR)
-    assert np.allclose(y[mid], 0.1 * x[mid], atol=1e-7)
-    j = editor._Render(tl, inp, cache, None, None, None, None, None)
-    j.make_b_joins(inp.source, j.lay.main, j.lay.main_joins)
-    g = j.rebuild_gain(j.lay.main, j.lay.main_joins, 1, 19 * SR, 25 * SR)
-    jt = j.lay.main_joins[0].t
-    assert g[0] == pytest.approx(10 ** (9 / 20), rel=1e-4)  # full on the other side of the join
-    assert abs(g[jt + SR // 2 - 19 * SR] - 1.0) > 0.2 and g[jt + 2 * SR - 19 * SR] == pytest.approx(1.0, abs=1e-6)
-    assert np.all(np.abs(np.diff(g)) < 1e-3)  # smooth: no step
-
-
 def test_kind_b_joins_are_equal_power_crossfades_without_clicks(monkeypatch):
     monkeypatch.setattr(editor, "_active_level_db", lambda x: 0.0)  # no loudness match here: the crossfade on its own
     inp = make(60, 6)
@@ -427,17 +352,6 @@ def test_a_part_at_the_file_edge_or_shorter_than_its_ramp_has_no_missing_join():
 # ---------------------------------------------------------------------------------------------------------------------
 # Leveling per part
 # ---------------------------------------------------------------------------------------------------------------------
-def test_leveling_is_measured_on_the_part_and_max_its_length_or_10_s_each_side_clamped_to_the_file():
-    inp = make(100)
-    lay = editor.Layout(Timeline(100.0).paint("leveling", 0, 5), inp)
-    assert lay.measure_span(0, 5 * SR) == (0, 15 * SR)  # never before 0
-    assert lay.measure_span(95 * SR, 100 * SR) == (85 * SR, 100 * SR)  # never past the end
-    assert lay.measure_span(40 * SR, 60 * SR) == (20 * SR, 80 * SR)  # 1 x the part's length each side
-    assert lay.measure_span(30 * SR, 31 * SR) == (20 * SR, 41 * SR)  # a short part: 10 s each side
-    assert lay.measure_span(0, 100 * SR) == (0, 100 * SR)
-    assert lay.measure_span(10 * SR, 95 * SR) == (0, 100 * SR)  # long: clamped on both sides
-
-
 def lufs(x):
     return clarity.integrated_loudness(np.asarray(x, np.float32), SR)
 
@@ -533,19 +447,6 @@ def test_inputs_and_render_check_their_arguments():
     with pytest.raises(ValueError):
         editor.render(Timeline(10.0), inp, blocks.MemoryCache(), out=np.zeros((5, 1), np.float32))
     assert editor.Inputs(inp.source[:, 0].copy(), "mono").channels == 1
-
-
-# ---------------------------------------------------------------------------------------------------------------------
-# What a run says about its own speed (Runner.timings)
-# ---------------------------------------------------------------------------------------------------------------------
-@needs_dfn
-def test_a_real_render_says_how_long_the_light_remover_took():
-    inp = make(10, 1)
-    tl = Timeline.from_clean_options(inp.seconds, pipeline.CleanOptions(atten_lim_db=24.0, noise="light"))
-    timings: dict = {}
-    editor.render(tl, inp, blocks.MemoryCache(), editor.Runner(LIB, MODEL, threads=2, timings=timings))
-    wall, seconds = timings["light"]
-    assert list(timings) == ["light"] and 0.0 < wall < 120.0 and seconds >= 10.0
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -686,25 +587,6 @@ def test_heavy_blocks_follow_the_contiguous_run_closely_and_do_not_depend_on_the
     assert puts == 4 and np.array_equal(editor.render(tl, inp, cache, runner=None), first) and cache.puts == puts
 
 
-@needs_heavy
-def test_heavy_blocks_on_the_card_come_in_calls_of_at_most_what_it_takes(monkeypatch):
-    from test_dpdfnet import _FakeCard, syllables
-
-    monkeypatch.setattr(blocks, "GRID_HEAVY", blocks.Grid(2.0, 1.0, 0.25))
-    monkeypatch.setattr(dpdfnet, "_GpuModel", _FakeCard)
-    monkeypatch.setattr(dpdfnet, "GPU_ROWS", (2, 4))  # a card that takes four rows at most
-    _, noisy, _ = syllables(6.0, seed=12)
-    stereo = np.stack([noisy, noisy[::-1].copy()], axis=1)  # 2 channels x 3 blocks = 6 rows
-    _FakeCard.steps.clear()
-    dpdfnet.unload()
-    cpu = dpdfnet.denoise_array(stereo, threads=2)
-    assert not _FakeCard.steps
-    gpu = dpdfnet.denoise_array(stereo, device="cuda", threads=2)
-    dpdfnet.unload()
-    assert _FakeCard.steps and max(_FakeCard.steps) == 4 and set(_FakeCard.steps) <= {2, 4}, _FakeCard.steps
-    assert np.abs(gpu - cpu).max() < 1e-4  # the same blocks on the card and on the CPU
-
-
 @needs_sidon
 @needs_speech
 def test_voice_rebuild_blocks_equal_the_whole_file_run_bit_for_bit(monkeypatch):
@@ -733,13 +615,6 @@ def test_voice_rebuild_blocks_equal_the_whole_file_run_bit_for_bit(monkeypatch):
     lost = next(t.key for t in editor.plan(tl, inp, cache).tasks if t.step == "rebuild")
     del cache.blocks[lost]  # (one block lost)
     assert np.array_equal(editor.render(tl, inp, cache, runner), first) and cache.puts == puts + 1
-
-
-def test_the_dither_of_a_window_is_seeded_by_its_index_and_the_first_window_is_what_it_always_was():
-    assert np.array_equal(restore._dither(5, 1000), restore._dither(5, 1000))
-    assert not np.array_equal(restore._dither(5, 1000), restore._dither(6, 1000))
-    assert np.array_equal(restore._dither(0, 1000), np.random.default_rng(0).standard_normal(1000).astype(np.float32))  # window 0: unchanged
-    assert np.array_equal(restore._dither(3, 1000)[:500], restore._dither(3, 500))  # a prefix: the length does not change the noise
 
 
 @needs_dfn

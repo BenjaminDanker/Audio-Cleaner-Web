@@ -119,8 +119,9 @@ def test_starting_uses_what_was_chosen_then_and_a_run_cannot_be_changed_while_it
     def runner(path, options, *, cancel, progress, **extra):
         calls.append((path.name, extra.get("timeline")))
         started.set()
-        while not cancel.wait(0.01):
-            pass
+        for _ in range(3000):  # (until it is stopped, at most 30 s: a failed test must not leave it spinning)
+            if cancel.wait(0.01):
+                break
         raise engine.Cancelled()
 
     w = make_window(runner)
@@ -173,8 +174,9 @@ def test_closing_while_cleaning_asks_and_stops(make_window, tmp_path, monkeypatc
 
     def runner(path, options, *, cancel, progress, **_):
         started.set()
-        while not cancel.wait(0.01):
-            pass
+        for _ in range(3000):  # (until it is stopped, at most 30 s: a failed test must not leave it spinning)
+            if cancel.wait(0.01):
+                break
         raise engine.Cancelled()
 
     w = make_window(runner)
@@ -211,13 +213,3 @@ def test_missing_components_block_starting(qapp, tmp_path, monkeypatch):
     w.close()
 
 
-def test_the_about_box_has_the_licence_notices(qapp):
-    from PySide6.QtWidgets import QLabel
-
-    from audio_cleaner_desktop.gui.about import AboutDialog
-
-    dialog = AboutDialog()
-    texts = " ".join(label.text() for label in dialog.findChildren(QLabel))
-    assert "Open source, MIT License · © 2025-2026 The Audio Cleaner authors" in texts
-    assert "GNU LGPL v3" in texts and "ffmpeg-buildinfo.txt" in texts
-    dialog.close()

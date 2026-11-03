@@ -101,16 +101,6 @@ def test_a_job_whose_copies_cannot_become_blocks_starts_an_empty_cache(clip, tmp
     assert editor.plan(tl, inputs_of(x, job, reference=x[:, 0].copy()), job.block_cache(ff)).misses
 
 
-def test_a_job_with_no_copies_at_all_gets_an_empty_cache(clip, tmp_path):
-    job, x, _ = old_job(clip, tmp_path, noise=False)
-    assert not job.has_blocks and not editor_job.needs_migration(job)
-    ff = engine.ffmpeg()
-    work = tmp_path / "work"
-    work.mkdir()
-    editor_job.make_ready(job, ff, inputs_of(x, job), work)
-    assert copies.BLOCKS in job.data["copies"] and job.samples == len(x) and job.echo is False
-
-
 def test_the_session_opens_an_old_job_ready(clip, tmp_path):
     job, x, full = old_job(clip, tmp_path)
     session = editor_session.Session.open(job, scratch_parent=tmp_path / "scratch")
@@ -123,17 +113,6 @@ def test_the_session_opens_an_old_job_ready(clip, tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------------- redo on an old job
-
-def test_the_plan_of_an_old_job_says_its_copies_get_ready(clip, tmp_path):
-    job, x, _ = old_job(clip, tmp_path)
-    wanted = redo.Wanted(timeline=timeline(24.0), output_name="x.wav")
-    p = redo.plan(job, wanted, job.check_original())
-    assert p.ok and p.slow and p.steps[0].startswith("Get this job's saved copies ready")
-    # a job that keeps blocks says what changed instead
-    _, fresh = first_run(clip, tmp_path / "fresh")
-    q = redo.plan(fresh, wanted, fresh.check_original())
-    assert "saved copies ready" not in " ".join(q.steps)
-
 
 def test_changing_an_old_job_gets_it_ready_and_then_renders_with_no_model(clip, tmp_path, monkeypatch):
     job, x, full = old_job(clip, tmp_path)

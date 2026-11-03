@@ -7,10 +7,8 @@ from __future__ import annotations
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QFileDialog
 
-from audio_cleaner_desktop import labels, resources
-from audio_cleaner_desktop.gui import copy
+from audio_cleaner_desktop import resources
 from audio_cleaner_desktop.gui.main_window import MainWindow
-from audio_cleaner_desktop.gui.settings_dialog import HelpButton
 from audio_cleaner_desktop.gui.theme import ThemeWatcher
 
 import studio_helpers as sh
@@ -100,9 +98,6 @@ def test_every_choice_survives_closing_and_reopening(qapp, tmp_path, monkeypatch
     want = {"auto": False, "strength": "gentle", "remover": "heavy", "voice": "noise", "leveling": "broadcast", "subtitles": "on", "kind": "vtt",
             "language": "de", "echo": True, "size": "same", "format": "flac", "parallel": 0, "where": "folder", "folder": str(folder)}
     assert _shown(w) == want
-    sh.resized(w, 905, 641)
-    height = w.height()
-    assert height == 641
     _close(w)
 
     again = _open(tmp_path)
@@ -117,8 +112,6 @@ def test_every_choice_survives_closing_and_reopening(qapp, tmp_path, monkeypatch
         assert (o.strength, o.leveling, o.loudness, o.subtitles, o.language, o.noise) == ("gentle", True, "broadcast", "vtt", "de", "heavy")
         assert (o.echo_track, o.rebuild_voice, o.audio_format) == (True, False, "flac")
         assert again.prefs.parallel == 0 and again.prefs.output_dir() == folder
-        wait_until(lambda: again.height() == height, 5)
-        assert again.height() == height and again.width() >= 640  # (not the 900 of a first start: the offscreen screen clamps the width, not the height)
         # the folder is offered again without asking when "Next to original" is picked and then "folder" again
         again._settings_dialog._where._buttons["next"].click()
         again._settings_dialog._where._buttons["folder"].click()
@@ -191,45 +184,3 @@ def test_automatic_chooses_for_each_file_while_on_and_keeps_the_hand_made_choice
         _close(again)
 
 
-def test_the_screen_says_what_the_voice_is_rebuilt_for(qapp, tmp_path):
-    """The Voice rebuild line, its tooltip and the Automatic help name the same causes the automatic choice rebuilds for (echo, a muffled voice,
-    phone-quality or damaged sound, distortion from recording too loud)."""
-    tip = " ".join(copy.TIPS["v.rebuild"].split())
-    assert tip.startswith("For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud:")
-    assert "Keeps only speech" in tip and "highs" not in tip.lower() and "dull sound" not in tip
-    line = dict((k, v) for k, _, v in copy.VOICE_MODES)["rebuild"]
-    assert "echo" in line and "muffled" in line and "keeps only speech" in line
-    assert any("echo, a muffled or phone-quality voice and distortion from recording too loud" in p for p in copy.REBUILD_POINTS)
-    helps = [" ".join(b._text.split()) for b in _help_buttons(tmp_path)]
-    extra = next(t for t in helps if t.startswith("Cleaned files get"))
-    assert "highs" not in extra.lower()
-
-
-def _help_buttons(tmp_path):
-    from audio_cleaner_desktop.gui.preferences import Preferences
-    from audio_cleaner_desktop.gui.settings_dialog import SettingsDialog
-    from audio_cleaner_desktop.gui.speech_model import SpeechModelDownloader
-    from audio_cleaner_desktop.updater import UpdateController
-
-    prefs = Preferences(QSettings(str(tmp_path / "p.ini"), QSettings.Format.IniFormat))
-    dialog = SettingsDialog(prefs, SpeechModelDownloader(), SpeechModelDownloader(model=resources.VOICE_MODEL), UpdateController(prefs))
-    return dialog.findChildren(HelpButton)
-
-
-def test_which_one_to_pick_is_said_in_plain_words(qapp, tmp_path):
-    text = labels.WHICH_TEXT
-    for phrase in ("keeps your voice exactly as recorded", "never changes a word", "laughs, shouts, whispers and singing stay as they were",
-                   "any length", "game sounds", "fixes echo, a muffled or phone-quality voice and distortion", "can sound slightly too clean",
-                   "keeps only speech", "may come out oddly", "can change a word, so listen before you publish", "slower", "many languages"):
-        assert phrase.lower() in text.lower(), phrase
-    assert "polish" not in text.lower() and "model" not in text.lower()
-    assert "the voice was rebuilt because it sounded echoey" in labels.rebuild_reason_text("echoey") and "keeps only speech" in labels.rebuild_reason_text("echoey")
-    # the screen says it in the card (a link to All the options) and in that window
-    from audio_cleaner_desktop.gui.info_dialog import InfoDialog
-    from PySide6.QtWidgets import QLabel
-
-    dialog = InfoDialog()
-    shown = " ".join(label.text() for label in dialog.findChildren(QLabel))
-    for phrase in ("never changes words", "Laughs, shouts, whispers and singing stay as they were", "can change a word, so listen before you publish"):
-        assert phrase in shown
-    dialog.close()

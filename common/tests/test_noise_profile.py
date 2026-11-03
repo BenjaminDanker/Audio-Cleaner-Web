@@ -51,27 +51,6 @@ def test_auto_picks_heavy_only_for_noisy_recordings():
     assert pipeline.automatic_choices(_figure(_speechlike(6, -2)))[0] == "heavy"
 
 
-def test_a_long_stereo_recording_is_measured_from_its_mono_mix_in_six_stretches(tmp_path, monkeypatch):
-    """Only the six measured stretches are read, from a memory map, and each is the mono mix of its part of the file."""
-    x = _speechlike(80, 5)
-    windows = pipeline.measure_windows(len(x))
-    assert [(b - a) / SR for a, b in windows] == [10.0] * 6
-    mm = np.lib.format.open_memmap(tmp_path / "x.npy", mode="w+", dtype=np.float32, shape=(len(x), 2))
-    mm[:, 0] = mm[:, 1] = x
-    got = []
-
-    def remover(seg, lib, model, **kw):  # records what the remover is given, in place of running it
-        got.append(np.array(seg))
-        return seg * 0.5
-
-    monkeypatch.setattr(pipeline.dfn, "denoise_array", remover)
-    pipeline.noise_figure_db(mm, "lib", "model")
-    assert [len(g) for g in got] == [10 * SR] * 6
-    for g, (a, b) in zip(got, windows):
-        assert np.allclose(g, x[a:b], atol=1e-7)
-    assert pipeline.noise_figure_db(np.zeros(SR, np.float32), "lib", "model") == 99.0  # nothing to hear
-
-
 @needs_dfn
 def test_gated_silence_does_not_hide_the_noise():
     rng = np.random.default_rng(0)

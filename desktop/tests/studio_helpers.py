@@ -158,8 +158,9 @@ class FakeSession:
         if progress:
             progress(0.5)
         if self.gate is not None:
-            while not cancel.wait(0.01) and not self.gate.is_set():
-                pass
+            for _ in range(3000):  # (until it is let go or stopped, at most 30 s: a failed test must not leave it spinning)
+                if cancel.wait(0.01) or self.gate.is_set():
+                    break
             if cancel.is_set():
                 raise engine.Cancelled()
         found = {"seconds": self.seconds, "whole": {}, "items": self.found}
@@ -250,7 +251,9 @@ class QuickRunner:
         self.calls.append({"options": options, "timeline": timeline, "output_name": output_name})
         progress(0.5)
         if self.gate is not None:
-            while not self.gate.wait(0.01):
+            for _ in range(3000):  # (at most 30 s, as above)
+                if self.gate.wait(0.01):
+                    break
                 if cancel.is_set():
                     raise engine.Cancelled()
         out = Path(out_dir or path.parent) / (output_name or path.stem + "-cleaned.wav")

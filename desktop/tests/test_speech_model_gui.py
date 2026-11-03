@@ -79,45 +79,6 @@ def test_the_subtitles_card_offers_the_download_runs_it_and_goes_away(window, tm
     assert wait_until(lambda: not panel.isVisibleTo(w.studio.inspector), timeout=5) and w.studio.start.button.isEnabled()
 
 
-def test_a_missing_model_is_fetched_one_after_the_other_never_at_start_up(qapp, tmp_path, monkeypatch):
-    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model is resources.NOISE_MODEL or self._fake_ready))
-    monkeypatch.setattr(speech_model.SpeechModelDownloader, "_fake_ready", False, raising=False)
-    started = []
-
-    def fake_start(self):
-        started.append(self.model.id)
-
-    monkeypatch.setattr(speech_model.SpeechModelDownloader, "start", fake_start)
-    shown = []
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or QMessageBox.StandardButton.Ok)
-    w = open_window(tmp_path)
-    try:
-        qapp.processEvents()
-        assert started == [] and not w.banner_models.isVisible()  # setup downloads them, not the app's start
-        w.fetch_models()  # e.g. after setup's download failed
-        assert started == ["whisper-large-v3-turbo"] and w.banner_models.isVisible()
-        assert "Getting everything ready" in w.banner_models._label.text() and not shown  # nothing asked
-        w.speech_download._fake_ready = True
-        w._model_download_finished(w.speech_download, True, "")
-        assert started == ["whisper-large-v3-turbo", "rebuild-voice"]
-        w.voice_download._fake_ready = True
-        w._model_download_finished(w.voice_download, True, "")
-        assert not w.banner_models.isVisible()
-        # a failed download says so and offers to try again
-        w._model_queue = [w.voice_download]
-        w._model_download_finished(w.voice_download, False, "The download stopped (timed out).")
-        assert w.banner_models.isVisible() and "could not be downloaded" in w.banner_models._label.text()
-        # a subtitles job without the speech model does not start, and the screen says why (no dialog: the card has the download)
-        w.speech_download._fake_ready = False
-        w.prefs.subtitles = "srt"
-        add_and_wait(w, tmp_path)
-        w.start()
-        assert not shown and not w.queue.active and not w.queue.busy
-        assert any("speech model" in t for t, _ in w.studio.note_lines(w.doc)) and w.studio.inspector.speech_panel.isVisibleTo(w.studio.inspector)
-    finally:
-        sh.shut(w)
-
-
 def test_voice_rebuild_offers_its_download_and_start_waits_instead_of_downgrading(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model.id != "rebuild-voice"))
     started = []

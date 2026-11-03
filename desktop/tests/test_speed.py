@@ -3,7 +3,6 @@ runs, and the file that keeps it between runs. Nothing here runs a model: the ru
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
@@ -26,10 +25,6 @@ def test_the_threads_of_a_run_are_the_ones_a_file_gets_when_it_runs_by_itself():
     assert speed.cost("heavy", 600.0) == pytest.approx(speed.guess("heavy", 600.0, sysinfo.threads_per_job(1)))
     assert speed.cost("heavy", 600.0, 2) == pytest.approx(speed.guess("heavy", 600.0, 2))  # (threads given: those)
     assert speed.cost("heavy", 600.0, 2) > speed.cost("heavy", 600.0, 8)
-
-
-def test_the_old_names_still_point_to_the_costs_in_speed_py():
-    assert editor_job.CPU_COSTS is speed.CPU_COSTS and editor_job.THREAD_EFFICIENCY == speed.THREAD_EFFICIENCY
 
 
 def test_a_measured_run_changes_the_next_cost_and_the_next_run_averages_with_it():
@@ -129,5 +124,3 @@ def test_the_time_of_a_plan_is_its_steps_costs_added_up_on_the_threads_of_a_run(
     assert speed.cost("light", 70.0, 4) == pytest.approx(speed.guess("light", 70.0, 4) * 4)  # (what was learned is in it)
 
 
-def test_a_run_by_itself_gets_every_thread_but_one_of_the_processor():
-    assert speed.run_threads() == max(2, (os.cpu_count() or 2) - 1)

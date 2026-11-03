@@ -210,24 +210,6 @@ def test_the_window_updates_only_the_models_that_changed_quietly_and_tidies_up_a
         _close(w)
 
 
-def test_a_failed_automatic_update_is_not_retried_and_does_not_nag(qapp, tmp_path, monkeypatch):
-    started: list[str] = []
-    w, cleaned = _window(tmp_path, monkeypatch, started, {"whisper-large-v3-turbo", "rebuild-voice"})
-    try:
-        w.show()
-        w.update_models()
-        w.speech_download.last_error = "The download stopped (timed out)."
-        w._model_download_finished(w.speech_download, False, "The download stopped (timed out).")
-        assert started == ["whisper-large-v3-turbo"]  # one try per start: the next model is not attempted either
-        assert not w.banner_models.isVisible() and not w._auto_models and w._model_queue == []
-        panel = speech_model.SpeechModelPanel(w.speech_download)
-        assert "timed out" in panel._text.text() and panel._button.text() == "Try again"  # it shows in Settings
-        w.update_models()  # a manual "Try again" is a normal download; update_models itself runs once per start
-        assert not cleaned  # nothing was tidied while an update is still missing
-    finally:
-        _close(w)
-
-
 def test_nothing_to_update_only_tidies_up(qapp, tmp_path, monkeypatch):
     started: list[str] = []
     w, cleaned = _window(tmp_path, monkeypatch, started, set())

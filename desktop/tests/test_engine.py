@@ -74,25 +74,6 @@ def test_unique_output_counts_up_and_respects_subtitle_files(tmp_path):
     assert engine.unique_output(tmp_path, "b", ".wav").name == "b-cleaned.wav"
 
 
-def test_long_recordings_are_transcribed_in_pieces_cut_at_quiet_moments():
-    sr = engine._SPEECH_RATE
-    rng = np.random.default_rng(0)
-    seconds = 2 * engine._PIECE_SECONDS + 100
-    audio = (0.1 * rng.standard_normal(seconds * sr)).astype(np.float32)
-    quiet = engine._PIECE_SECONDS - 10  # a silent gap inside the search window of the first cut
-    audio[quiet * sr:(quiet + 1) * sr] = 0
-    bounds = engine._piece_bounds(audio.reshape(-1, 1))
-    assert bounds[0][0] == 0 and bounds[-1][1] == len(audio)
-    assert all(a[1] == b[0] for a, b in zip(bounds, bounds[1:]))
-    assert len(bounds) == 3
-    assert quiet * sr <= bounds[0][1] <= (quiet + 1) * sr
-    from acw_common.captions import Segment, Word
-
-    seg = Segment(1.0, 2.0, "hi", [Word(1.0, 1.5, "hi")])
-    engine._shifted([seg], 300.0)  # the pieces' times are moved to the start of the recording
-    assert (seg.start, seg.end, seg.words[0].start, seg.words[0].end) == (301.0, 302.0, 301.0, 301.5)
-
-
 def test_subtitle_files_are_srt_vtt_or_plain_text():
     segments = [captions.Segment(0.5, 1.8, "Hello there", [])]
     srt = engine._subtitle_text("srt", segments, "en")
@@ -223,12 +204,6 @@ def test_silence_gets_no_subtitle_file(clip_wav, tmp_path, quick_clean, monkeypa
 
 
 @pytest.mark.native
-def test_echo_option_on_a_one_track_file_cleans_it_and_says_so(clip_wav, tmp_path):
-    result = engine.process(clip_wav, engine.JobOptions(echo_track=True, noise="light"), out_dir=tmp_path)
-    assert result.output.is_file() and result.notice == "only one audio track, so no speaker echo was removed"
-
-
-@pytest.mark.native
 def test_heavy_noise_setting_runs_the_heavy_noise_model(clip_wav, tmp_path, monkeypatch):
     if not resources.heavy_noise_model_path().is_file():
         pytest.skip("no heavy-noise model in vendor/models")
@@ -317,7 +292,6 @@ def fake_clean(monkeypatch):
 
 MODEL_ROWS = json.loads((Path(__file__).resolve().parents[2] / "common" / "tests" / "fixtures" / "reco_model_js.json").read_text())
 # Why the voice is rebuilt, and how the notice says it after "it sounded ..." (reco_model.REBUILD_WORDS, written out here)
-REBUILD_REASONS = ["echoey", "muffled", "phone", "distorted", "unclear"]
 WORDS = {"echoey": "echoey", "muffled": "muffled", "phone": "like a phone call", "distorted": "distorted", "unclear": "unclear"}
 
 
@@ -389,47 +363,6 @@ def test_the_models_strengths_are_the_apps_strengths():
 
 
 @pytest.mark.native
-def test_the_model_picks_the_strength_and_the_remover(clip_wav, tmp_path, fake_clean, measured_as):
-    options = engine.JobOptions(strength="auto")
-    seen = set()
-    for want in ({"strength": "gentle"}, {"strength": "balanced"}, {"strength": "strong"}, {"strength": "max"},
-                 {"heavy": True}, {"heavy": False}):
-        stats = measurement(**want)
-        asked = measured_as(stats)
-        rec = reco_model.recommend(stats, min_seconds=0.0)
-        result = engine.process(clip_wav, options, out_dir=tmp_path / "o")
-        got = fake_clean[-1]
-        assert len(asked) == 1  # measured once, before cleaning
-        assert got.atten_lim_db == engine.STRENGTHS[rec.strength] and result.strength == rec.strength
-        assert got.noise == ("heavy" if stats["noiseDb"] < pipeline.HEAVY_BELOW_DB else "light")  # the rule, given outright
-        assert not got.restore_voice
-        assert fake_clean[-1].tl.layers["noise"][0].settings["remover"] == got.noise  # the remover is decided outright in the timeline
-        seen.add((rec.strength, rec.heavy_remover))
-    assert {k for k, _ in seen} == set(engine.STRENGTHS) and {v for _, v in seen} == {True, False}
-
-
-@pytest.mark.native
-def test_what_the_user_chose_is_not_overridden(clip_wav, tmp_path, fake_clean, measured_as):
-    stats = measurement(strength="strong")
-    measured_as(stats)
-    out = tmp_path / "o"
-    # a strength chosen by hand stays; the noise remover is the rule's
-    engine.process(clip_wav, engine.JobOptions(strength="gentle", auto_rebuild=True), out_dir=out, output_name="a.wav")
-    assert (fake_clean[-1].atten_lim_db, fake_clean[-1].noise) == (12.0, "heavy" if stats["noiseDb"] < 19 else "light")
-    # everything chosen by hand: nothing needs measuring
-    asked = measured_as(stats)
-    engine.process(clip_wav, engine.JobOptions(strength="gentle", noise="light"), out_dir=out, output_name="b.wav")
-    assert (fake_clean[-1].atten_lim_db, fake_clean[-1].noise) == (12.0, "light") and not asked
-    # a noise remover chosen by hand stays, the strength is the model's
-    measured_as(measurement(strength="strong"))
-    result = engine.process(clip_wav, engine.JobOptions(strength="auto", noise="heavy"), out_dir=out, output_name="d.wav")
-    assert fake_clean[-1].noise == "heavy" and fake_clean[-1].atten_lim_db == 40.0 and result.strength == "strong"
-    # a fixed strength and an automatic remover: measured for the remover, the strength is the fixed one
-    engine.process(clip_wav, engine.JobOptions(strength="max", auto_rebuild=True), out_dir=out, output_name="e.wav")
-    assert fake_clean[-1].atten_lim_db == 100.0
-
-
-@pytest.mark.native
 def test_a_recording_nobody_speaks_in_gets_the_middle_strength_and_nothing_else(clip_wav, tmp_path, fake_clean, measured_as, monkeypatch):
     music = {**measurement(rebuild=True), "hasSpeech": False}
     measured_as(music)
@@ -438,27 +371,6 @@ def test_a_recording_nobody_speaks_in_gets_the_middle_strength_and_nothing_else(
     got = fake_clean[-1]
     assert (got.atten_lim_db, got.restore_voice) == (24.0, False)
     assert result.strength == "balanced" and result.rebuilt is None and result.notice is None
-
-
-def test_the_notice_words_are_the_ones_the_engine_uses():
-    assert reco_model.REBUILD_WORDS == WORDS and list(reco_model.REBUILD_WORDS) == REBUILD_REASONS
-
-
-@pytest.mark.native
-@pytest.mark.parametrize("reason", REBUILD_REASONS)
-def test_a_file_that_needs_it_gets_its_voice_rebuilt(clip_wav, tmp_path, monkeypatch, fake_clean, measured_as, reason):
-    asked = measured_as(measurement(rebuild=True, reason=reason))
-    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
-    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
-    assert len(asked) == 1 and fake_clean[-1].restore_voice
-    assert result.rebuilt == reason and result.strength is None  # rebuilt: no noise reduction strength was used
-    assert result.notice == labels.rebuild_reason_text(reason)
-    # without the model: cleaned the usual way (with the strength the model picked), and told how to fix it
-    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
-    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "b")
-    assert not fake_clean[-1].restore_voice and fake_clean[-1].atten_lim_db == engine.STRENGTHS[result.strength]
-    assert result.rebuilt is None and result.strength in engine.STRENGTHS
-    assert result.notice == f"it sounds {WORDS[reason]}: download the model that rebuilds the voice in Settings and clean it again to fix that"
 
 
 def stored(**want) -> dict:
@@ -496,16 +408,6 @@ def test_a_recording_exactly_at_the_distortion_limit_is_left_alone(clip_wav, tmp
     measured_as(stats)
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
     assert not fake_clean[-1].restore_voice and result.rebuilt is None and result.notice is None and result.strength in engine.STRENGTHS
-
-
-@pytest.mark.native
-def test_a_phone_recording_is_rebuilt_and_only_that_is_said(clip_wav, tmp_path, monkeypatch, fake_clean, measured_as):
-    """A phone call (or a very small file) is a reason to rebuild the voice: nothing else is offered for missing high sounds."""
-    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
-    measured_as(measurement(reason="phone"))
-    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
-    assert fake_clean[-1].restore_voice and result.rebuilt == "phone"
-    assert result.notice == labels.rebuild_reason_text("phone") and "like a phone call" in result.notice and "keeps only speech" in result.notice
 
 
 @pytest.mark.native

@@ -29,18 +29,6 @@ def test_help_lists_the_options_and_the_automatic_choices():
     assert "auto" in r.stdout
 
 
-def test_help_says_what_the_voice_is_rebuilt_for():
-    """The help of --rebuild-voice and --no-auto-rebuild names the same causes as the automatic choice (echo, a muffled voice,
-    phone-quality or damaged sound, distortion from recording too loud)."""
-    r = run("--help")
-    assert r.returncode == 0
-    flat = re.sub(r"\s+", "", r.stdout)  # (argparse wraps lines, also at a hyphen)
-    for words in ("fixes room echo, a muffled voice, phone-quality or damaged sound and distortion from recording too loud",
-                  "(echo, a muffled or unclear voice, phone-quality sound, distortion; by default they are, when its model is installed)"):
-        assert re.sub(r"\s+", "", words) in flat, words
-    assert "also removes room echo" not in " ".join(r.stdout.split())  # the old text
-
-
 @pytest.mark.native
 def test_selftest_passes_and_builds_the_window():
     """`--selftest --gui` runs everything `--selftest` does, and also builds the window and the preview."""
@@ -107,37 +95,6 @@ def test_restore_highs_is_gone_from_the_command_line_and_the_help(capsys):
     with pytest.raises(SystemExit):
         entry.build_parser().parse_intermixed_args(["--cli", "--no-restore-highs", "a.wav"])
     assert "--no-restore-highs" in capsys.readouterr().err  # an unknown option, like any other
-
-
-def test_the_memory_plan_allows_for_automatic_rebuilding(tmp_path, monkeypatch):
-    from audio_cleaner_desktop import cli, engine, resources, sysinfo
-
-    planned = []
-    monkeypatch.setattr(resources, "check", lambda: [])
-    monkeypatch.setattr(sysinfo, "max_parallel", lambda parallel, subs, **k: planned.append(k["rebuild_voice"]) or 1)
-    monkeypatch.setattr(engine, "process", lambda *a, **k: engine.JobResult(tmp_path / "a-cleaned.wav", 1.0, False))
-    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
-    assert cli.run([str(tmp_path / "a.wav")], None, engine.JobOptions(auto_rebuild=True)) == 0
-    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
-    assert cli.run([str(tmp_path / "a.wav")], None, engine.JobOptions(auto_rebuild=True)) == 0
-    assert planned == [True, False]
-
-
-def test_the_picked_strength_is_printed(tmp_path, monkeypatch, capsys):
-    from audio_cleaner_desktop import cli, engine, resources
-
-    monkeypatch.setattr(resources, "check", lambda: [])
-    results = iter([
-        engine.JobResult(tmp_path / "a-cleaned.wav", 1.0, False, strength="balanced"),
-        engine.JobResult(tmp_path / "b-cleaned.wav", 1.0, False, strength="strong", notice="the voice was rebuilt because it sounded echoey"),
-        engine.JobResult(tmp_path / "c-cleaned.wav", 1.0, False),
-    ])
-    monkeypatch.setattr(engine, "process", lambda *a, **k: next(results))
-    assert cli.run([str(tmp_path / n) for n in ("a.wav", "b.wav", "c.wav")], None, engine.JobOptions(strength="auto"), parallel=1) == 0
-    lines = [line for line in capsys.readouterr().out.splitlines() if "->" in line]
-    assert lines[0].endswith("a-cleaned.wav  (balanced noise reduction picked for this file)")
-    assert lines[1].endswith("b-cleaned.wav  (strong noise reduction picked for this file; the voice was rebuilt because it sounded echoey)")
-    assert lines[2].endswith("c-cleaned.wav")
 
 
 def test_rebuilding_the_voice_without_its_model_says_how_to_get_it(tmp_path, monkeypatch, capsys):

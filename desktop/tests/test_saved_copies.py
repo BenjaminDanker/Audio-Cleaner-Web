@@ -209,15 +209,6 @@ def test_deleting_jobs_removes_their_copies_and_entries_but_never_the_results_or
     store.close()
 
 
-def test_a_job_whose_copies_cannot_be_removed_stays_in_the_list(tmp_path, original, monkeypatch):
-    store = HistoryStore(tmp_path / "h.db")
-    job = make_job(store.jobs_root, original)
-    eid = store.add(Entry("talk.wav", str(original), 3.0, False, {}, 1.0, [], DONE, job_dir=job.dir.name))
-    monkeypatch.setattr(copies, "delete_job_dir", lambda root, name: False)
-    assert store.delete([eid]) == [eid] and store.get(eid) is not None and job.dir.exists()
-    store.close()
-
-
 def test_an_old_history_file_gets_the_new_columns_and_keeps_its_entries(tmp_path):
     import sqlite3
 

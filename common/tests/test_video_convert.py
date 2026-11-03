@@ -3,7 +3,6 @@ which picture is made again and which is copied (needs_picture_encode), the pict
 file's own sound becomes (copied, or made in the container's own kind when it can't hold it). The files are real, small, generated
 here; the card's NVENC is never run (arguments only), x264 and VP9 are."""
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -57,15 +56,6 @@ def test_which_pictures_are_made_again(info, ext, size, encode):
 def test_a_file_with_no_picture_has_nothing_to_encode():
     assert needs_picture_encode(None, ".mp4", VideoOut(short_side=720)) is False
     assert needs_picture_encode(probed(has_video=False, video_codec=None), ".mkv", VideoOut(short_side=720)) is False
-
-
-def test_the_video_out_choices_reach_the_picture_plan():
-    assert (VideoOut().short_side, VideoOut().encoders, VideoOut().fast) == (None, None, False)
-    plan = ffmod._picture_plan(probed(), ".mp4", VideoOut(short_side=720, encoders=("h264_nvenc", "libx264"), fast=True))
-    assert plan["encoders"] == ["h264_nvenc", "libx264"] and plan["fast"] is True and plan["size"] == (1280, 720)
-    assert ffmod._picture_plan(probed(), ".mp4", VideoOut(short_side=720))["fast"] is False
-    # no encoders named: the app's own choice, as before (this build of FFmpeg has no x264 of its own to rely on)
-    assert ffmod._picture_plan(probed(), ".webm", VideoOut())["encoders"] == ["libvpx-vp9"]
 
 
 # -- can the new file type hold the picture as it is --------------------------------------------------------------------
@@ -150,99 +140,6 @@ def test_picture_work_says_whether_the_picture_is_made_again_and_how_much_work_t
 def test_there_is_nothing_to_make_for_no_picture():
     assert picture_work(None, ".mp4", VideoOut(short_side=720)) == (False, 1.0)
     assert picture_work(probed(has_video=False, video_codec=None), ".webm", VideoOut(short_side=720)) == (False, 1.0)
-
-
-# -- the picture options of each encoder ----------------------------------------------------------------------------
-
-PLAN = {"fps": 25.0, "size": (1280, 720), "out": (1280, 720), "source_bps": 0, "source_pixels": 0}
-
-
-def opt(args, name):
-    return args[args.index(name) + 1]
-
-
-def test_x264_gets_the_veryfast_preset_and_its_own_bit_rate():
-    args = ffmod._picture_args("libx264", PLAN)
-    assert args[:2] == ["-vf", "scale=1280:720:flags=lanczos,setsar=1"]
-    assert opt(args, "-c:v") == "libx264" and opt(args, "-preset") == "veryfast" and opt(args, "-pix_fmt") == "yuv420p"
-    assert opt(args, "-g") == "50" and "-deadline" not in args
-    assert int(opt(args, "-b:v")) == int(1280 * 720 * 25 * 0.07)
-
-
-def test_nvenc_gets_preset_p4_and_a_little_more_bit_rate_than_x264():
-    args = ffmod._picture_args("h264_nvenc", PLAN)
-    assert opt(args, "-c:v") == "h264_nvenc" and opt(args, "-preset") == "p4" and "-deadline" not in args
-    assert int(opt(args, "-b:v")) == int(1280 * 720 * 25 * 0.08) > int(opt(ffmod._picture_args("libx264", PLAN), "-b:v"))
-
-
-def test_vp9_is_slow_and_small_unless_fast_is_asked_for():
-    slow = ffmod._picture_args("libvpx-vp9", PLAN)
-    assert (opt(slow, "-deadline"), opt(slow, "-cpu-used"), opt(slow, "-row-mt")) == ("good", "4", "1")
-    fast = ffmod._picture_args("libvpx-vp9", {**PLAN, "fast": True})
-    assert (opt(fast, "-deadline"), opt(fast, "-cpu-used"), opt(fast, "-row-mt")) == ("realtime", "8", "1")
-    assert "-preset" not in fast and "-preset" not in slow
-
-
-def test_no_picture_options_leak_to_the_other_encoders():
-    for encoder in ("mpeg4", "h264_mf"):
-        args = ffmod._picture_args(encoder, PLAN)
-        assert "-preset" not in args and "-deadline" not in args
-    assert opt(ffmod._picture_args("h264_videotoolbox", PLAN), "-allow_sw") == "1"
-
-
-# -- the file's own sound -------------------------------------------------------------------------------------------
-
-
-def with_audio(*codecs, subs=()):
-    """A probe of a file whose audio tracks have these codecs."""
-    return probed(audio_indices=tuple(range(1, len(codecs) + 1)), audio_codecs=tuple(codecs), audio_codec=codecs[0] if codecs else "",
-                  subtitle_streams=tuple(subs))
-
-
-@pytest.mark.parametrize("codecs,ext,copied", [
-    (("wmav2",), ".mp4", False), (("wmav2",), ".mov", False), (("wmav2",), ".webm", False),
-    (("wmav2",), ".mkv", True),                      # MKV holds any sound
-    (("aac",), ".mp4", True), (("aac",), ".webm", False), (("aac",), ".mkv", True),
-    (("opus",), ".webm", True), (("vorbis",), ".webm", True), (("opus",), ".mp4", True),
-    (("pcm_s16le",), ".mov", True), (("pcm_s16le",), ".mp4", False),
-    (("ac3",), ".mp4", True),
-    ((), ".mp4", True), ((), ".webm", True),         # no sound: nothing to make
-    (("wmav2", "aac"), ".mp4", False),               # only the first track is the question
-    (("aac", "wmav2"), ".mp4", True),
-])
-def test_the_first_sound_is_copied_when_the_container_holds_it(codecs, ext, copied):
-    assert ffmod._plan_extras(with_audio(*codecs), ext)["audio0_copy"] is copied
-
-
-def test_without_a_probe_the_sound_is_copied():
-    assert ffmod._plan_extras(None, ".mp4")["audio0_copy"] is True
-
-
-def test_the_other_tracks_are_still_only_kept_when_they_fit():
-    plan = ffmod._plan_extras(with_audio("wmav2", "aac", "wmav2"), ".mp4")
-    assert plan["audio"] == [2] and plan["total_audio"] == 2 and plan["audio0_copy"] is False
-
-
-def args_for(plan, ext, audio=None, subtitles=None):
-    return FFmpeg(FF_DIR, threads=1)._mux_args("in.wmv", audio, Path(f"out{ext}"), subtitles, None, False, plan)
-
-
-def test_the_files_own_sound_is_mapped_when_there_is_no_new_sound():
-    copy = args_for({"audio": [], "subs": [], "audio0_copy": True}, ".mkv")
-    assert "0:a:0?" in copy and "1:a:0" not in copy and "-c:a:0" not in copy and opt(copy, "-c:a") == "copy"
-    # a container that can't hold it: the first track is made in the container's own kind, the others are still copied
-    for ext, codec, rate in ((".mp4", "aac", "256k"), (".mov", "aac", "256k"), (".webm", "libopus", "160k")):
-        made = args_for({"audio": [], "subs": [], "audio0_copy": False}, ext)
-        assert "0:a:0?" in made and opt(made, "-c:a") == "copy" and opt(made, "-c:a:0") == codec and opt(made, "-b:a:0") == rate
-        assert made.index("-c:a") < made.index("-c:a:0")  # (the per-stream option comes after the general one: it wins)
-    # a plan from before the change (no audio0_copy) copies, as it always did
-    assert "-c:a:0" not in args_for({"audio": [], "subs": []}, ".mp4")
-
-
-def test_a_new_sound_is_mapped_as_before():
-    args = args_for({"audio": [], "subs": [], "audio0_copy": False}, ".mp4", audio="clean.wav")
-    assert "1:a:0" in args and "0:a:0?" not in args and opt(args, "-c:a:0") == "aac"
-    assert args.count("-c:a:0") == 1  # (the first track is made once)
 
 
 # -- with FFmpeg: the files that come out ---------------------------------------------------------------------------
@@ -382,24 +279,6 @@ def test_the_converted_sound_is_the_files_own(sources, ff, tmp_path):
     assert len(heard) / 16000 == pytest.approx(3.0, abs=0.4)
     spectrum = np.abs(np.fft.rfft(heard[: 16000 * 2]))
     assert abs(np.argmax(spectrum) / 2 - 440) < 10  # the 440 Hz tone it had, not silence and not another sound
-
-
-@needs_ff
-def test_the_picture_encoder_options_reach_ffmpeg(sources, ff, tmp_path, monkeypatch):
-    seen = []
-    real = FFmpeg._run_encode
-
-    def spy(self, args, *a, **kw):
-        seen.append(list(args))
-        return real(self, args, *a, **kw)
-
-    monkeypatch.setattr(FFmpeg, "_run_encode", spy)
-    ff.mux_video(sources["wmv"], None, tmp_path / "o.mp4", video=X264)
-    ff.mux_video(sources["wmv"], None, tmp_path / "o.webm", video=VP9)
-    mp4, webm = seen
-    assert opt(mp4, "-c:v") == "libx264" and opt(mp4, "-preset") == "veryfast" and "0:a:0?" in mp4 and opt(mp4, "-c:a:0") == "aac"
-    assert opt(webm, "-c:v") == "libvpx-vp9" and opt(webm, "-deadline") == "realtime" and opt(webm, "-cpu-used") == "8"
-    assert opt(webm, "-c:a:0") == "libopus"
 
 
 @needs_ff

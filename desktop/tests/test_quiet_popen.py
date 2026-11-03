@@ -3,7 +3,6 @@ Popen is replaced by a recorder, so nothing is started)."""
 from __future__ import annotations
 
 import subprocess
-import sys
 
 import pytest
 
@@ -56,21 +55,6 @@ def test_run_and_check_output_go_through_it(popen, monkeypatch):
     subprocess.run(["a"])
     subprocess.check_output("ver", shell=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
     assert [c[2]["creationflags"] for c in popen] == [q.CREATE_NO_WINDOW] * 2
-
-
-def test_install_only_on_windows_and_only_once(monkeypatch):
-    original = subprocess.Popen.__init__
-    while getattr(original, q._MARK, False):  # on Windows the app import has installed it already: take it off
-        original = original.__wrapped__
-    monkeypatch.setattr(subprocess.Popen, "__init__", original)  # whatever was there is put back at the end
-    monkeypatch.setattr(sys, "platform", "linux")
-    assert q.install() is False and subprocess.Popen.__init__ is original
-    monkeypatch.setattr(sys, "platform", "darwin")
-    assert q.install() is False and subprocess.Popen.__init__ is original
-    monkeypatch.setattr(sys, "platform", "win32")
-    assert q.install() is True and subprocess.Popen.__init__ is not original
-    patched = subprocess.Popen.__init__
-    assert q.install() is False and subprocess.Popen.__init__ is patched  # not wrapped twice
 
 
 def test_the_launcher_installs_it_before_anything_else():

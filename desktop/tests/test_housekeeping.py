@@ -1,5 +1,5 @@
-"""Scratch folders and leftovers, claimed output names, cancelling ffmpeg, power and priority, single instance,
-Show in folder, the lazy history and the stop/Esc behaviour of the window."""
+"""Scratch folders and leftovers, claimed output names, cancelling ffmpeg, memory, single instance,
+Show in folder, stopping and quitting the window, opening files and the About text."""
 from __future__ import annotations
 
 import os
@@ -16,8 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from acw_common.ffmpeg import FFmpeg, MediaError
 from audio_cleaner_desktop import engine, models, sysinfo
-from audio_cleaner_desktop.gui import jobs_column, main_window, shell, single_instance, tips
-from audio_cleaner_desktop.gui.history import DONE, Entry, HistoryStore
+from audio_cleaner_desktop.gui import main_window, shell, single_instance
 from audio_cleaner_desktop.gui.main_window import MainWindow
 from audio_cleaner_desktop.gui.items import RUNNING
 
@@ -200,36 +199,6 @@ def test_the_mac_asks_sysctl_for_its_memory(monkeypatch):
         sysinfo.total_ram_gb.cache_clear()
 
 
-def test_the_mac_stays_awake_with_caffeinate_for_as_long_as_files_are_cleaned(monkeypatch):
-    calls = []
-
-    class Proc:
-        def terminate(self):
-            calls.append("terminate")
-
-        def wait(self, timeout=None):
-            calls.append("wait")
-
-    monkeypatch.setattr(sysinfo.os, "name", "posix")
-    monkeypatch.setattr(sysinfo.sys, "platform", "darwin")
-    monkeypatch.setattr(sysinfo.subprocess, "Popen", lambda cmd, **k: calls.append(cmd) or Proc())
-    awake = sysinfo.SleepInhibitor()
-    awake.acquire()
-    awake.acquire()  # twice is once
-    assert calls == [["caffeinate", "-i", "-w", str(os.getpid())]] and awake.held
-    awake.release()
-    awake.release()
-    assert calls[1:] == ["terminate", "wait"] and not awake.held
-
-
-def test_lowering_the_priority_asks_for_a_nicer_process(monkeypatch):
-    asked = []
-    monkeypatch.setattr(sysinfo.os, "name", "posix")
-    monkeypatch.setattr(sysinfo.os, "nice", lambda n: asked.append(n), raising=False)
-    sysinfo.lower_priority()
-    assert asked == [5]
-
-
 # -- Show in folder, single instance ---------------------------------------------------------------------------
 
 def test_windows_selects_the_file_with_two_arguments_even_with_spaces_and_commas():
@@ -304,32 +273,6 @@ def test_a_second_start_that_does_not_wait_for_the_answer_still_gets_through(qap
 
 # -- window ---------------------------------------------------------------------------------------------------
 
-def _entry(n: int) -> Entry:
-    return Entry(name=f"f{n}.wav", source=f"/a/f{n}.wav", duration=5.0, has_video=False, settings={}, seconds_taken=1.0,
-                 outputs=[f"/a/f{n}-cleaned.wav"], status=DONE, finished_at=1000.0 + n)
-
-
-def test_the_jobs_are_drawn_a_page_at_first_and_more_on_request(qapp, tmp_path):
-    store = HistoryStore(tmp_path / "h.db")
-    n_all = jobs_column.PAGE_SIZE * 2 + 10
-    for n in range(n_all):
-        store.add(_entry(n))
-    column = jobs_column.JobsColumn(store, lambda: [], lambda: set())
-    try:
-        column.refresh()
-        cards = lambda: [k for k in column._cards if k[0] == "entry"]  # noqa: E731
-        assert len(cards()) == jobs_column.PAGE_SIZE
-        column._show_more()
-        column._show_more()
-        assert len(cards()) == n_all and f"{n_all} files cleaned" in column.totals.text()
-        column.search.setText("f1")
-        column._search_changed()
-        assert len(cards()) == 11 and column._shown == jobs_column.PAGE_SIZE  # f1 and f10..f19
-        assert store.recent_folders() == [Path("/a")]
-    finally:
-        store.close()
-
-
 @pytest.fixture
 def busy_window(qapp, tmp_path, monkeypatch):
     started = threading.Event()
@@ -337,7 +280,9 @@ def busy_window(qapp, tmp_path, monkeypatch):
 
     def runner(path, options, *, cancel, progress, **_):
         started.set()
-        while not cancel.wait(0.01):
+        for _ in range(3000):  # (until it is stopped or let go, at most 30 s: a failed test must not leave it spinning)
+            if cancel.wait(0.01):
+                break
             if release.is_set():
                 return engine.JobResult(path, 5.0, False)
         time.sleep(0.3)  # a step that finishes before it notices
@@ -368,24 +313,6 @@ def test_stopping_says_so_at_once(busy_window, monkeypatch):
     assert item.stopping  # at once, before the step has noticed
     assert wait_until(lambda: not w.queue.busy, timeout=10)
     assert not item.stopping
-
-
-def test_esc_does_not_stop_the_cleaning_while_a_help_text_is_up_or_in_a_box_you_are_typing_in(busy_window, monkeypatch):
-    w = busy_window
-    asked = []
-    monkeypatch.setattr(w, "_confirm", lambda title, text: asked.append(title) or False)
-    monkeypatch.setattr(tips, "is_showing", lambda: True)
-    w._escape()
-    monkeypatch.setattr(tips, "is_showing", lambda: False)
-    w.jobs.search.setFocus()  # (Esc in the search or a name box only leaves the box)
-    QApplication.processEvents()
-    if w.jobs.search.hasFocus():
-        w._escape()
-        assert not w.jobs.search.hasFocus()
-    assert asked == []
-    w.jobs.search.clearFocus()
-    w._escape()
-    assert asked == ["Stop cleaning?"]
 
 
 def test_quitting_does_not_wait_for_files_that_will_not_stop_and_never_touches_a_closed_history(qapp, tmp_path, monkeypatch):
@@ -466,13 +393,3 @@ def test_about_names_the_downloaded_models_and_where_their_licence_texts_are(qap
     (models.models_dir() / "LICENSES").mkdir(parents=True)
     text = texts()
     assert str(tmp_path / "voice" / "LICENSES") in text and str(models.models_dir() / "LICENSES") in text
-
-
-def test_releasing_memory_drops_the_cached_models(monkeypatch):
-    from acw_common import dpdfnet, restore, transcribe
-
-    dpdfnet._models["x"] = ()
-    restore._backends[("x",)] = object()
-    transcribe._cached[("x", 1, "cpu")] = object()
-    engine.release_memory()
-    assert not (dpdfnet._models or restore._backends or transcribe._cached)

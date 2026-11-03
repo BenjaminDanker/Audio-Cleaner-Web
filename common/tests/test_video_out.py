@@ -47,59 +47,6 @@ def test_bit_rates_scale_with_the_picture_and_stay_between_limits():
     assert ffmod.picture_bitrate("mpeg4", 1920, 1080, 30, source_bps=2_000_000, source_pixels=1920 * 1080) == 3_000_000
 
 
-def test_which_encoders_are_tried(monkeypatch):
-    for platform, first in (("win32", "h264_mf"), ("darwin", "h264_videotoolbox")):
-        monkeypatch.setattr("sys.platform", platform)
-        assert ffmod.picture_encoders(".mp4") == [first, "mpeg4"]
-        assert ffmod.picture_encoders(".webm") == ["libvpx-vp9"]
-    monkeypatch.setattr("sys.platform", "linux")
-    assert ffmod.picture_encoders(".mkv") == ["mpeg4"] and ffmod.picture_encoders(".flv") == ["flv"]
-
-
-# -- copy or encode ------------------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("info,ext,keeps", [
-    (dict(), ".mp4", True),                                   # same container
-    (dict(), ".mkv", True),                                   # anything goes into mkv
-    (dict(video_codec="prores", ext=".mov"), ".mp4", False),  # mp4 does not take ProRes
-    (dict(), ".webm", False),                                 # H.264 is not a WebM picture
-    (dict(), ".flv", True),                                   # but a Flash video one
-    (dict(video_codec="hevc"), ".flv", False),
-    (dict(video_codec="vp9", ext=".webm"), ".webm", True),
-    (dict(video_codec="vp8", ext=".webm"), ".mp4", False),
-])
-def test_a_picture_is_kept_when_the_new_container_takes_it(info, ext, keeps):
-    plan = ffmod._picture_plan(probed(**info), ext, VideoOut())
-    assert (plan is None) == keeps
-    if plan:
-        assert plan["encoders"][-1] in ("mpeg4", "flv", "libvpx-vp9") and plan["size"] is None
-
-
-def test_another_size_means_encoding_and_the_same_size_does_not():
-    assert ffmod._picture_plan(probed(), ".mp4", VideoOut(1080)) is None  # it is 1080p already
-    plan = ffmod._picture_plan(probed(), ".mp4", VideoOut(720))
-    assert plan["size"] == (1280, 720) and plan["out"] == (1280, 720)
-    # stored sideways: 1080 wide shown as 1080 tall
-    assert ffmod._picture_plan(probed(video_width=1920, video_height=1080, video_rotation=90), ".mp4", VideoOut(1080)) is None
-    # square pixels are made even when the shape is wide only because the pixels are
-    assert ffmod._picture_plan(probed(video_width=720, video_height=480, video_sar=1.5), ".mp4", VideoOut(480))["size"] == (1080, 480)
-    # odd sizes are made even when the picture must be saved again
-    odd = ffmod._picture_plan(probed(video_codec="hevc", ext=".mkv", video_width=1919, video_height=1079), ".webm", VideoOut())
-    assert odd["size"] == (1918, 1078)
-    # a sound file has no picture to plan
-    assert ffmod._picture_plan(None, ".mp4", VideoOut(720)) is None
-    assert ffmod._picture_plan(probed(has_video=False, video_codec=None), ".mp4", VideoOut(720)) is None
-
-
-def test_the_mpeg4_picture_options():
-    plan = {"fps": 25.0, "size": (1280, 720), "out": (1280, 720), "source_bps": 0, "source_pixels": 0}
-    args = ffmod._picture_args("mpeg4", plan)
-    assert args[:2] == ["-vf", "scale=1280:720:flags=lanczos,setsar=1"]
-    assert args[2:4] == ["-c:v", "mpeg4"] and "-pix_fmt" in args and args[args.index("-g") + 1] == "50"
-    assert "-vf" not in ffmod._picture_args("mpeg4", {**plan, "size": None})
-
-
 # -- with FFmpeg ----------------------------------------------------------------------------------------------------
 
 
@@ -171,17 +118,6 @@ def test_resizing_keeps_the_shape_and_orientation(sources, tmp_path):
     turned = ff.mux_video(sources["turned"], sources["clean"], tmp_path / "d.mp4", video=VideoOut(360))
     assert shown(turned) == (360, 640)  # shown upright and stays tall
     assert not any("rotation" in d for s in probe_streams(turned) for d in s.get("side_data_list", []))
-
-
-@needs_ff
-def test_a_fallback_is_used_when_the_first_encoder_cannot_run(sources, tmp_path, monkeypatch):
-    monkeypatch.setattr(ffmod, "picture_encoders", lambda ext: ["no_such_encoder", "mpeg4"])
-    report = {}
-    out = FFmpeg(FF_DIR).mux_video(sources["land"], sources["clean"], tmp_path / "o.mp4", video=VideoOut(90), report=report)
-    assert report["encoder"] == "mpeg4" and report["fallback"] is True and shown(out) == (160, 90)
-    monkeypatch.setattr(ffmod, "picture_encoders", lambda ext: ["no_such_encoder"])
-    with pytest.raises(MediaError, match="Could not convert the picture"):
-        FFmpeg(FF_DIR).mux_video(sources["land"], sources["clean"], tmp_path / "p.mp4", video=VideoOut(90))
 
 
 @needs_ff

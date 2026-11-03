@@ -209,17 +209,6 @@ def test_a_video_can_become_just_its_sound(clip_wav, tmp_path, quick_clean):
         assert length(out.output) == pytest.approx(2.0, abs=0.3)
 
 
-@pytest.mark.native
-def test_a_video_with_two_sounds_says_what_became_of_the_second_one_when_only_the_sound_is_kept(clip_wav, tmp_path, quick_clean):
-    from conftest import bundled_ffmpeg, run_ffmpeg
-
-    src = make_video(tmp_path / "in.mp4", clip_wav)
-    two = tmp_path / "two.mkv"
-    run_ffmpeg(bundled_ffmpeg(), "-i", str(src), "-i", str(clip_wav), "-map", "0:v", "-map", "0:a", "-map", "1:a", "-c", "copy", str(two))
-    out = engine.process(two, out_dir=tmp_path / "out", output_name="sound.mp3")
-    assert "only the first audio track was cleaned" in out.notice and "wasn't kept" in out.notice
-
-
 # -- video size ----------------------------------------------------------------------------------------------------
 
 

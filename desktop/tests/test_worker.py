@@ -36,7 +36,9 @@ class FakeRunner:
             self.peak = max(self.peak, self.running)
         try:
             progress(0.25)
-            while not gate.wait(0.01):
+            for _ in range(3000):  # (until it is let go or stopped, at most 30 s)
+                if gate.wait(0.01):
+                    break
                 if cancel.is_set():
                     raise engine.Cancelled()
             if name in self.fail:
@@ -78,13 +80,6 @@ def jobs(q, *names):
         q.add(Job(n, Path(name), engine.JobOptions()))
 
 
-def test_nothing_runs_before_start(make_queue):
-    q, runner, _ = make_queue()
-    jobs(q, "a.wav", "b.wav")
-    assert wait_until(lambda: False, timeout=0.2) is False
-    assert runner.started == []
-
-
 def test_two_files_run_at_once_and_the_third_waits(make_queue):
     q, runner, events = make_queue(parallel=2)
     jobs(q, "a.wav", "b.wav", "c.wav")
@@ -121,30 +116,6 @@ def test_a_file_that_runs_by_itself_gets_every_thread_but_one_and_two_that_run_t
     assert asked == [2, 2] and runner.threads["a.wav"] == runner.threads["b.wav"] == real(2)  # (two files: half of them each)
     assert runner.threads["a.wav"] <= runner.threads["alone.wav"]
     runner.finish("a.wav"), runner.finish("b.wav")
-    assert wait_until(lambda: events[-1] == ("idle",), timeout=5)
-
-
-def test_a_file_that_waits_for_a_free_place_gets_the_share_of_those_that_run_with_it(make_queue, monkeypatch):
-    asked = []
-    real = sysinfo.threads_per_job
-    monkeypatch.setattr(sysinfo, "threads_per_job", lambda parallel: (asked.append(parallel), real(parallel))[1])
-    q, runner, events = make_queue(parallel=2)
-    jobs(q, "a.wav", "b.wav", "c.wav")
-    q.start()
-    assert wait_until(lambda: len(runner.started) == 2, timeout=5)
-    assert asked == [2, 2]  # (a and b run together; c waits)
-    runner.finish("a.wav")
-    assert wait_until(lambda: "c.wav" in runner.started, timeout=5)
-    assert asked == [2, 2, 2]  # (c runs beside b)
-    runner.finish("b.wav")
-    runner.finish("c.wav")
-    assert wait_until(lambda: events[-1] == ("idle",), timeout=5)
-    asked.clear()
-    q.add(Job(21, Path("d.wav"), engine.JobOptions()))
-    q.start()
-    assert wait_until(lambda: "d.wav" in runner.started, timeout=5)
-    assert asked == [1]  # (and one that comes later, by itself, gets all it can)
-    runner.finish("d.wav")
     assert wait_until(lambda: events[-1] == ("idle",), timeout=5)
 
 

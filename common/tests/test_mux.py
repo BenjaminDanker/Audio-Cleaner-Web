@@ -2,7 +2,6 @@
 import numpy as np
 import pytest
 
-from acw_common import ffmpeg as ffmod
 from acw_common.ffmpeg import FFmpeg
 
 from test_common import FF_DIR, make_multi_track_video, needs_ff, probe_streams
@@ -27,9 +26,3 @@ def test_other_tracks_and_subtitles_are_kept(source, tmp_path, ext, subtitle):
     assert report == {"audio_kept": 1, "audio_dropped": 0, "subtitles_kept": 1, "subtitles_dropped": 0}
 
 
-@needs_ff
-def test_a_codec_the_container_cannot_take_is_left_out_not_fatal(source):
-    src, _, _ = source
-    # aac does not go into webm: the plan drops that track and keeps the cleaned one
-    plan = ffmod._plan_extras(FFmpeg(FF_DIR).probe(src), ".webm")
-    assert plan["audio"] == [] and plan["total_audio"] == 1

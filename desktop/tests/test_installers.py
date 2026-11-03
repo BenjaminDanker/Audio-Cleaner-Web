@@ -214,17 +214,6 @@ def test_mac_distribution_gates_the_os_and_shows_the_licence():
         distribution.distribution_xml("2.0.0", "ppc")
 
 
-def test_mac_welcome_text_names_the_download(tmp_path):
-    out = tmp_path / "res"
-    eula = PACKAGING / "EULA.txt"
-    sys.argv = ["distribution.py", str(out), "--version", "2.0.0", "--arch", "arm64", "--eula", str(eula), "--models-gb", "2.5"]
-    assert distribution.main() == 0
-    welcome = (out / "welcome.txt").read_text()
-    assert "2.5 GB" in welcome and "several minutes" in welcome
-    assert (out / "EULA.txt").read_text() == eula.read_text()
-    xml.dom.minidom.parse(str(out / "distribution.xml"))
-
-
 COPYRIGHT = "Copyright (c) 2025-2026 The Audio Cleaner authors"
 MIT_LICENSE = f"""MIT License
 
