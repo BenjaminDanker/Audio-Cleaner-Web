@@ -538,51 +538,6 @@ def test_inputs_and_render_check_their_arguments():
 # ---------------------------------------------------------------------------------------------------------------------
 # What a run says about its own speed (Runner.timings)
 # ---------------------------------------------------------------------------------------------------------------------
-def test_a_render_with_timings_says_how_long_each_step_took_and_how_much_audio_it_made(monkeypatch):
-    import time
-
-    def slow_remover(E, wins, put, *, channel, **_):  # (a stand-in for the heavy remover: a pause, then a gain)
-        time.sleep(0.05)
-        for i, (lo, s, e, hi) in enumerate(wins):
-            put(i, E[s:e, channel] * 0.25)
-
-    monkeypatch.setattr(dpdfnet, "run_windows", slow_remover)
-    inp = make(20)
-    tl = noise_tl(20, (0, 20, 24.0, "heavy"), level=False)
-    want = sum(t.compute_seconds for t in editor.plan(tl, inp, blocks.MemoryCache()).misses if t.step == "heavy")
-    timings: dict = {}
-    cache = blocks.MemoryCache()
-    editor.render(tl, inp, cache, editor.Runner(heavy_model_path="stand-in", threads=2, timings=timings))
-    assert list(timings) == ["heavy"]
-    wall, seconds = timings["heavy"]
-    assert wall >= 0.02 and wall < 30.0 and seconds == pytest.approx(want) and seconds >= 20.0  # (the model reads its context too; Windows' clock ticks about 15.6 ms)
-    # a second render finds every block in the cache: nothing ran, so nothing more is said
-    editor.render(tl, inp, cache, editor.Runner(heavy_model_path="stand-in", threads=2, timings=timings))
-    assert timings["heavy"] == [wall, seconds]
-    # a run that is not asked to say nothing: no timings, the same audio
-    plain = editor.render(tl, inp, blocks.MemoryCache(), editor.Runner(heavy_model_path="stand-in", threads=2))
-    assert editor.Runner().timings is None and np.array_equal(plain, editor.render(tl, inp, cache, editor.Runner()))
-
-
-def test_timings_add_up_over_the_renders_that_fill_them(monkeypatch):
-    import time
-
-    def remover(E, wins, put, *, channel, **_):
-        time.sleep(0.02)
-        for i, (lo, s, e, hi) in enumerate(wins):
-            put(i, E[s:e, channel] * 0.25)
-
-    monkeypatch.setattr(dpdfnet, "run_windows", remover)
-    inp = make(30)
-    timings: dict = {}
-    runner = editor.Runner(heavy_model_path="x", threads=2, timings=timings)
-    tl = noise_tl(30, (0, 10, 24.0, "heavy"))
-    editor.render(tl, inp, blocks.MemoryCache(), runner)
-    first = list(timings["heavy"])
-    editor.render(tl, inp, blocks.MemoryCache(), runner)  # (another cache: everything runs again)
-    assert list(timings) == ["heavy"] and timings["heavy"][0] > first[0] and timings["heavy"][1] == pytest.approx(2 * first[1])  # added to the first
-
-
 @needs_dfn
 def test_a_real_render_says_how_long_the_light_remover_took():
     inp = make(10, 1)

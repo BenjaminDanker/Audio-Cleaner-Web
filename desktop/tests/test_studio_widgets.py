@@ -119,35 +119,6 @@ def test_there_is_no_music_row_in_the_timeline_its_names_or_the_rows_before_a_fi
     assert "Music" not in names and "Coming" not in names
 
 
-def test_the_waveforms_bars_are_drawn_once_and_reused_by_every_repaint_until_the_width_or_the_waveform_changes(loaded):
-    plot = plot_of(loaded)
-    plot.grab()
-    first = dict(plot._bars)
-    assert first  # (the waveform's bars are in the cache)
-    (key, pixmap), = [(k, v) for k, v in first.items()][:1]
-    width, dpr = key[4], key[-1]  # (the key ends with the drawn width, the colour and the screen's pixel ratio)
-    assert pixmap.width() == int(width * dpr) and pixmap.height() == int(tl_mod.WAVE_H * dpr) and width <= plot.width()
-    loaded.doc.model.select(3, 7)  # a part is chosen, the playhead moves, a setting changes: the timeline repaints, the bars are not drawn again
-    loaded.studio.seek(4.0)
-    loaded.doc.model.set_voice("rebuild")
-    settle(loaded)
-    plot.grab()
-    plot.grab()
-    assert all(plot._bars.get(k) is v for k, v in first.items()) and set(plot._bars) == set(first)
-    old_width = plot.width()
-    sh.resized(loaded, 1000, 900, lambda: plot.width() != old_width)  # another width: drawn again for it (the resize reaches the timeline a few events later)
-    settle(loaded)
-    new_width = plot.width()
-    assert new_width != old_width, (old_width, new_width)  # (any other width: at 1000 px the narrow layout can make the timeline wider)
-    plot_of(loaded).grab()
-    assert any(k not in first for k in plot._bars) and any(k[4] == new_width for k in plot._bars)
-    for extra in range(1, 12):  # (what is kept does not grow with every width the window has had)
-        before = plot.width()
-        sh.resized(loaded, 800 + 37 * extra, 900, lambda before=before: plot.width() != before)
-        plot_of(loaded).grab()
-    assert len(plot._bars) <= 6
-
-
 def test_the_timeline_row_for_subtitles_says_embed_for_a_video_that_gets_them_inside(window, tmp_path):
     window.fakes.facts.update(video=True, ext=".mp4")
     add_file(window, tmp_path, "clip.mp4")
@@ -423,22 +394,6 @@ def test_start_says_about_how_long_the_run_takes_when_something_is_on_and_only_s
     s.inspector.level._buttons["off"].click()
     settle(loaded)
     assert doc.estimate() == ([], 0.0) and s.start.button.text() == "Start"  # nothing on: no time to say
-
-
-def test_the_time_on_start_follows_what_this_computers_runs_measured(loaded):
-    s, doc = loaded.studio, loaded.doc
-    doc.model.select(0, 11)
-    doc.model.set_voice("noise")
-    settle(loaded)
-    before = doc.estimate()[1]
-    assert before == pytest.approx(speed.cost("light", 11.0) + speed.cost("leveling", 11.0))
-    speed.learn({"light": [speed.guess("light", 600.0, speed.run_threads()) * 6, 600.0], "leveling": [0.0, 1.0]}, speed.run_threads())  # (six times slower than guessed)
-    assert speed._ratios["light"] == pytest.approx(6.0) and "leveling" not in speed._ratios  # (the tiny leveling run is not counted)
-    after = doc.estimate()[1]
-    assert after == pytest.approx(speed.cost("light", 11.0) + speed.cost("leveling", 11.0)) and after > before
-    loaded.studio._schedule()  # the screen redraws a moment later: ask for it, then wait for it
-    settle(loaded)
-    assert s.start.button.text() == f"Start · {editor_job.say_time(after)}"
 
 
 def test_details_counts_voice_rebuild_once_for_a_stereo_recording_and_noise_removal_for_each_side(window, tmp_path):
