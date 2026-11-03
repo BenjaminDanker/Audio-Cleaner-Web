@@ -68,20 +68,39 @@ class MainThreadCollector(QObject):
     file, measuring the Leveling gains) and the garbage holds the window's Qt objects (the widgets of a card that was replaced and the
     functions connected to them), Qt deletes them outside the main thread and the app crashes (seen in the tests: a segmentation fault
     while "Garbage-collecting" in a worker). So the automatic collection is off and this timer runs it on the main thread instead, at
-    the thresholds Python itself would use."""
+    the thresholds Python itself would use, with its rule for the oldest objects too: a full collection goes through every object the
+    program holds, so it runs only once the objects that grew old since the last one are a quarter of those it found (without that rule
+    it ran every minute or so and held the window still each time, for seconds on a slow computer). What the app holds when it starts (the
+    libraries and its own code, never garbage) is set aside first (gc.freeze), so a full collection goes only through what came after."""
 
     def __init__(self, parent: QObject) -> None:
         super().__init__(parent)
         gc.disable()
+        gc.collect()  # (what is garbage now is not set aside with the rest)
+        gc.freeze()
         self._threshold = gc.get_threshold()
+        self._old = len(gc.get_objects(2))  # the old objects after the last full collection (here: what there is now)
+        self._middle = 0  # collections of the middle generation since the old ones were last counted
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.check)
-        self._timer.start(500)
+        self._timer.start(50)  # (often, so each collection has little to go through; a tick with nothing to do costs next to nothing)
 
     def check(self) -> None:
         count, (t0, t1, t2) = gc.get_count(), self._threshold
-        if count[0] > t0:
-            gc.collect(2 if count[1] > t1 and count[2] > t2 else 1 if count[1] > t1 else 0)
+        if count[0] <= t0:
+            return
+        if count[1] <= t1:
+            gc.collect(0)
+            return
+        self._middle += 1
+        if count[2] > t2 and self._middle >= t2:
+            self._middle = 0
+            old = len(gc.get_objects(2))  # (a list of references: far cheaper than a full collection, and only every t2 of these)
+            if old - self._old > self._old / 4:
+                gc.collect(2)
+                self._old = len(gc.get_objects(2))
+                return
+        gc.collect(1)
 
 
 def create_application(argv: list[str]) -> Application:
