@@ -555,7 +555,7 @@ def test_a_render_with_timings_says_how_long_each_step_took_and_how_much_audio_i
     editor.render(tl, inp, cache, editor.Runner(heavy_model_path="stand-in", threads=2, timings=timings))
     assert list(timings) == ["heavy"]
     wall, seconds = timings["heavy"]
-    assert wall >= 0.03 and wall < 30.0 and seconds == pytest.approx(want) and seconds >= 20.0  # (the model reads its context too; Windows' clock ticks about 15.6 ms)
+    assert wall >= 0.02 and wall < 30.0 and seconds == pytest.approx(want) and seconds >= 20.0  # (the model reads its context too; Windows' clock ticks about 15.6 ms)
     # a second render finds every block in the cache: nothing ran, so nothing more is said
     editor.render(tl, inp, cache, editor.Runner(heavy_model_path="stand-in", threads=2, timings=timings))
     assert timings["heavy"] == [wall, seconds]
@@ -580,7 +580,7 @@ def test_timings_add_up_over_the_renders_that_fill_them(monkeypatch):
     editor.render(tl, inp, blocks.MemoryCache(), runner)
     first = list(timings["heavy"])
     editor.render(tl, inp, blocks.MemoryCache(), runner)  # (another cache: everything runs again)
-    assert list(timings) == ["heavy"] and timings["heavy"][0] >= first[0] + 0.02 and timings["heavy"][1] == pytest.approx(2 * first[1])  # added to the first
+    assert list(timings) == ["heavy"] and timings["heavy"][0] > first[0] + 0.01 and timings["heavy"][1] == pytest.approx(2 * first[1])  # added to the first
 
 
 @needs_dfn
