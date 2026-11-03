@@ -213,7 +213,7 @@ def test_each_card_edits_the_part_that_is_chosen_and_says_when_the_parts_differ(
     i.options["rebuild"].radio.click()
     i.level._buttons["off"].click()
     settle(loaded)
-    assert i.heading.text() == "0:02–0:06 · 4 s" and doc.model.voice_mode_of(2, 6) == "rebuild" and doc.model.level_of(2, 6) == "off"
+    assert i.heading.text() == "0:02–0:06" and doc.model.voice_mode_of(2, 6) == "rebuild" and doc.model.level_of(2, 6) == "off"
     assert not i.options["noise"].extra.isVisibleTo(i)  # (the strength is for Noise removal only)
     assert i.only.isVisibleTo(i)  # "Leave the rest as it is" is for a part
     i.options["noise"].radio.click()
@@ -226,10 +226,10 @@ def test_each_card_edits_the_part_that_is_chosen_and_says_when_the_parts_differ(
     assert [(p.start, p.end) for p in doc.model.draft.layers["noise"]] == [(2.0, 6.0)]
     s.top.all_button.click()
     settle(loaded)
-    assert i.heading.text() == "Whole file · 0:11" and not i.only.isVisibleTo(i) and i.voice_card.mixed.isVisibleTo(i)
+    assert i.heading.text() == "0:00–0:11" and not i.only.isVisibleTo(i) and i.voice_card.mixed.isVisibleTo(i)
 
 
-def test_leveling_is_one_loudness_for_the_whole_file_and_the_cards_are_locked_while_it_runs(loaded, runner):
+def test_leveling_is_chosen_per_part_and_the_card_says_mixed_when_a_range_has_different_loudnesses_and_the_cards_are_locked_while_it_runs(loaded, runner):
     s, doc = loaded.studio, loaded.doc
     i = s.inspector
     doc.model.select(0, 3)
@@ -237,7 +237,33 @@ def test_leveling_is_one_loudness_for_the_whole_file_and_the_cards_are_locked_wh
     doc.model.select(5, 8)
     i.level._buttons["broadcast"].click()
     settle(loaded)
-    assert doc.model.loudness() == -23.0 and all(p.settings["loudness_lufs"] == -23.0 for p in doc.model.draft.layers["leveling"])
+    m = doc.model
+    # each choice changed only its own part; the rest of the file keeps the loudness it had (Podcast)
+    assert m.loudness_of(0, 3) == -14.0 and m.loudness_of(5, 8) == -23.0 and m.loudness_of(3, 5) == -16.0 and m.loudness_of(8, 11) == -16.0
+    assert m.loudness() == -23.0  # (the last one chosen is what Leveling turned on elsewhere starts with)
+
+    def shown():
+        return [k for k, b in i.level._buttons.items() if b.isChecked()]
+
+    m.select(0, 3)  # one loudness: its own button, no "mixed"
+    settle(loaded)
+    assert shown() == ["youtube"] and not i.level_card.mixed.isVisibleTo(i)
+    m.select(5, 8)
+    settle(loaded)
+    assert shown() == ["broadcast"] and not i.level_card.mixed.isVisibleTo(i)
+    m.select(0, 8)  # two loudnesses: no button is on and the card says mixed
+    settle(loaded)
+    assert shown() == [] and i.level_card.mixed.isVisibleTo(i)
+    s.top.all_button.click()  # the whole file is leveled to different loudnesses too
+    settle(loaded)
+    assert shown() == [] and i.level_card.mixed.isVisibleTo(i)
+    m.select(0, 3)
+    i.level._buttons["off"].click()  # Off in a range with one loudness: Off is shown and it is not "mixed"
+    settle(loaded)
+    assert shown() == ["off"] and not i.level_card.mixed.isVisibleTo(i)
+    m.select(0, 8)  # off in some places and leveled in others: mixed as before
+    settle(loaded)
+    assert shown() == [] and i.level_card.mixed.isVisibleTo(i)
     doc.stage = "processing"
     doc.changed.emit()
     settle(loaded)
@@ -324,6 +350,15 @@ def test_a_click_on_a_voice_row_that_cannot_be_chosen_or_that_is_pressed_in_and_
     QTest.mouseClick(rebuild.line, Qt.MouseButton.RightButton)
     settle(loaded)
     assert doc.model.voice_mode_of(0, 11) == "noise"
+
+
+def test_the_settings_heading_is_just_the_range_as_on_the_website():
+    title = copy_mod.selection_title
+    assert title(None, 180.0) == "0:00–3:00" and title((0.0, 180.0), 180.0) == "0:00–3:00" and title((-5.0, 200.0), 180.0) == "0:00–3:00"
+    assert title((15.0, 25.0), 180.0) == "0:15–0:25" and title((2.0, 6.0), 11.0) == "0:02–0:06" and title((0.0, 90.0), 180.0) == "0:00–1:30"
+    assert title(None, 3600.0) == "0:00–1:00:00" and title((60.0, 3700.0), 4000.0) == "1:00–1:01:40"
+    for text in (title(None, 180.0), title((15.0, 25.0), 180.0)):
+        assert "Whole file" not in text and "·" not in text and " s" not in text
 
 
 def test_leveling_calls_its_fifth_option_even_everywhere_and_it_still_means_the_loudness_as_recorded(loaded):

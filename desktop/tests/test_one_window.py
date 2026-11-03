@@ -70,7 +70,7 @@ def test_choosing_a_file_fills_the_screen_in_place(window, tmp_path):
     assert QApplication.activeModalWidget() is None
     assert wait_until(lambda: window.doc.model is not None, 5)
     QApplication.processEvents()
-    assert s.inspector.cards.isVisible() and not s.inspector.ghost.isVisible() and s.inspector.heading.text() == "Whole file · 0:11"
+    assert s.inspector.cards.isVisible() and not s.inspector.ghost.isVisible() and s.inspector.heading.text() == "0:00–0:11"
     assert s.top.meta.text().startswith("0:11 · Audio") and s.top.different.isVisible()
     assert s.output.fields.isVisible() and s.output.name.text() == "talk-cleaned" and s.output.format.currentData() == ".wav"
     assert s.start.button.text().startswith("Start · about ") and s.start.button.isEnabled()  # (what is on, and about how long it takes here)
@@ -187,7 +187,7 @@ def test_a_part_chosen_on_the_timeline_has_its_own_settings(window, tmp_path, ru
     s.top.switch.click()
     s.timeline.selectionDragged.emit(3.2, 6.7)  # drag across the timeline: whole seconds
     QApplication.processEvents()
-    assert doc.model.selection == (3.0, 7.0) and s.inspector.heading.text() == "0:03–0:07 · 4 s"
+    assert doc.model.selection == (3.0, 7.0) and s.inspector.heading.text() == "0:03–0:07"
     s.inspector.options["rebuild"].radio.click()
     QApplication.processEvents()
     assert doc.model.voice_mode_of(3, 7) == "rebuild" and doc.model.voice_mode_of(0, 11) == "mixed" and not s.inspector.voice_card.mixed.isVisibleTo(s.inspector)
@@ -197,7 +197,7 @@ def test_a_part_chosen_on_the_timeline_has_its_own_settings(window, tmp_path, ru
     assert doc.model.selection == (0.0, 3.0)
     s.top.all_button.click()  # Select all: the settings of the whole file say that they differ from part to part
     QApplication.processEvents()
-    assert doc.model.selection is None and s.inspector.heading.text() == "Whole file · 0:11"
+    assert doc.model.selection is None and s.inspector.heading.text() == "0:00–0:11"
     assert s.inspector.voice_card.mixed.isVisibleTo(s.inspector)
     # undo and redo are the tools of the editor
     s.top.undo_button.click()
@@ -230,7 +230,7 @@ def test_a_past_job_opens_in_the_same_window_with_what_it_kept(job_window):
     # at once: the same screen with the job's name, its stored waveform and the parts it was made with (nothing was decoded for it)
     assert windows_showing() == before and s.stack.currentIndex() == 1 and s.top.name.text() == "talk.wav" and doc.entry.id == eid
     assert doc.peaks[:4] == [30, 80, 50, 100] and doc.model.strength_of(0, 10) == "balanced" and doc.stage == "done"
-    assert s.inspector.heading.text() == "Whole file · 0:10" and s.start.button.text() == "Open the file"
+    assert s.inspector.heading.text() == "0:00–0:10" and s.start.button.text() == "Open the file"
     assert s.top.hear_box.isVisible() and not s.top.auto_box.isVisible()  # a job has no Automatic: what can be listened to is there
     # the live sound follows in the background, and the player plays the result file meanwhile
     assert wait_until(lambda: doc.session_state == "ready", 10)
@@ -284,7 +284,7 @@ def test_a_long_file_shows_at_once_and_the_window_keeps_answering(window, tmp_pa
     assert wait_until(lambda: seen_reading.append(window.doc.wave) or (window.doc.wave == "ready" and window.doc.applied), 30)
     timer.stop()
     assert "reading" in seen_reading and max(gaps) < 1.0  # it kept answering while the sound, then Automatic, were worked out
-    assert window.studio.inspector.heading.text() == "Whole file · 1:00:00" and path.exists()
+    assert window.studio.inspector.heading.text() == "0:00–1:00:00" and path.exists()
     assert fakes.calls[0] == "probe" and set(fakes.calls) == {"probe", "peaks", "decide"}  # (the waveform and Automatic are read side by side)
 
 
@@ -317,4 +317,4 @@ def test_a_real_ten_minute_file_shows_its_waveform_in_seconds_and_the_window_kee
     assert wait_until(lambda: doc.applied and not doc.listening, 120)
     timer.stop()
     assert wave_took < 60 and max(gaps) < 1.5, (wave_took, max(gaps))  # (about 1 s and 0.1 s on a desktop machine; the margin is for CI runners)
-    assert len(doc.peaks) >= 1000 and doc.facts.duration == pytest.approx(600.0, abs=1) and w.studio.inspector.heading.text() == "Whole file · 10:00"
+    assert len(doc.peaks) >= 1000 and doc.facts.duration == pytest.approx(600.0, abs=1) and w.studio.inspector.heading.text() == "0:00–10:00"

@@ -224,11 +224,75 @@ def test_the_voice_is_off_noise_removal_or_voice_rebuild_for_a_part_and_the_sect
     rows = [(round(s["start"]), round(s["end"]), s["mode"], s["label"]) for s in m.voice_sections()]
     assert rows == [(0, 10, "noise", "Gentle · Light"), (10, 20, "noise", "Balanced · Light"), (20, 30, "rebuild", "Rebuild"),
                     (30, 40, "noise", "Balanced · Light"), (40, 45, "noise", "Max"), (45, 50, "off", ""), (50, 100, "noise", "Balanced · Light")]
-    m.set_level(-14.0, True, 10, 20)  # one loudness for the whole file: every leveled part gets it
-    assert m.loudness() == -14.0 and all(p.settings["loudness_lufs"] == -14.0 for p in m.draft.layers["leveling"])
+    m.set_level(-14.0, True, 10, 20)  # a loudness changes only the range it is chosen for; the rest keeps its own
+    assert m.loudness() == -14.0
+    assert [(round(p.start), round(p.end), p.settings["loudness_lufs"]) for p in m.draft.layers["leveling"]] == [(0, 10, -16.0), (10, 20, -14.0), (20, 100, -16.0)]
     m.set_level(None, False, 60, 70)
     assert m.level_of(60, 70) == "off" and m.level_of(0, 100) == "mixed"
-    assert [(round(s["start"]), round(s["end"]), s["on"]) for s in m.sections("leveling")] == [(0, 60, True), (60, 70, False), (70, 100, True)]
+    assert [(round(s["start"]), round(s["end"]), s["on"]) for s in m.sections("leveling")] == [
+        (0, 10, True), (10, 20, True), (20, 60, True), (60, 70, False), (70, 100, True)]
+
+
+def test_leveling_is_chosen_per_part_and_loudness_of_says_one_value_or_mixed():
+    m = whole_model()
+    m.set_level(-14.0, True, 10, 20)
+    m.set_level(-23.0, True, 40, 50)
+    assert [(round(p.start), round(p.end), p.settings["loudness_lufs"]) for p in m.draft.layers["leveling"]] == [
+        (0, 10, -16.0), (10, 20, -14.0), (20, 40, -16.0), (40, 50, -23.0), (50, 100, -16.0)]
+    # one loudness in the range: that value
+    assert m.loudness_of(10, 20) == -14.0 and m.loudness_of(12, 18) == -14.0 and m.loudness_of(40, 50) == -23.0 and m.loudness_of(20, 40) == -16.0
+    # parts that only touch the range do not count
+    assert m.loudness_of(20, 30) == -16.0 and m.loudness_of(0, 10) == -16.0
+    # different loudnesses in the range: mixed
+    assert m.loudness_of(5, 15) == "mixed" and m.loudness_of(0, 100) == "mixed" and m.loudness_of(15, 45) == "mixed"
+    # none of the range is leveled: the loudness that was chosen last
+    m.set_level(None, False, 60, 70)
+    assert m.loudness_of(60, 70) == -23.0 and m.loudness_of(62, 68) == m.loudness()
+    # "keep the level" (None) is a value too, and differs from a number
+    m.set_level(None, True, 80, 90)
+    assert m.loudness_of(80, 90) is None and m.loudness_of(75, 85) == "mixed"
+
+
+def test_loudness_of_without_any_leveled_part_falls_back_to_the_one_the_model_started_with():
+    m = model_of(100.0, loudness=-14.0)  # leveling off everywhere
+    assert m.loudness_of(0, 100) == -14.0 and m.level_of(0, 100) == "off"
+    assert whole_model().loudness_of(0, 100) == -16.0
+
+
+def test_leveling_turned_on_later_starts_with_the_loudness_chosen_last_and_set_loudness_still_levels_every_part():
+    m = whole_model()
+    m.set_level(None, False, 30, 40)
+    m.set_level(-14.0, True, 10, 20)
+    m.set_layer("leveling", True, 30, 40)  # on again elsewhere: the last loudness chosen
+    assert m.level_of(30, 40) == "on" and m.loudness_of(30, 40) == -14.0 and m.loudness_of(10, 20) == -14.0 and m.loudness_of(50, 60) == -16.0
+    m.set_level(-23.0, True, 60, 70)
+    m.set_level(None, False, 80, 90)
+    m.set_layer("leveling", True, 80, 90)
+    assert m.loudness_of(80, 90) == -23.0 and m.loudness_of(10, 20) == -14.0
+    m.set_loudness(-16.0)  # (unchanged) the target of the job: every leveled part gets it
+    assert m.loudness_of(0, 100) == -16.0 and all(p.settings["loudness_lufs"] == -16.0 for p in m.draft.layers["leveling"])
+
+
+def test_undo_and_redo_of_a_loudness_for_a_part_put_back_the_part_and_the_remembered_loudness():
+    m = whole_model()
+    start = m.draft.copy()
+    m.set_level(-14.0, True, 10, 20)
+    after_first = m.draft.copy()
+    m.set_level(-23.0, True, 15, 30)
+    after = m.draft.copy()
+    assert m.loudness() == -23.0 and m.loudness_of(10, 30) == "mixed" and m.loudness_of(15, 30) == -23.0
+    m.undo_edit()
+    assert m.draft == after_first and m.loudness() == -14.0 and m.loudness_of(10, 30) == "mixed" and m.loudness_of(10, 20) == -14.0
+    m.undo_edit()
+    assert m.draft == start and m.loudness() == -16.0 and m.loudness_of(0, 100) == -16.0
+    m.redo_edit()
+    m.redo_edit()
+    assert m.draft == after and m.loudness() == -23.0 and m.loudness_of(10, 15) == -14.0 and m.loudness_of(20, 30) == -23.0
+    m.undo_edit()
+    m.set_level(None, False, 10, 20)  # Off for a part is one edit that undoes
+    assert m.level_of(10, 20) == "off"
+    m.undo_edit()
+    assert m.level_of(10, 20) == "on" and m.loudness_of(10, 20) == -14.0
 
 
 # ---------------------------------------------------------------------------------------------------- the live sound
