@@ -2,6 +2,7 @@
 place (no new window, no dialog), a run finishes on the same screen, a past job opens in it, and opening a long file or job never holds the window."""
 from __future__ import annotations
 
+import contextlib
 import gc
 import sys
 import threading
@@ -269,25 +270,15 @@ def test_a_long_file_shows_at_once_and_the_window_keeps_answering(window, tmp_pa
     fakes = window.fakes
     fakes.seconds = 3600.0
     fakes.probe_delay, fakes.peaks_delay, fakes.decide_delay = 0.3, 1.2, 1.2
-    began = time.monotonic()
-    path = add_file(window, tmp_path, "long.wav")
-    assert time.monotonic() - began < 1.0  # nothing is read on the window's thread (the stand-in probe alone takes 0.3 s)
-    assert window.studio.stack.currentIndex() == 1 and window.studio.top.name.text() == "long.wav"
-    gaps, last = [], [time.monotonic()]
-
-    def tick():
-        now = time.monotonic()
-        gaps.append(now - last[0])
-        last[0] = now
-
-    timer = QTimer()
-    timer.setInterval(10)
-    timer.timeout.connect(tick)
-    timer.start()
     seen_reading = []
-    assert wait_until(lambda: seen_reading.append(window.doc.wave) or (window.doc.wave == "ready" and window.doc.applied), 30)
-    timer.stop()
-    assert "reading" in seen_reading and max(gaps) < 1.0  # it kept answering while the sound, then Automatic, were worked out
+    with window_ticks() as gaps:
+        began = time.monotonic()
+        path = add_file(window, tmp_path, "long.wav")
+        assert time.monotonic() - began < 1.0  # nothing is read on the window's thread (the stand-in probe alone takes 0.3 s)
+        assert window.studio.stack.currentIndex() == 1 and window.studio.top.name.text() == "long.wav"
+        assert wait_until(lambda: seen_reading.append(window.doc.wave) or (window.doc.wave == "ready" and window.doc.applied), 30)
+        took = time.monotonic() - began
+    assert "reading" in seen_reading and max(gaps) < 1.0, gaps.report(took)  # it kept answering while the sound, then Automatic, were worked out
     assert window.studio.inspector.heading.text() == "0:00–1:00:00" and path.exists()
     assert fakes.calls[0] == "probe" and set(fakes.calls) == {"probe", "peaks", "decide"}  # (the waveform and Automatic are read side by side)
 
@@ -342,6 +333,45 @@ class StallWatch:
                 f"{max(self.fulls, default=0.0):.2f} s; the window's thread during stalls:{top}")
 
 
+class Gaps(list):
+    """The time between the window's ticks, each one, while `window_ticks` is on; `report` says what the window was doing if one was too long."""
+
+    watch: StallWatch
+
+    def report(self, took: float) -> str:
+        return self.watch.report(took, max(self, default=0.0))
+
+
+@contextlib.contextmanager
+def window_ticks(interval_ms: int = 10):
+    """For a test that times how the window keeps answering: the leftovers of the earlier tests are set aside first (they are not the app's heap, and a
+    full collection through the garbage of hundreds of tests is not what the test is about), then a timer ticks on the window's thread every
+    `interval_ms` and a StallWatch notes what it does when it does not. Yields the gaps between the ticks; everything is undone at the end."""
+    gc.collect()
+    gc.freeze()
+    timer = QTimer()
+    watch = None
+    try:
+        gaps, last = Gaps(), [time.monotonic()]
+
+        def tick():
+            now = time.monotonic()
+            gaps.append(now - last[0])
+            last[0] = now
+
+        timer.setInterval(interval_ms)
+        timer.timeout.connect(tick)
+        gaps.watch = watch = StallWatch(last)
+        timer.start()
+        watch.start()
+        yield gaps
+    finally:
+        timer.stop()
+        if watch is not None:
+            watch.stop()
+        gc.unfreeze()
+
+
 @pytest.mark.native
 def test_a_real_ten_minute_file_shows_its_waveform_in_seconds_and_the_window_keeps_answering(native_window, speech_wav, tmp_path):
     from conftest import bundled_ffmpeg, run_ffmpeg
@@ -349,37 +379,16 @@ def test_a_real_ten_minute_file_shows_its_waveform_in_seconds_and_the_window_kee
     w = native_window
     long = tmp_path / "long.wav"
     run_ffmpeg(bundled_ffmpeg(), "-stream_loop", "-1", "-i", str(speech_wav), "-t", "600", str(long))
-    gaps, last = [], [time.monotonic()]
-
-    def tick():
-        now = time.monotonic()
-        gaps.append(now - last[0])
-        last[0] = now
-
-    timer = QTimer()
-    timer.setInterval(10)
-    timer.timeout.connect(tick)
-    watch = StallWatch(last)
-    gc.collect()
-    gc.freeze()  # the leftovers of the earlier tests are not the app's heap: a full collection through them is not what this test is about
-    try:
+    with window_ticks() as gaps:
         began = time.monotonic()
         w.add_paths([long])
         assert time.monotonic() - began < 1.5  # (the editor shows at once: nothing is read on the window's thread)
-        timer.start()
-        watch.start()
         shown = w.studio.stack.currentIndex() == 1 and w.studio.top.name.text() == "long.wav"
         assert shown
         doc = w.doc
         assert wait_until(lambda: doc.wave == "ready", 90)
         wave_took = time.monotonic() - began
         assert wait_until(lambda: doc.applied and not doc.listening, 120)
-        timer.stop()
-        watch.stop()
-        # (about 1 s and 0.1 s on a desktop machine; the margin is for CI runners)
-        assert wave_took < 60 and max(gaps) < 1.5, watch.report(wave_took, max(gaps))
-        assert len(doc.peaks) >= 1000 and doc.facts.duration == pytest.approx(600.0, abs=1) and w.studio.inspector.heading.text() == "0:00–10:00"
-    finally:
-        timer.stop()
-        watch.stop()
-        gc.unfreeze()
+    # (about 1 s and 0.1 s on a desktop machine; the margin is for CI runners)
+    assert wave_took < 60 and max(gaps) < 1.5, gaps.report(wave_took)
+    assert len(doc.peaks) >= 1000 and doc.facts.duration == pytest.approx(600.0, abs=1) and w.studio.inspector.heading.text() == "0:00–10:00"
