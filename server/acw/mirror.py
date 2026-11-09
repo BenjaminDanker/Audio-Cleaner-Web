@@ -70,6 +70,16 @@ class MirrorError(Exception):
     """Something is wrong with the release or the download; nothing was published."""
 
 
+class Unavailable(MirrorError):
+    """The release service could not be reached or was briefly unable to answer (a network error, HTTP 429 or 5xx):
+    nothing is wrong on our side, the next run tries again. Not a failure of the run (GitHub has such minutes every few
+    days, and each one mailed); a lasting outage still mails through the monitor (no successful run for STALE_RUN_S)."""
+
+
+def _http_error(status: int, text: str) -> MirrorError:
+    return (Unavailable if status == 429 or status >= 500 else MirrorError)(text)
+
+
 @dataclass
 class Config:
     repo: str
@@ -161,14 +171,14 @@ class GitHub:
         try:
             r = self.client.get(self.cfg.api + path, params=params, headers={"Accept": "application/vnd.github+json"})
         except httpx.HTTPError as e:
-            raise MirrorError(f"cannot reach the release service ({type(e).__name__})") from e
+            raise Unavailable(f"cannot reach the release service ({type(e).__name__})") from e
         if r.status_code == 404 and missing_ok:
             return None
         if r.status_code in (401, 403, 404):
             hint = " (rate limit: put a token in the token file)" if r.status_code == 403 and "rate limit" in r.text.lower() else ""
             raise MirrorError(f"the release service refused {path}: HTTP {r.status_code}{hint}")
         if r.status_code != 200:
-            raise MirrorError(f"the release service answered {path} with HTTP {r.status_code}")
+            raise _http_error(r.status_code, f"the release service answered {path} with HTTP {r.status_code}")
         try:
             return r.json()
         except ValueError as e:
@@ -200,13 +210,13 @@ class GitHub:
         try:
             with self.client.stream("GET", self._asset_url(asset), headers={"Accept": "application/octet-stream", "Accept-Encoding": "identity"}) as r:
                 if r.status_code != 200:
-                    raise MirrorError(f"downloading {asset.get('name')} failed: HTTP {r.status_code}")
+                    raise _http_error(r.status_code, f"downloading {asset.get('name')} failed: HTTP {r.status_code}")
                 for chunk in r.iter_bytes(65536):
                     out += chunk
                     if len(out) > limit:
                         raise MirrorError(f"{asset.get('name')} is larger than {limit} bytes")
         except httpx.HTTPError as e:
-            raise MirrorError(f"downloading {asset.get('name')} failed ({type(e).__name__})") from e
+            raise Unavailable(f"downloading {asset.get('name')} failed ({type(e).__name__})") from e
         return bytes(out)
 
     def download(self, asset: dict, part: Path, size: int) -> None:
@@ -230,7 +240,7 @@ class GitHub:
                     part.unlink(missing_ok=True)
                     raise MirrorError(f"the partial download of {asset.get('name')} was not usable; it will start again")
                 else:
-                    raise MirrorError(f"downloading {asset.get('name')} failed: HTTP {r.status_code}")
+                    raise _http_error(r.status_code, f"downloading {asset.get('name')} failed: HTTP {r.status_code}")
                 written = have
                 with open(part, mode) as f:
                     for chunk in r.iter_bytes():  # as they arrive, so an interruption keeps what was received
@@ -243,9 +253,9 @@ class GitHub:
                     f.flush()
                     os.fsync(f.fileno())
         except httpx.HTTPError as e:
-            raise MirrorError(f"downloading {asset.get('name')} was interrupted ({type(e).__name__}); it resumes next run") from e
+            raise Unavailable(f"downloading {asset.get('name')} was interrupted ({type(e).__name__}); it resumes next run") from e
         if part.stat().st_size != size:
-            raise MirrorError(f"{asset.get('name')} ended early ({part.stat().st_size} of {size} bytes); it resumes next run")
+            raise Unavailable(f"{asset.get('name')} ended early ({part.stat().st_size} of {size} bytes); it resumes next run")
 
 
 # ---- files ---------------------------------------------------------------------------------------------------------
@@ -600,6 +610,10 @@ def run_once(cfg: Config | None = None, *, gh: GitHub | None = None, now: float 
                     c.update(last_ok=int(now), result=results[channel], error=None)
                     # every 10 minutes by the timer: only a change ("published", a recovery) is worth a journal line
                     (log.debug if same else log.info)("%s: %s", channel, results[channel])
+                except Unavailable as e:
+                    results[channel] = f"RETRY: {e}"
+                    c.update(error=str(e)[:500], last_error_at=int(now))
+                    log.warning("%s: %s; trying again next run", channel, e)
                 except MirrorError as e:
                     results[channel] = f"FAILED: {e}"
                     c.update(error=str(e)[:500], last_error_at=int(now))

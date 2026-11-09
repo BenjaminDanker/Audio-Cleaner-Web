@@ -340,7 +340,7 @@ def test_interrupted_download_resumes(cfg, gh, signer):
     obs_release(gh, signer, "0.1.60")
     gh.cut_after = 3000  # the first package is cut short (the manifest and its signature are smaller)
     res = run(cfg)
-    assert res["obs-plugin"].startswith("FAILED") and "resumes next run" in res["obs-plugin"]
+    assert res["obs-plugin"].startswith("RETRY") and "resumes next run" in res["obs-plugin"]
     assert served() is None
     parts = list((cfg.root / "obs-plugin" / ".staging-0.1.60").glob("*.part"))
     assert parts and parts[0].stat().st_size == 3000
@@ -355,6 +355,22 @@ def test_release_service_down_or_rate_limited(cfg, gh):
     res = run(cfg)
     assert "refused" in res["obs-plugin"]
     assert mirror.load_status()["channels"]["obs-plugin"]["error"]
+
+
+def test_release_service_unavailable_is_retried_not_failed(cfg, gh, signer, monkeypatch):
+    obs_release(gh, signer, "0.1.60")
+    gh.status_override[f"/repos/{REPO}/releases?per_page=100&page=1"] = 503
+    assert run(cfg)["obs-plugin"].startswith("RETRY")
+    ch = mirror.load_status()["channels"]["obs-plugin"]
+    assert ch["error"] and not ch.get("last_ok")
+    assert served() is None
+    gh.status_override.clear()
+    assert run(cfg)["obs-plugin"] == "published 0.1.60"
+    assert mirror.load_status()["channels"]["obs-plugin"]["error"] is None
+    monkeypatch.setattr(mirror, "run_once", lambda **kw: {"obs-plugin": "RETRY: cannot reach the release service"})
+    assert mirror.main() == 0
+    monkeypatch.setattr(mirror, "run_once", lambda **kw: {"obs-plugin": "FAILED: nope"})
+    assert mirror.main() == 1
 
 
 def _paged_client(cfg, pages: list[int]):
