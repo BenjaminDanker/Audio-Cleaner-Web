@@ -158,7 +158,7 @@ Python (standard `requests`): `r = requests.post(f"{BASE}/api/jobs", json=body, 
              "language": "en" | null, "output_video": true, "embed_subtitles": true,
              "loudness_lufs": -16 | null, "atten_lim_db": 100, "echo_reference_track": false,
              "noise": "auto|light|heavy", "leveling": true, "translate": ["es", "de"],
-             "automatic": false, "video_out": {"format": "mp4", "size": 720, "source": {"codec": "wmv2", "width": 1920, "height": 1080, "fps": 30}} | null},
+             "automatic": false, "suggestions": false, "video_out": {"format": "mp4", "size": 720, "source": {"codec": "wmv2", "width": 1920, "height": 1080, "fps": 30}} | null},
  "timeline": {"version": 1, "seconds": 612.4, "layers": {"noise": [{"start": 100, "end": 160.5, "strength_db": 40, "remover": "auto"}]}}}
 ```
 
@@ -195,6 +195,7 @@ Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.au
 | `noise` | `auto` | `auto` (measured per file), `light`, `heavy` (better when the noise is nearly as loud as the voice). Doesn't apply to `rebuild` |
 | `leveling` | `true` | Leveling (its own price): the clarity chain after the noise removal (level matching, high-pass, compressor, loudness to `loudness_lufs`, limiter); `false` returns the cleaned voice as it is (`loudness_lufs` then does nothing). Must be a boolean. |
 | `automatic` | `false` | `true`: the server listens to the file and decides what you did not give yourself, like the website's "Automatic best settings" (next section). Must be a boolean; needs `kind` `denoise` or `denoise_transcribe` and `denoiseTier: "standard"` |
+| `suggestions` | `false` | `true`: the first run also looks for parts that other settings would suit (section 8, Suggestions; free). Must be a boolean. Without it, ask when you want them: `POST /api/jobs/{id}/suggestions` |
 
 There is no option for restoring the high sounds a recording has lost (phone calls, voice messages, very small files): the fix is
 `denoiseTier: "rebuild"`, which makes them again with the rest of the voice. An old client's `restore_highs` is an option like any
@@ -408,7 +409,7 @@ and in the bodies below.
 | `POST /api/jobs/{id}/process` | `{timeline?, maxCostMicros?, audioFormat?}` | `{id, run: {id, op: "process"}, estCostMicros, holdMicros, free, approximate, expiresAt}`: the job goes back to `queued` (poll `GET /api/jobs/{id}`; its earlier outputs stay listed until the new ones replace them). The timeline given becomes the working timeline. `audioFormat`: the file type of the result (as `options.audio_format`, which it also sets). A timeline whose browser parts or free subtitles have no upload yet is `409 needs_uploads` (below). **An edit.** Counts toward the active-job limit |
 | `POST /api/jobs/{id}/export` | the same | the same with `op: "export"`: the result files rendered from the cache alone, **free**, for a quote of nothing. A timeline that has something to make is `409 needs_processing` with `quote` in the answer. **An edit.** Counts toward the active-job limit |
 | `GET /api/jobs/{id}/suggestions` | | `{suggestions: {seconds, whole: {rebuild, remover, strength}, suggestions: [{start, end, kind: "part"\|"clipping", rebuild, noise: {strength_db, remover}\|null, reasons: [plain words]}], madeAt}\|null}` |
-| `POST /api/jobs/{id}/suggestions` | | looks for suggestions of a job that has none: a free run (`op: "suggest"`, the answer of `process`), poll the job. Counts toward the active-job limit |
+| `POST /api/jobs/{id}/suggestions` | | looks for suggestions of a job that has none (it was made without `options.suggestions`, or its recording was too long for the first run to look): a free run (`op: "suggest"`, the answer of `process`), poll the job. Counts toward the active-job limit |
 | `GET /api/jobs/{id}/preview/{source\|echo\|noise\|rebuild}?start=&seconds=` | | a stretch of what the job holds, below |
 | `GET /api/jobs/{id}/peaks/{source\|echo\|noise\|rebuild}` | | the loudness outline of a layer, below |
 | `PUT /api/jobs/{id}/browser/noise?start=&end=` | FLAC | the audio a browser cleaned for a noise part, below |
@@ -476,9 +477,11 @@ removal at full strength: the remover of the timeline's noise part there, else t
 `X-Stretch-Layer`. For a strength `a = 10^(-dB/20)` the page plays `(1 - a) * noise + a * (the echo-free voice, or source)`. Same sign-in, same
 rate limit (a burst of 120, then 2 a second), and `503` when busy.
 
-**Suggestions.** The first run of a recording up to `ACW_SUGGEST_MAX_MINUTES` (60) also looks for parts that sound different from the rest (noisier,
-quieter, phone-like, distorted, clipped) and stores what fits each better, with the reasons in plain words, ranges and proposed settings (about 0.22
-s of work per second of audio). The server's are the record; a longer recording gets them on request (`POST .../suggestions`).
+**Suggestions.** A search looks for parts that sound different from the rest (noisier, quieter, phone-like, distorted, clipped) and stores what
+fits each better, with the reasons in plain words, ranges and proposed settings (about 0.22 s of work per second of audio, free). It runs only
+when it is asked for: with the job (`options.suggestions: true`; the first run then looks, for a recording up to `ACW_SUGGEST_MAX_MINUTES`, 60),
+or afterwards (`POST .../suggestions`, any length). The website looks in the browser before the upload where it can and asks the server only
+where it could not; what the browser found stays in that browser.
 
 **Subtitles per part.** A version 2 timeline can have a `subtitles` layer, in a job made with `kind` `denoise` or `denoise_transcribe` (no `transcribeTier`, no
 `options.language` or `options.translate`; a job whose subtitles were set for the whole file can't have subtitle parts, `400 timeline_options`). Each part is

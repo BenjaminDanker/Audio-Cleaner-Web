@@ -614,7 +614,7 @@ def get_suggestions(job_id: str, principal: auth.Principal = Depends(auth.requir
 
 @router.post("/{job_id}/suggestions")
 def make_suggestions(job_id: str, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
-    """Find suggestions for a job that has none (a job made before they existed, or one whose search did not finish): a free run
+    """Find suggestions for a job that has none (one that did not ask for them when it was made, or whose search did not finish): a free run
     through the queue; poll the job. Counts toward the simultaneous jobs."""
     return _run(job_id, "suggest", RunBody(), request, principal)
 

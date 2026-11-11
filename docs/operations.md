@@ -706,8 +706,9 @@ grows with every edit that makes blocks):
 
 A whole-file first run holds the recording and one cached step: about 0.5 GB an hour and channel measured (0.2 + 0.31), 0.75 GB promised in the upload reserve
 (`jobs.create_job`: `edit_store.cache_bytes`); an edit run promises its scratch and the blocks it will make
-(`edit_store.growth_bytes`). Everything goes with the job. The suggestions cost about 0.22 s per second of audio in the first run for recordings up to
-`ACW_SUGGEST_MAX_MINUTES` (60; 0 = only on request), measured on the noisy sample at two threads.
+(`edit_store.growth_bytes`). Everything goes with the job. The suggestions cost about 0.22 s per second of audio, measured on the noisy sample at two threads: in the first run of a job that asked
+for them (`options.suggestions`; the website asks only where the browser did not find them itself) for recordings up to
+`ACW_SUGGEST_MAX_MINUTES` (60; 0 = only on request), else in a run of their own on request.
 
 The monitor watches two sizes every 2 minutes and mails when `data/` without `jobs/` is over 5 GB (`data_large`) or the backup
 folder is over 20 GB (`backups_large`). At the example load the first stays around 1 GB (database, log, ten pre-deploy
@@ -929,7 +930,7 @@ When full, a new session is refused with the options that still fit; sessions th
 | `ACW_MAX_ACTIVE_JOBS` | `3` | file jobs one account may have at once (uploading, waiting or running; changing a finished job counts): one more is refused with 429 and the code `too_many_active_jobs`, "You have 3 files being processed. Start this one when one of them is done." (per-key monthly caps are separate, `keycaps.py`) |
 | `ACW_JOB_RETENTION_MINUTES` | `120` | how long a job's upload, block cache and results stay, counted from its last edit (finishing a run, a timeline save, a quote, a process, an export) |
 | `ACW_JOB_MAX_RETENTION_MINUTES` | `360` | the most they stay, counted from when the upload arrived, whatever the edits |
-| `ACW_SUGGEST_MAX_MINUTES` | `60` | a first run looks for the editor's suggestions (about 0.22 s per second of audio) for recordings up to this long; a longer one gets them when they are asked for; `0` turns them off for first runs |
+| `ACW_SUGGEST_MAX_MINUTES` | `60` | a first run that was asked to (`options.suggestions`) looks for the editor's suggestions (about 0.22 s per second of audio) for recordings up to this long; any other job gets them when they are asked for; `0` turns them off for first runs |
 | `ACW_MAX_INTERRUPTIONS` | `3` | a job that a stopping worker puts back this many times is failed (not charged) instead of being retried for ever; a runner killed by the kernel for memory fails at once |
 
 Other queue limits: the job list shares one queue computation per second between all requests (`jobs.queue_snapshot`),

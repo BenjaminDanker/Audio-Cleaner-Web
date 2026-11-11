@@ -6,6 +6,7 @@
 import { useSyncExternalStore } from 'react';
 import { outputUrl } from './api.js';
 import { saveBlob } from './download.js';
+import { pruneOwnSuggestions } from './editor/suggest.js';
 import { stem } from './format.js';
 import { LANGUAGES } from './jobs.js';
 import { blendToPcm, memorySource, splitParts } from './media/blend.js';
@@ -53,6 +54,7 @@ export function pruneWants(ids) {
   try {
     const keep = new Set([...ids, ...finishes.keys()]); // a job this tab just made may not be in the list yet
     for (const k of Object.keys(localStorage)) if (k.startsWith(KEY) && !keep.has(k.slice(KEY.length))) localStorage.removeItem(k);
+    pruneOwnSuggestions(keep);
   } catch { /* nothing to clean */ }
 }
 

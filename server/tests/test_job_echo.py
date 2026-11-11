@@ -114,8 +114,8 @@ def test_second_track_removes_the_echo_and_the_scratch_files_are_gone(client, si
     assert row["cost_micros"] > standard(row["duration_seconds"])
     assert _speaker_vs_voice_db(with_echo_removal, tmp_path) < _speaker_vs_voice_db(without, tmp_path) - 10
     left = {p.name for p in (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job["id"]).iterdir()}
-    # scratch files are gone; the upload and the per-part editor's (block cache, the recording, suggestions) stay
-    assert left == {"rec-cleaned.wav", "input.mkv", "blocks", "kept-source.flac", "suggestions.json"}
+    # scratch files are gone; the upload and the per-part editor's (block cache, the recording) stay; no suggestions (the job did not ask for them)
+    assert left == {"rec-cleaned.wav", "input.mkv", "blocks", "kept-source.flac"}
     # the whole-file run (echo removal, then the noise remover) filled the editor's cache under the editor's own block identities: the job's
     # timeline (echo removal and noise removal on the whole file) needs nothing to be made, and the quote of editing it says so
     import json

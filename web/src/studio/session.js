@@ -7,7 +7,7 @@ import { api } from '../api.js';
 import { addLocalCard, beginFinish } from '../finish.js';
 import { loadEditor, loadLayerPeaks, needsOf, saveTimeline, uploadBrowserCues, uploadBrowserNoise } from '../editor/api.js';
 import { filePeaks, layerPeaks, overlayPeaks, rangePeaks } from '../editor/peaks.js';
-import { loadSuggestions, suggestionState } from '../editor/suggest.js';
+import { keepOwnSuggestions, keyOf, loadSuggestions, ownSuggestions, suggestionState } from '../editor/suggest.js';
 import {
   applyReco, autoDone, freeNoiseRanges, freeSubRanges, fromTimeline, makeState, needsServer, pushUndo,
   recoPatches, redo as redoState, sameTracks, setSel, snapJ, splitAll, toSuggestion, toTimeline, undo as undoState, vkey, freeOnlySuggestion } from '../editor/tracks.js';
@@ -77,6 +77,7 @@ export class Session {
     this.applied = false;
     this.undoTo = null;
     this.sg = { phase: 'idle', progress: 0, error: '', why: '' }; // finding moments worth a look in the browser
+    this.sgOwn = null; // what that found (the list as it came): kept with the job this becomes
     this.job = null; // the job as the server lists it
     this.fin = null;
     this.snap = null; // what the files hold now: {tracks, choice, sfiles, burn}
@@ -320,7 +321,7 @@ export class Session {
 
   /* ================================================================================================ moments worth a look */
 
-  /** Look for suggestions in this browser (files up to 30 minutes it can open itself); a job's own come from our side after the first run. */
+  /** Look for suggestions in this browser (files up to 30 minutes it can open itself); where it can't, our side looks during the first run (startJob). */
   findMoments() {
     if (this.sgStarted || !this.auto || !this.file || this.job) return;
     const verdict = suggestVerdict(this.info, this.T);
@@ -336,6 +337,7 @@ export class Session {
     task.done.then(
       (r) => {
         this.sg = { phase: 'done', progress: 1, error: '', why: '' };
+        this.sgOwn = r.suggestions;
         this.setSuggestions(r.suggestions);
       },
       (e) => {
@@ -364,12 +366,19 @@ export class Session {
     this.touch();
   }
 
-  /** The job's own suggestions (after the first run). */
+  /** The suggestions our side found for the job (in its first run, or when they were asked for). */
   async loadJobSuggestions() {
     if (!this.job?.id || this.job.local) return;
     await loadSuggestions(this.job.id);
     const st = suggestionState(this.job.id);
     this.setSuggestions(st.list, st.dismissed);
+  }
+
+  /** A job our side did not look through, because this browser had found its suggestions before the upload: those. */
+  ownJobSuggestions() {
+    const list = this.sgOwn || ownSuggestions(this.job.id);
+    if (list) this.setSuggestions(list, suggestionState(this.job.id).dismissed);
+    else this.S.sugg = [];
   }
 
   /* ================================================================================================ the tracks */
@@ -442,7 +451,7 @@ export class Session {
       this.paid = job.costMicros || 0;
       this.applied = false;
       if (data.suggestions) this.loadJobSuggestions();
-      else this.S.sugg = [];
+      else this.ownJobSuggestions();
       this.loadPeaks();
     } catch (e) {
       this.serverError = e.detail || e.message || 'Couldn’t open the editor for this file.';
@@ -605,6 +614,8 @@ export class Session {
   async startJob({ file, info, tracks, T, wants, choice, plan, freeNoise, freeSubs, ctl, onJobCreated, refresh, shownMicros }) {
     const kind = jobKind(tracks, plan);
     const videoOut = videoOutOf(plan, choice, serverSize(choice.size), videoSourceHint(info));
+    // the suggestions: our side looks for them during the first run only when this browser has not found them itself
+    const own = this.sg.phase === 'done' ? this.sgOwn : null;
     // a job made with parts says what is done in its timeline (docs/api.md section 8): the subtitles' quality, language and translations are the
     // subtitle parts' own, so the job carries no tier of its own; a conversion alone (kind convert) is only its video_out
     const body = kind === 'convert' ? { kind, durationSeconds: T || 1, options: { video_out: videoOut } } : {
@@ -616,6 +627,7 @@ export class Session {
         caption_formats: plan.wantsText ? ['srt', 'vtt', 'txt'].filter((c) => this.out.sfiles.includes(c) || (c === 'vtt' && plan.embedHere && !this.out.sfiles.includes('srt'))) : [],
         embed_subtitles: !!(plan.embedNow && plan.embedOnServer),
         ...(videoOut ? { video_out: videoOut } : {}),
+        ...(own ? {} : { suggestions: true }),
       },
       timeline: toTimeline(tracks, T).toJSON(),
     };
@@ -636,6 +648,12 @@ export class Session {
     // the job exists: from here on its page finishes it by itself (finish.js)
     const wantsNow = { ...wants, soundHere: false, subsHere: false };
     this.id = out.id;
+    if (own) {
+      // they stay with the job in this browser, without the ones that were dismissed
+      const gone = new Set(this.S.sugg.filter((g) => g.st === 'dismissed').map((g) => g.key));
+      this.sgOwn = own.filter((x) => !gone.has(x.key || keyOf(x)));
+      keepOwnSuggestions(out.id, this.sgOwn);
+    }
     const fin = beginFinish({ ...out, displayName: file.name, outputs: [] }, { file, info, wants: wantsNow, browser: share ? share.catch(() => {}) : null });
     this.fin = fin;
     this.takeSnapshot(tracks, choice);

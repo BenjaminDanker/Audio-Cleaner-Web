@@ -1,11 +1,13 @@
 // The suggestions of a job, used by the editor (its pins and count): fetched once per job (GET /api/jobs/{id}/suggestions,
-// made by the server after the first run), with the ones the person dismissed remembered in this browser.
+// made by the server during the first run where the job asked for them), with the ones the person dismissed remembered in this
+// browser. A job whose suggestions this browser found itself before the upload did not ask: those are kept here with it.
 
 import { useCallback, useSyncExternalStore } from 'react';
 import { api } from '../api.js';
 import { LAYER_NAMES, NOISE_LEVELS, levelOf, rangeText } from './timeline.js';
 
 const KEY = 'acw.sg.dismissed.';
+const OWN = 'acw.sg.own.';
 const stores = new Map(); // job id -> {state, listeners, promise}
 const EMPTY = { loaded: false, list: [], dismissed: [] };
 
@@ -48,6 +50,26 @@ export function loadSuggestions(id) {
 export function setSuggestions(id, list) {
   store(id).promise = Promise.resolve();
   set(id, { loaded: true, list: list.map((x) => ({ ...x, key: keyOf(x) })) });
+}
+
+/** Keep what this browser found before the upload with the job it became (our side does not look again for a job that came with them). */
+export function keepOwnSuggestions(id, list) {
+  try { localStorage.setItem(OWN + id, JSON.stringify(list)); } catch { /* not kept: the tab that made the job still has them */ }
+}
+/** The ones kept for a job, or null. */
+export function ownSuggestions(id) {
+  try {
+    const list = JSON.parse(localStorage.getItem(OWN + id) || 'null');
+    return Array.isArray(list) ? list : null;
+  } catch {
+    return null;
+  }
+}
+/** Forget the ones of jobs that are not among `keep` (a Set of job ids) any more. */
+export function pruneOwnSuggestions(keep) {
+  try {
+    for (const k of Object.keys(localStorage)) if (k.startsWith(OWN) && !keep.has(k.slice(OWN.length))) localStorage.removeItem(k);
+  } catch { /* nothing to clean */ }
 }
 
 export function dismiss(id, key) {

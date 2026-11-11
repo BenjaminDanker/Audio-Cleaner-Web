@@ -877,10 +877,11 @@ def test_a_timeline_with_voice_rebuild_needs_the_card_and_goes_to_it(client, sig
     assert r.status_code == 400 and r.json()["code"] == "bad_timeline" and "90 minutes" in r.json()["detail"]
 
 
-def test_a_first_run_looks_for_suggestions_up_to_the_configured_length(client, signed_in, monkeypatch):
+def test_a_first_run_looks_for_suggestions_when_asked_up_to_the_configured_length(client, signed_in, monkeypatch):
     uid, h = signed_in
-    short = make_done_job(uid, seconds=600.0)
-    long = make_done_job(uid, seconds=2 * HOUR)
+    ask = {"suggestions": True}  # (a first run searches only for a job that asked: options.suggestions)
+    short = make_done_job(uid, seconds=600.0, options=ask)
+    long = make_done_job(uid, seconds=2 * HOUR, options=ask)
     spec = lambda jid: editing.spec_for(row(jid), params_of(jid))  # noqa: E731
     assert spec(short)["suggest"] is True and spec(short)["op"] == "first" and spec(short)["source_id"] == "j" + short
     assert spec(long)["suggest"] is False
@@ -891,3 +892,58 @@ def test_a_first_run_looks_for_suggestions_up_to_the_configured_length(client, s
     sub = make_done_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local")
     assert editing.spec_for(row(sub), params_of(sub)) is not None  # (a job with only subtitles is made with a timeline too: its subtitles part)
     assert editing.spec_for(row(sub), params_of(sub))["timeline"]["layers"]["subtitles"][0]["quality"] == "standard"
+
+
+def test_the_option_suggestions_is_a_boolean_that_is_off_unless_asked_for():
+    ok = lambda options: jobs.validate_options("denoise", "standard", None, options)  # noqa: E731
+    assert ok({})["suggestions"] is False and ok({"suggestions": False})["suggestions"] is False
+    assert ok({"suggestions": True})["suggestions"] is True
+    for bad in ("true", "yes", 1, 0, None, [], {}, "false"):  # (only a real boolean: 1 and "true" are not)
+        with pytest.raises(jobs.JobError, match="suggestions must be true or false"):
+            ok({"suggestions": bad})
+    assert jobs.validate_options("transcribe", None, "local", {"suggestions": True})["suggestions"] is True  # (every kind accepts it)
+
+
+def test_a_first_run_does_not_look_for_suggestions_unless_the_job_asked_for_them(client, signed_in):
+    uid, h = signed_in
+    from acw.config import get_settings
+
+    unasked = make_done_job(uid, seconds=600.0)
+    off = make_done_job(uid, seconds=600.0, options={"suggestions": False})
+    on = make_done_job(uid, seconds=600.0, options={"suggestions": True})
+    too_long = make_done_job(uid, seconds=get_settings().suggest_max_seconds + 60, options={"suggestions": True})
+    suggest = lambda jid: editing.spec_for(row(jid), params_of(jid))["suggest"]  # noqa: E731
+    assert [suggest(j) for j in (unasked, off, on, too_long)] == [False, False, True, False]
+    # an on-demand search is not a first run: it needs no option
+    params = params_of(unasked)
+    assert editing.spec_for(row(unasked), {**params, "run": {"op": "suggest", "timeline": params["edit"]["timeline"]}})["suggest"] is True
+    # exactly at the limit still counts (the limit is inclusive)
+    at_limit = make_done_job(uid, seconds=get_settings().suggest_max_seconds, options={"suggestions": True})
+    assert suggest(at_limit) is True
+
+
+def test_the_job_api_checks_and_keeps_options_suggestions(client, signed_in, monkeypatch):
+    uid, h = funded(client, signed_in)
+    set_env(monkeypatch, ACW_MAX_ACTIVE_JOBS=20)
+    body = {"kind": "denoise", "denoiseTier": "standard", "filename": "a.wav", "sizeBytes": 1000, "durationSeconds": 600}
+    made = {}
+    for name, options in (("none", {}), ("yes", {"suggestions": True}), ("no", {"suggestions": False})):
+        r = client.post("/api/jobs", json={**body, "options": options}, headers=h)
+        assert r.status_code == 200, (name, r.text)
+        made[name] = r.json()["id"]
+    for bad in ("true", 1, None):
+        r = client.post("/api/jobs", json={**body, "options": {"suggestions": bad}}, headers=h)
+        assert r.status_code == 400 and "suggestions must be true or false" in r.json()["detail"], (bad, r.text)
+        r = client.post("/api/jobs/estimate", json={k: v for k, v in body.items() if k not in ("filename", "sizeBytes")} | {"options": {"suggestions": bad}}, headers=h)
+        assert r.status_code == 400 and "suggestions" in r.json()["detail"], (bad, r.text)
+    suggest = lambda jid: editing.spec_for(row(jid), params_of(jid))["suggest"]  # noqa: E731
+    assert (suggest(made["none"]), suggest(made["yes"]), suggest(made["no"])) == (False, True, False)
+    # a job made with a timeline (the website's way) carries the option as well
+    tl = {"version": 1, "seconds": 600, "layers": {"noise": [noise(0, 600)]}}
+    tbody = {k: v for k, v in body.items() if k != "denoiseTier"}
+    r = client.post("/api/jobs", json={**tbody, "options": {"suggestions": True}, "timeline": tl}, headers=h)
+    assert r.status_code == 200, r.text
+    assert suggest(r.json()["id"]) is True
+    r = client.post("/api/jobs", json={**tbody, "options": {}, "timeline": tl}, headers=h)
+    assert r.status_code == 200, r.text
+    assert suggest(r.json()["id"]) is False

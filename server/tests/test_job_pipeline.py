@@ -85,9 +85,9 @@ def test_premium_transcription_stage_machine(client, signed_in, monkeypatch, sam
     assert job["costMicros"] > 0
     assert ledger.balance(uid)["held_micros"] == 0
     # nothing but the results, the upload and what the job's editor keeps (the cache, the recording, the parts' text) is left on disk
-    # (all go together, 2 hours later)
+    # (all go together, 2 hours later); no suggestions.json: a job looks for suggestions in its first run only when it asks (options.suggestions)
     left = {p.name for p in (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job_id).iterdir()}
-    assert left == names | {"input.wav", "subs", "blocks", "kept-source.flac", "suggestions.json"}
+    assert left == names | {"input.wav", "subs", "blocks", "kept-source.flac"}
     assert not (part_dir / "asr_chunks").exists() and (part_dir / "segments.json").is_file()  # (the speech chunks are not kept)
 
 

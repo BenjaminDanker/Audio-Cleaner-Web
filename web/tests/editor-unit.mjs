@@ -15,7 +15,7 @@ const bundle = await build({
     contents: `
       export * from '../src/editor/timeline.js';
       export * from '../src/editor/mix.js';
-      export { sayAsk, sayWhat, suggestionOps, keyOf } from '../src/editor/suggest.js';
+      export { sayAsk, sayWhat, suggestionOps, keyOf, keepOwnSuggestions, ownSuggestions, pruneOwnSuggestions } from '../src/editor/suggest.js';
       export * from '../src/media/suggest-core.js';
       export { DENOISING_POINTS, REBUILD_POINTS } from '../src/components/WhichOne.jsx';
       export { recommendForFile } from '../src/recommend.js';
@@ -36,7 +36,7 @@ const m = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputF
 const {
   Timeline, replay, restoreOps, differences, partLabel, levelOf, mergeRanges, subtract, intersect, rangeText, TimelineError,
   prepare, weightsAt, envelope, breakpoints, describe, needsProcessing, levelFactor, MixPlayer, HEAR_ALL, FADE_REBUILD,
-  sayAsk, sayWhat, suggestionOps, DENOISING_POINTS, REBUILD_POINTS,
+  sayAsk, sayWhat, suggestionOps, keepOwnSuggestions, ownSuggestions, pruneOwnSuggestions, DENOISING_POINTS, REBUILD_POINTS,
   recommendPart, reasonsFor, clippedBursts, measureWindows, findSuggestions, recommendForFile,
 } = m;
 
@@ -403,6 +403,71 @@ await check('suggestions: audio with two different parts: the change is found (t
   const short = await findSuggestions({ seconds: 20, read: async (a, b) => [x.slice(a, b)], noiseSums });
   assert.deepEqual(short.suggestions, []); // (nothing to compare it with: no change points under 40 s)
   return `cut at ${out.parts[1].start} s, ${out.suggestions.length} suggestions`;
+});
+
+/* ------------------------------------------------------------------------------------------------ the suggestions kept with a job */
+
+/** localStorage as the browser has it: methods, and the stored keys are the object's own enumerable keys (Object.keys(localStorage) lists them). */
+function memoryStorage() {
+  const data = new Map();
+  const methods = { getItem: (k) => (data.has(k) ? data.get(k) : null), setItem: (k, v) => { data.set(String(k), String(v)); }, removeItem: (k) => { data.delete(k); }, clear: () => data.clear() };
+  return new Proxy({}, {
+    get: (_, k) => methods[k] ?? (data.has(k) ? data.get(k) : undefined),
+    ownKeys: () => [...data.keys()],
+    getOwnPropertyDescriptor: (_, k) => (data.has(k) ? { value: data.get(k), enumerable: true, configurable: true } : undefined),
+  });
+}
+async function withStorage(storage, fn) {
+  const had = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { value: storage, configurable: true, writable: true });
+  try { return await fn(); } finally { if (had) Object.defineProperty(globalThis, 'localStorage', had); else delete globalThis.localStorage; }
+}
+
+await check('own suggestions: kept per job in this browser (acw.sg.own.<id>), read back as the list or null, forgotten for jobs that are gone', () => withStorage(memoryStorage(), () => {
+  const list = [{ start: 10, end: 40, kind: 'part', reasons: ['hum'], noise: { remover: 'light', strength_db: 24 }, key: 'k1' }, { start: 50, end: 60, kind: 'clipping', reasons: [], key: 'k2' }];
+  assert.equal(ownSuggestions('j1'), null); // nothing kept
+  keepOwnSuggestions('j1', list);
+  assert.deepEqual(ownSuggestions('j1'), list);
+  assert.equal(localStorage.getItem('acw.sg.own.j1'), JSON.stringify(list)); // (the key the page documents)
+  keepOwnSuggestions('j2', []);
+  assert.deepEqual(ownSuggestions('j2'), []); // an empty list is "found nothing", not "not kept"
+  keepOwnSuggestions('j1', [list[1]]);
+  assert.deepEqual(ownSuggestions('j1'), [list[1]]); // kept again: replaced
+  localStorage.setItem('acw.sg.dismissed.j1', '["k1"]');
+  localStorage.setItem('acw.wants.j1', '{}');
+  localStorage.setItem('acw.sg.own.j3', JSON.stringify(list));
+  pruneOwnSuggestions(new Set(['j1', 'j3'])); // j2 is no longer listed
+  assert.equal(ownSuggestions('j2'), null);
+  assert.deepEqual(ownSuggestions('j1'), [list[1]]);
+  assert.deepEqual(ownSuggestions('j3'), list);
+  assert.equal(localStorage.getItem('acw.sg.dismissed.j1'), '["k1"]'); // (only its own keys: the dismissed ones and the wants are not its business)
+  assert.equal(localStorage.getItem('acw.wants.j1'), '{}');
+  pruneOwnSuggestions(new Set());
+  assert.equal(ownSuggestions('j1'), null);
+  assert.equal(ownSuggestions('j3'), null);
+  assert.equal(localStorage.getItem('acw.sg.dismissed.j1'), '["k1"]');
+  assert.equal(localStorage.getItem('acw.wants.j1'), '{}');
+  return 'kept, replaced, pruned';
+}));
+
+await check('own suggestions: a stored value that is not a list reads as none, and blocked or missing storage never throws', async () => {
+  await withStorage(memoryStorage(), () => {
+    for (const bad of ['', 'not json', '{"a":1}', '"text"', '5', 'null', 'true']) {
+      localStorage.setItem('acw.sg.own.x', bad);
+      assert.equal(ownSuggestions('x'), null, JSON.stringify(bad));
+    }
+  });
+  const blocked = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); }, removeItem() { throw new Error('blocked'); } };
+  await withStorage(blocked, () => {
+    keepOwnSuggestions('x', [{ start: 1, end: 2 }]);
+    assert.equal(ownSuggestions('x'), null);
+    pruneOwnSuggestions(new Set());
+  });
+  await withStorage(new Proxy({}, { ownKeys() { throw new Error('blocked'); } }), () => pruneOwnSuggestions(new Set()));
+  delete globalThis.localStorage; // (no storage at all: a worker, or a browser that hides it)
+  keepOwnSuggestions('x', []);
+  assert.equal(ownSuggestions('x'), null);
+  pruneOwnSuggestions(new Set());
 });
 
 process.exit(failed ? 1 : 0);

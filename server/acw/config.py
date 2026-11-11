@@ -88,8 +88,9 @@ class Settings:
     # seconds, so the deletion is accurate to about a minute.
     job_retention_seconds: int = 2 * 3600
     job_max_retention_seconds: int = 6 * 3600
-    # A first run looks for suggestions (acw_common.suggest: about 0.22 s per second of audio) for recordings up to this long
-    # (ACW_SUGGEST_MAX_MINUTES); a longer one gets them when they are asked for (POST /api/jobs/{id}/suggestions).
+    # A first run that was asked to (options.suggestions) looks for suggestions (acw_common.suggest: about 0.22 s per second of audio)
+    # for recordings up to this long (ACW_SUGGEST_MAX_MINUTES); any other job gets them when they are asked for
+    # (POST /api/jobs/{id}/suggestions).
     suggest_max_seconds: int = 3600
     # File jobs an account may have at once (uploading, waiting, running; edit runs count). ACW_MAX_ACTIVE_JOBS.
     max_active_jobs: int = 3

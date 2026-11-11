@@ -1,5 +1,5 @@
 // Suggestions per part, in the browser: where a recording changes, and what fits each part better than the whole file. The same steps and
-// numbers as common/acw_common/suggest.py (the server makes its own after the first run; this is for a file that has not been
+// numbers as common/acw_common/suggest.py (the server makes its own only where it is asked to; this is for a file that has not been
 // uploaded yet), on the measurements of analysis.js and the trained decision of reco-model.js:
 //
 //   1. CHANGE POINTS: 5 s windows that do not overlap, each with the features of analysis.js and a noise figure measured on a 3 s stretch

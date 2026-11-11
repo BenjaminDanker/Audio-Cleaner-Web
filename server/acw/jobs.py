@@ -273,6 +273,13 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
                        "For Voice rebuild, or Leveling only, choose the settings yourself.")
     if kind in ("denoise", "denoise_transcribe") and denoise_tier == pricing.NO_DENOISE and not out["leveling"]:
         raise JobError("Choose Denoising, Voice rebuild or Leveling.")
+    # Look for suggestions during the first run (free; editing.spec_for). Off unless asked for: the search is more work than light noise
+    # removal itself (job_resources.SPEED: 0.22 against 0.08), the website has usually found them in the browser already, and a caller
+    # that wants them later asks then (POST /api/jobs/{id}/suggestions).
+    suggestions = options.get("suggestions", False)
+    if not isinstance(suggestions, bool):
+        raise JobError("suggestions must be true or false")
+    out["suggestions"] = suggestions
     return out
 REBUILD_PAUSED = "Voice rebuilding is paused right now. Try again later, or choose Denoising."
 

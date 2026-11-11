@@ -17,7 +17,9 @@ const bundle = await build({
       export { heardSeries, layerPeaks, roughDb, rangePeaks, overlayPeaks } from '../src/editor/peaks.js';
       export { prepare } from '../src/editor/mix.js';
       export { outputPlan, problemsFor, jobKind, wantsOf, browserVerdict, subsVerdict, inGigabytes, convertsFile, videoOutOf } from '../src/studio/plan.js';
-      export { Finish, finishSeconds } from '../src/finish.js';
+      export { Finish, finishSeconds, pruneWants } from '../src/finish.js';
+      export { Session } from '../src/studio/session.js';
+      export { keepOwnSuggestions, ownSuggestions, suggestionState } from '../src/editor/suggest.js';
       export { listSizes, serverSize, formatOfName, SIZES, videoSourceHint, convertFactor, serverPictureWork } from '../src/media/convert.js';
       export { fitPcm, samplesOf, piecesIn, rangeFor } from '../src/studio/runs.js';
       export { tipsFor, priceWords } from '../src/studio/copy.js';
@@ -42,7 +44,7 @@ const {
   changesSound, freeNoiseRanges, freeSubRanges, priceOf, convertPrice, fmt, lenTxt, perMinute, freeOnly, isFreeOnly, TARGETS, heardSeries, layerPeaks, rangePeaks, overlayPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
   browserVerdict, inGigabytes, fitPcm, samplesOf, piecesIn, rangeFor, tipsFor, priceWords, dbOf, lvlOfLufs,
   needsAccount, editorNeedsAccount, liveNeedsServer, liveProducts, livePerMinute, hasWork,
-  convertsFile, videoOutOf, Finish, finishSeconds, listSizes, serverSize, formatOfName, SIZES, videoSourceHint, convertFactor, serverPictureWork,
+  convertsFile, videoOutOf, Finish, finishSeconds, pruneWants, Session, keepOwnSuggestions, ownSuggestions, suggestionState, listSizes, serverSize, formatOfName, SIZES, videoSourceHint, convertFactor, serverPictureWork,
 } = m;
 
 let failed = 0;
@@ -1129,6 +1131,133 @@ await check('start: a price above the balance is not a problem here any more (ou
   const probs = problemsFor({ ...base, plan: outputPlan({ tracks: S.tracks, info: AUDIO, file: base.file, choice: base.choice, out: base.out }) });
   assert.deepEqual(probs, []);
 });
+
+/* ------------------------------------------------------------------------------------------------ suggestions: asked of our side only when this browser has none */
+
+/** localStorage as the browser has it (Object.keys(localStorage) lists the stored keys). */
+function memoryStorage() {
+  const data = new Map();
+  const methods = { getItem: (k) => (data.has(k) ? data.get(k) : null), setItem: (k, v) => { data.set(String(k), String(v)); }, removeItem: (k) => { data.delete(k); }, clear: () => data.clear() };
+  return new Proxy({}, {
+    get: (_, k) => methods[k] ?? (data.has(k) ? data.get(k) : undefined),
+    ownKeys: () => [...data.keys()],
+    getOwnPropertyDescriptor: (_, k) => (data.has(k) ? { value: data.get(k), enumerable: true, configurable: true } : undefined),
+  });
+}
+async function withBrowser(fn) {
+  const saved = { fetch: globalThis.fetch, storage: Object.getOwnPropertyDescriptor(globalThis, 'localStorage') };
+  Object.defineProperty(globalThis, 'localStorage', { value: memoryStorage(), configurable: true, writable: true });
+  try { return await fn(); } finally {
+    globalThis.fetch = saved.fetch;
+    if (saved.storage) Object.defineProperty(globalThis, 'localStorage', saved.storage); else delete globalThis.localStorage;
+  }
+}
+/** What startJob sends to POST /api/jobs: the page's request is answered with a refusal (400) so that nothing else of the start runs. */
+async function sentBody(session, tracks, { plan, choice = choiceOf('wav'), info = AUDIO } = {}) {
+  const sent = [];
+  globalThis.fetch = async (url, init = {}) => {
+    sent.push({ url: String(url), method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : undefined });
+    return new Response(JSON.stringify({ detail: 'stop here' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  };
+  const file = new File([new Uint8Array(2000)], 'talk.wav', { type: 'audio/wav' });
+  const p = plan || outputPlan({ tracks, info, file: { size: file.size }, choice, out: out0 });
+  await assert.rejects(session.startJob({ file, info, tracks, T: 180, wants: {}, choice, plan: p, freeNoise: [], freeSubs: [], ctl: new AbortController(), shownMicros: null }), (e) => e.detail === 'stop here');
+  const posts = sent.filter((r) => r.method === 'POST' && /\/api\/jobs$/.test(r.url));
+  assert.equal(posts.length, 1, JSON.stringify(sent.map((r) => [r.method, r.url])));
+  return posts[0].body;
+}
+const own1 = [{ start: 10, end: 40, kind: 'part', reasons: ['hum'], noise: { remover: 'light', strength_db: 24 }, key: 'part:100-400' }, { start: 50, end: 60, kind: 'clipping', reasons: [], key: 'clipping:500-600' }];
+
+await check('suggestions: the job is asked to look for them (options.suggestions: true) unless this browser has found them itself', () => withBrowser(async () => {
+  const S = state();
+  edit(S, 'subs', 0, 180, { q: 2 }); // a job on our side
+  for (const phase of ['idle', 'running', 'unavailable', 'error', 'canceled']) {
+    const s = new Session();
+    s.sg = { phase, progress: 0, error: '', why: '' };
+    const b = await sentBody(s, S.tracks);
+    assert.equal(b.options.suggestions, true, phase);
+    assert.equal(b.kind, 'denoise');
+  }
+  const s = new Session();
+  s.sg = { phase: 'done', progress: 1, error: '', why: '' };
+  s.sgOwn = own1;
+  const b = await sentBody(s, S.tracks);
+  assert.ok(!('suggestions' in b.options), JSON.stringify(b.options)); // (no key at all: not even false)
+  assert.equal(b.kind, 'denoise');
+  const none = new Session(); // found nothing: an empty list is still "this browser looked"
+  none.sg = { phase: 'done', progress: 1, error: '', why: '' };
+  none.sgOwn = [];
+  assert.ok(!('suggestions' in (await sentBody(none, S.tracks)).options));
+  return 'idle/running/unavailable/error/canceled: true; done: no key';
+}));
+
+await check('suggestions: a conversion alone sends neither the option nor a timeline', () => withBrowser(async () => {
+  const S = state(180);
+  edit(S, 'voice', 0, 180, { mode: 0 });
+  edit(S, 'level', 0, 180, { lvl: 0 }); // (nothing is done to the sound: only the file type or size changes)
+  const plan = { serverConvert: true, cleaning: false, converting: true, wantsText: false };
+  assert.equal(hasWork(S.tracks), false);
+  assert.equal(jobKind(S.tracks, { ...plan }), 'convert');
+  const s = new Session();
+  const b = await sentBody(s, S.tracks, { plan, choice: { ...choiceOf('mp4'), format: 'mp4' }, info: VIDEO });
+  assert.equal(b.kind, 'convert');
+  assert.ok(!('suggestions' in b.options) && !('timeline' in b));
+}));
+
+await check('suggestions: a job this browser found them for shows them after its first run (the ones kept with it, without what was dismissed), else none', () => withBrowser(async () => {
+  const job = (id) => ({ id, status: 'done', kind: 'denoise' });
+  const asShown = (s) => s.S.sugg.map((g) => g.key);
+  // this tab: what it found
+  const a = new Session();
+  a.S = state(120);
+  a.T = 120;
+  a.job = job('ja');
+  a.sgOwn = own1;
+  a.ownJobSuggestions();
+  assert.deepEqual(asShown(a), ['part:100-400', 'clipping:500-600']);
+  // another visit of the same browser: what was kept with the job
+  keepOwnSuggestions('jb', [own1[1]]);
+  const b = new Session();
+  b.S = state(120);
+  b.T = 120;
+  b.job = job('jb');
+  b.ownJobSuggestions();
+  assert.deepEqual(asShown(b), ['clipping:500-600']);
+  // dismissed ones (remembered per job) stay away
+  localStorage.setItem('acw.sg.dismissed.jc', JSON.stringify(['clipping:500-600']));
+  keepOwnSuggestions('jc', own1);
+  const c = new Session();
+  c.S = state(120);
+  c.T = 120;
+  c.job = job('jc');
+  c.S.sugg = [{ key: 'old', st: 'new' }];
+  c.ownJobSuggestions();
+  assert.deepEqual(asShown(c), ['part:100-400']);
+  // nothing kept (another browser, or the search was asked of our side and found nothing): no suggestions, and the old list is cleared
+  const d = new Session();
+  d.S = state(120);
+  d.T = 120;
+  d.job = job('jd');
+  d.S.sugg = [{ key: 'old', st: 'new' }];
+  d.ownJobSuggestions();
+  assert.deepEqual(d.S.sugg, []);
+}));
+
+await check('suggestions: pruneWants (the Cleanup page, for the jobs the server still lists) forgets the suggestions kept for the others and nothing else', () => withBrowser(async () => {
+  keepOwnSuggestions('listed', own1);
+  keepOwnSuggestions('gone', own1);
+  localStorage.setItem('acw.wants.gone', '{}');
+  localStorage.setItem('acw.wants.listed', '{}');
+  localStorage.setItem('acw.sg.dismissed.gone', '[]');
+  localStorage.setItem('acw.autoSettings', 'off');
+  pruneWants(['listed']);
+  assert.deepEqual(ownSuggestions('listed'), own1);
+  assert.equal(ownSuggestions('gone'), null);
+  assert.equal(localStorage.getItem('acw.wants.gone'), null);
+  assert.equal(localStorage.getItem('acw.wants.listed'), '{}');
+  assert.equal(localStorage.getItem('acw.sg.dismissed.gone'), '[]'); // (not part of this change)
+  assert.equal(localStorage.getItem('acw.autoSettings'), 'off');
+}));
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nall passed');
 process.exit(failed ? 1 : 0);

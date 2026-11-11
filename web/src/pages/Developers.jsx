@@ -160,6 +160,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
             ['noise', 'auto', '"auto" measures the recording and picks; "light" suits hiss, hum and a quiet room; "heavy" suits noise almost as loud as the voice. Does not apply when the voice is rebuilt.'],
             ['echo_reference_track', 'false', 'true or false (anything else is a 400). Removes speaker echo from the first audio track by using the second one (the sound from your speakers, as OBS can record it). Charged at its own price, per second, in its own line. A file with only one audio track fails the job as soon as it is read, before any work, and nothing is charged.'],
             ['leveling', 'true', 'true or false. Leveling, with its own price: evens out the voice and sets the loudness. false returns the cleaned voice as it is.'],
+            ['suggestions', 'false', 'true or false. true also looks, during the first run, for parts that other settings would suit (free; recordings up to an hour). Without it, ask when you want them: POST /api/jobs/{id}/suggestions.'],
             ['automatic', 'false', 'true or false. true lets us listen to the file and decide the settings you did not give yourself, like the website’s Automatic best settings. Needs "denoise" or "denoise_transcribe" with denoiseTier "standard". See Automatic settings below.'],
           ]}
         />
@@ -296,7 +297,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
             ['POST /api/jobs/{id}/process', 'Takes {"timeline"?, "maxCostMicros"?, "audioFormat"?}. Makes what the quote says, then writes the result audio. The price is set aside at the quote and the charge is for what ran. The job goes back to queued: watch it with GET /api/jobs/{id}.'],
             ['POST /api/jobs/{id}/export', 'The same body. Writes the result audio from what is already made, for free: for a change that needs nothing new (a strength, a layer on or off). If something has to be made it is refused with 409 needs_processing and the quote.'],
             ['GET /api/jobs/{id}/suggestions', 'Parts that sound different from the rest, each with reasons in plain words, their time range and the settings we propose. null if there are none.'],
-            ['POST /api/jobs/{id}/suggestions', 'Looks for suggestions of a job that has none (a free run; watch the job).'],
+            ['POST /api/jobs/{id}/suggestions', 'Looks for suggestions of a job that has none, for example one made without the "suggestions" option (a free run; watch the job).'],
             ['GET /api/jobs/{id}/preview/{layer}', 'A short stretch of what the job holds, see below.'],
             ['GET /api/jobs/{id}/peaks/{layer}', 'The loudness outline of a layer for drawing: four values a second, see below.'],
           ]}

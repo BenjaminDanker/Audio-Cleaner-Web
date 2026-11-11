@@ -37,7 +37,7 @@ SPEED = {
     "echo": 0.03,
     "transcribe_local": 0.12,
     "transcribe_premium": 0.08,
-    "suggest": 0.22,  # the search for suggestions (acw_common.suggest, 0.22 s per audio second measured at 2 threads), a first run's extra and an on-demand run's all
+    "suggest": 0.22,  # the search for suggestions (acw_common.suggest, 0.22 s per audio second measured at 2 threads), a first run's extra where the job asked for it, and an on-demand run's all
     "encode": 0.32,  # the picture made again (options.video_out): x264 on 4 threads, 1080p30 (the card's NVENC: 0.14)
 }
 MODEL_LOAD_SECONDS = 12  # a job runs two or three fresh sandboxed stages that each load their models (measured 1.1 to 4.8 s per stage, 2026-10-19)

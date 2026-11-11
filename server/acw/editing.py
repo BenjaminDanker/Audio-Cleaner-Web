@@ -586,8 +586,10 @@ def spec_for(job: dict, params: dict) -> dict | None:
         out.update(op=run["op"], timeline=run["timeline"], previous=run.get("previous"), audio_format=run.get("audio_format"),
                    suggest=run["op"] == "suggest", video=bool(run.get("video")), audio_file=run.get("audio_file"))
     else:
+        # (the search for suggestions: only where the job asked for it, options.suggestions, and the recording is not too long for it)
         out.update(op="first", timeline=e.get("timeline") if e.get("first_run") else None, previous=None, audio_format=None,
-                   suggest=0 < float(job.get("duration_seconds") or job["claimed_seconds"]) <= get_settings().suggest_max_seconds)
+                   suggest=bool((params.get("options") or {}).get("suggestions"))
+                   and 0 < float(job.get("duration_seconds") or job["claimed_seconds"]) <= get_settings().suggest_max_seconds)
     raw = out.get("timeline")
     if raw and (edit_subtitles.wants_uploads(raw) or (raw.get("layers") or {}).get("subtitles") or run and run.get("subs") is not None):
         tl = edit_store.timeline_lib().Timeline.from_json(raw, seconds=edit_store.file_seconds(job, params))

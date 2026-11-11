@@ -97,7 +97,7 @@ def test_a_job_made_with_a_timeline_only_processes_and_charges_its_parts(client,
     tl = tl_json(noise=[noise(2, 5)], leveling=[level(2, 5)])
     est = client.post("/api/jobs/estimate", json={"kind": "denoise", "durationSeconds": SECONDS, "options": {}, "timeline": tl}, headers=h)
     assert est.status_code == 200, est.text
-    jid = create(client, h, data, tl)
+    jid = create(client, h, data, tl, suggestions=True)  # (a first run looks for suggestions only when the job asks: options.suggestions)
     assert row(jid)["est_cost_micros"] == est.json()["estCostMicros"] > 0
     assert _run_worker_once("done") == jid
     done = row(jid)
@@ -123,6 +123,19 @@ def test_a_job_made_with_a_timeline_only_processes_and_charges_its_parts(client,
     assert shown["timeline"]["layers"]["noise"][0]["start"] == 2.0 and shown["preview"]["samples"] == len(x)
 
 
+@NATIVE
+def test_a_first_run_makes_no_suggestions_unless_the_job_asked_for_them(client, signed_in, speech, roomy_disk):
+    uid, h = signed_in
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    data = speech.read_bytes()
+    jid = create(client, h, data, tl_json(noise=[noise(2, 5)]))  # (no options.suggestions)
+    assert _run_worker_once("done") == jid
+    assert row(jid)["status"] == "done" and "talk-cleaned.flac" in files_of(jid) and "suggestions.json" not in files_of(jid)
+    assert client.get(f"/api/jobs/{jid}/suggestions").json() == {"suggestions": None}
+    shown = client.get(f"/api/jobs/{jid}/timeline").json()
+    assert shown["suggestions"] is None and params_of(jid)["edit"].get("suggestions") is not True
+
+
 def decode_flac(data: bytes, channels: int) -> np.ndarray:
     """The samples of a FLAC stream (a stretch is written to a pipe: its header does not say how long it is), float32 (n, channels)."""
     r = subprocess.run([str(HOME / "bin/ffmpeg"), "-v", "error", "-f", "flac", "-i", "pipe:0", "-f", "f32le", "-ac", str(channels), "-ar", str(SR), "pipe:1"],
@@ -144,7 +157,7 @@ def test_a_job_made_as_always_fills_the_cache_and_is_edited_from_it(client, sign
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     data = speech.read_bytes()
-    jid = create(client, h, data)  # no timeline: the options become the one they stand for (the whole file)
+    jid = create(client, h, data, suggestions=True)  # no timeline: the options become the one they stand for (the whole file)
     assert row(jid)["est_cost_micros"] > 0 and params_of(jid)["whole_file"]["kind"] == "denoise" and params_of(jid)["edit"]["first_run"] is True
     assert _run_worker_once("done") == jid
     first = row(jid)
