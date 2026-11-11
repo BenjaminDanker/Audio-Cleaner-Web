@@ -13,7 +13,7 @@ export const SITE = {
   supportEmail: '',
   legalName: '',
   legalAddress: '',
-  jurisdiction: 'the United States',
+  jurisdiction: 'the State of Kansas, USA',
 };
 
 /** "Example Ltd, 1 Main St" / "Example Ltd" / null when nothing is set. */
