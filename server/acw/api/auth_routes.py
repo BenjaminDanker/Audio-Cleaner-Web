@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from .. import alerts, auth, db, keycaps, retention
@@ -34,6 +34,8 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 OAUTH_STATE_TTL = 600
 OAUTH_COOKIE = "acw_oauth"
+LOGIN_COOKIE = "acw_login"  # the browser that asked for a sign-in link by email
+CONFIRM_SIGN_IN = "confirm_sign_in"  # the code of the answer that asks for a yes before a link signs in
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}$")
 # Characters that make a mail library see more than one recipient or a display name ("a,b@x" mails both).
 _EMAIL_BAD = set(',;<>"()[]\\:')
@@ -226,7 +228,7 @@ def _send_mail(to: str, subject: str, body: str) -> None:
 
 
 @router.post("/email")
-async def email_login(body: EmailLoginBody, request: Request) -> dict:
+async def email_login(body: EmailLoginBody, request: Request, response: Response) -> dict:
     _require_same_origin(request)
     s = get_settings()
     if not (s.smtp_host and s.smtp_from):
@@ -245,7 +247,12 @@ async def email_login(body: EmailLoginBody, request: Request) -> dict:
         enforce("email_link_wide", f"ip:{client_net(ip, 48)}")
     enforce("email_all", "all")
     enforce("email_all_day", "all")
-    token = auth.create_login_token(email, "email_login", ip)
+    # The link remembers this browser (a cookie it keeps as long as a link lives; one it already has is kept, so that every
+    # link it asked for knows it). Opened anywhere else, the link asks before it signs in: see email_verify.
+    browser = request.cookies.get(LOGIN_COOKIE) or ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", browser):
+        browser = random_token(24)
+    token = auth.create_login_token(email, "email_login", ip, browser)
     link = s.url(f"/login/verify#token={token}")
     text = (
         "Use this link to sign in to Audio Cleaner. It works once and expires in 15 minutes.\n\n"
@@ -256,19 +263,39 @@ async def email_login(body: EmailLoginBody, request: Request) -> dict:
     except Exception as e:  # noqa: BLE001
         log.error("sending login email failed: %s", type(e).__name__)  # not the exception text: it can hold the address
         raise HTTPException(status_code=503, detail="Could not send the email right now.")
+    response.set_cookie(
+        LOGIN_COOKIE,
+        browser,
+        max_age=auth.LOGIN_LINK_TTL,
+        path=s.cookie_path + "api/auth/email",
+        secure=s.production,
+        httponly=True,
+        samesite="lax",
+    )
     # Same response whether or not the account exists.
     return {"ok": True}
 
 
 class TokenBody(BaseModel):
     token: str = Field(max_length=128)
+    confirm: bool = False  # the person's yes to "Sign in as <address>?" (asked when the link is opened in another browser)
 
 
 @router.post("/email/verify")
-def email_verify(body: TokenBody, request: Request, response: Response) -> dict:
+def email_verify(body: TokenBody, request: Request, response: Response):
     _require_same_origin(request)
     enforce("auth", client_net(client_ip(request)))
-    email = auth.consume_login_token(body.token)
+    try:
+        email = auth.consume_login_token(body.token, request.cookies.get(LOGIN_COOKIE), body.confirm)
+    except auth.ConfirmSignIn as e:
+        # Not this browser's link: it may have been sent to this person to get them into somebody else's account (whatever
+        # they upload would then be that person's to read). The link stays good; the page shows the address and asks.
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "This link was opened in a different browser than the one that asked for it. Confirm the address to sign in.",
+                     "code": CONFIRM_SIGN_IN, "email": e.email},
+            headers={"X-Error-Code": CONFIRM_SIGN_IN},
+        )
     if email is None:
         raise HTTPException(status_code=400, detail="This sign-in link is invalid or expired.")
     user = auth.get_or_create_user(email)

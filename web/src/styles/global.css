@@ -370,6 +370,7 @@ pre.license { white-space: pre-wrap; font-family: var(--mono); font-size: 0.8rem
 .error-page { text-align: center; padding-block: 80px; }
 .error-page .code { font-size: 5rem; font-weight: 800; color: var(--brand); line-height: 1; }
 .login-card { max-width: 440px; margin: 24px auto; }
+.login-card h1 { overflow-wrap: anywhere; }
 .divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 0.85rem; margin: 6px 0; }
 .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 .row-center { justify-content: center; }

@@ -71,7 +71,7 @@ export default function Privacy() {
       <p>We do not sell personal data and do not share it for advertising.</p>
 
       <h2 id="cookies">7. Cookies and tracking</h2>
-      <p>We use one strictly necessary, HttpOnly session cookie while you are signed in (plus a short-lived cookie during Google sign-in). We use <b>no analytics, advertising trackers, third-party fonts or social widgets</b>. The free tools’ model files are downloaded from Hugging Face (section 2). The only third-party script we load is Cloudflare Turnstile, and only on the email sign-in and contact forms, to check that you are a person (section 6). Your browser also keeps, on your device only, the free tools’ downloaded files, a few settings (such as the Automatic switch), and, while you sign in, the file you were working on (section 2).</p>
+      <p>We use one strictly necessary, HttpOnly session cookie while you are signed in (plus a short-lived cookie while you sign in with Google or with an emailed link). We use <b>no analytics, advertising trackers, third-party fonts or social widgets</b>. The free tools’ model files are downloaded from Hugging Face (section 2). The only third-party script we load is Cloudflare Turnstile, and only on the email sign-in and contact forms, to check that you are a person (section 6). Your browser also keeps, on your device only, the free tools’ downloaded files, a few settings (such as the Automatic switch), and, while you sign in, the file you were working on (section 2).</p>
 
       <h2 id="retention">8. How long we keep things</h2>
       <ul>

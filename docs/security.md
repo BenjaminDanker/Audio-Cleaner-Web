@@ -94,6 +94,11 @@ also removes the shared-UID risk with the Minecraft servers.
   `__Secure-acw_session` with path `<base>/` if the app is ever served under a base path again.
 - CSRF: per-session token header on every non-GET + Origin check; login and
   magic-link endpoints require same Origin (prevents login CSRF).
+- Sign-in links by email: single use, 15 minutes, stored as SHA-256. A link remembers the browser that asked for it
+  (a short-lived HttpOnly cookie, `acw_login`, whose SHA-256 is stored with the link). In that browser it signs in
+  at once; anywhere else the page first shows "Sign in as <address>?" and the link stays unused until the person
+  says yes, so a link sent to somebody else cannot quietly put them into the sender's account. Links made on the
+  command line (admin) have no browser and sign in as before.
 - OAuth: PKCE + state stored server-side and bound to the browser by a
   short-lived cookie; Google `nonce`/`aud`/`iss`/`email_verified` checked;
 - API keys: `acw_` + 256-bit random, hashed at rest, shown once, scoped

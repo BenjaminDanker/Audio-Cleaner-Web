@@ -340,18 +340,31 @@ def websocket_principal(ws: WebSocket) -> Principal | None:
 LOGIN_LINK_TTL = 15 * 60
 
 
-def create_login_token(email: str, purpose: str, ip: str | None) -> str:
+class ConfirmSignIn(Exception):
+    """A sign-in link was opened in another browser than the one that asked for it: the person is asked about the address first."""
+
+    def __init__(self, email: str):
+        super().__init__("confirm sign-in")
+        self.email = email
+
+
+def create_login_token(email: str, purpose: str, ip: str | None, browser: str | None = None) -> str:
+    """`browser`: the value of the cookie the asking browser holds (see consume_login_token); None for a link nobody's browser asked for."""
     token = random_token(32)
     now = db.now()
     db.execute(
-        "INSERT INTO login_tokens(token_hash, email, purpose, created_at, expires_at, ip) VALUES (?,?,?,?,?,?)",
-        (sha256_hex(token), email.strip().lower(), purpose, now, now + LOGIN_LINK_TTL, ip),
+        "INSERT INTO login_tokens(token_hash, email, purpose, created_at, expires_at, ip, browser_hash) VALUES (?,?,?,?,?,?,?)",
+        (sha256_hex(token), email.strip().lower(), purpose, now, now + LOGIN_LINK_TTL, ip, sha256_hex(browser) if browser else None),
     )
     return token
 
 
-def consume_login_token(token: str) -> str | None:
-    """Single use. Returns the email or None."""
+def consume_login_token(token: str, browser: str | None = None, confirmed: bool = False) -> str | None:
+    """Single use. Returns the email or None.
+
+    A link that a browser asked for signs in at once only in that browser (`browser` is its cookie). Anywhere else it could be a
+    link somebody was sent in order to get them into an account that is not theirs, so it is left unused and ConfirmSignIn
+    carries the address to ask about; `confirmed` is the person's yes."""
     if not token or len(token) > 128:
         return None
     h = sha256_hex(token)
@@ -359,8 +372,11 @@ def consume_login_token(token: str) -> str | None:
         row = c.execute("SELECT * FROM login_tokens WHERE token_hash = ?", (h,)).fetchone()
         if row is None or row["used_at"] is not None or row["expires_at"] <= db.now():
             return None
-        c.execute("UPDATE login_tokens SET used_at = ? WHERE token_hash = ?", (db.now(), h))
-        return row["email"]
+        asked_here = not row["browser_hash"] or bool(browser) and consteq(sha256_hex(browser), row["browser_hash"])
+        if asked_here or confirmed:
+            c.execute("UPDATE login_tokens SET used_at = ? WHERE token_hash = ?", (db.now(), h))
+            return row["email"]
+    raise ConfirmSignIn(row["email"])
 
 
 def purge_expired() -> None:

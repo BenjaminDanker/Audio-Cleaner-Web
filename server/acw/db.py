@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS login_tokens (
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     used_at INTEGER,
-    ip TEXT
+    ip TEXT,
+    browser_hash TEXT                               -- of the cookie of the browser that asked for the link (NULL: a link from the command line)
 );
 
 CREATE TABLE IF NOT EXISTS oauth_states (
@@ -350,6 +351,8 @@ MIGRATIONS = [
         " attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, last_status INTEGER,"
         " last_error TEXT, last_attempt_at INTEGER, delivered_at INTEGER, created_at INTEGER NOT NULL)",
     ),
+    # A sign-in link knows the browser that asked for it: opened anywhere else, the person confirms the address first.
+    ("login_tokens", "browser_hash", "ALTER TABLE login_tokens ADD COLUMN browser_hash TEXT"),
 ]
 
 # Columns that are gone: dropped from databases made before (jobs.free: free server-side subtitle minutes;
