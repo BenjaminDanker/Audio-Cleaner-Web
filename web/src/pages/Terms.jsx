@@ -93,8 +93,8 @@ export default function Terms() {
       <ul>
         <li>The free noise removal and changing a file&rsquo;s type or video size in your browser process files locally; nothing is uploaded.</li>
         <li>Files you upload, the copies we keep of them so a result can be changed again, and your results are kept together for 2 hours after the last change to a job (finishing is the first) and in any case for no more than 6 hours after the upload, and are then deleted together (or when you delete them).</li>
-        <li>Live audio is processed in memory and is not stored.</li>
-        <li>Extra accurate transcription and extra accurate live captions send the audio to a third-party speech-recognition provider, our sub-processor, only when you choose them. Standard transcription and standard live captions are done by us and the audio goes no further.</li>
+        <li>Live audio is processed in memory and we do not store it.</li>
+        <li>Extra accurate transcription and extra accurate live captions send the audio to a third-party speech-recognition provider, our sub-processor, only when you choose them; it may keep what it receives for up to 30 days to check for abuse. Standard transcription and standard live captions are done by us and the audio goes no further.</li>
         <li>Payments are processed by Stripe.</li>
       </ul>
       <p>Download your results promptly: we cannot recover deleted files.</p>

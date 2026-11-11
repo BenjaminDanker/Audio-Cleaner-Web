@@ -110,7 +110,7 @@ export default function InfoModal({ open, onClose, pricing }) {
                   </tbody>
                 </table>
               </div>
-              <p className="small muted">You only pay for what gets processed. Billed per second of audio, no minimum charge. Each part you choose can have its own settings, and you pay for each part with what it uses.</p>
+              <p className="small muted">You only pay for what gets processed. Billed per second of audio, plus a small start-up amount for each step that runs (Details shows it before you start). No minimum charge. Each part you choose can have its own settings, and you pay for each part with what it uses.</p>
             </section>
             <section data-testid="good-to-know">
               <h3>Good to know</h3>

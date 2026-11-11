@@ -47,11 +47,11 @@ export default function Privacy() {
         <li>Results (cleaned audio, captions, transcripts) are available for download for <b>2 hours</b> after your last change to the job (6 hours after the upload at the latest) and are then <b>deleted together with the upload</b>. You can delete them all sooner from the Cleanup page.</li>
         <li>We do not listen to your content, and we do <b>not use your audio or transcripts for training</b> models.</li>
         <li>If you give a file job a <b>callback address</b> (through the API), we send that address a short message when the job ends: its id, status, the list of result files and the cost. No audio or text goes with it.</li>
-        <li><b>Standard</b> transcription is done by us and the audio goes no further. <b>Extra accurate</b> transcription sends the audio to a third-party speech-recognition provider (our sub-processor), which returns the text. It is used only for extra accurate transcription and extra accurate live captions, and only when you choose them. When you choose translations, the text of your captions or transcript (never the audio) is sent to the same provider to be translated. It may process audio in the United States, and it does not use the audio for training. Only choose Extra accurate if you are comfortable with that.</li>
+        <li><b>Standard</b> transcription is done by us and the audio goes no further. <b>Extra accurate</b> transcription sends the audio to a third-party speech-recognition provider (our sub-processor), which returns the text. It is used only for extra accurate transcription and extra accurate live captions, and only when you choose them. When you choose translations, the text of your captions or transcript (never the audio) is sent to the same provider to be translated. It may process audio in the United States, and it does not use the audio for training. It may keep what it receives for up to 30 days to check for abuse. Only choose Extra accurate if you are comfortable with that.</li>
       </ul>
 
       <h2 id="live">5. Live audio</h2>
-      <p>Live audio is streamed to our servers, processed in memory and returned to you. It is <b>not stored</b>. Captions are delivered to you as they are produced and are not saved. If you choose extra accurate live captions, the audio is sent to the speech-recognition provider described in section 6 for that purpose. Standard live captions (English only) are produced by us and the audio goes no further.</p>
+      <p>Live audio is streamed to our servers, processed in memory and returned to you. We do <b>not store</b> it. Captions are delivered to you as they are produced and are not saved. If you choose extra accurate live captions, the audio is sent to the speech-recognition provider described in section 6 for that purpose, and that provider may keep what it receives for up to 30 days to check for abuse. Standard live captions (English only) are produced by us and the audio goes no further.</p>
 
       <h2 id="subprocessors">6. Sub-processors and recipients</h2>
       <div className="table-wrap">
@@ -59,7 +59,7 @@ export default function Privacy() {
           <thead><tr><th>Who</th><th>Why</th><th>What they receive</th></tr></thead>
           <tbody>
             <tr><td>Stripe</td><td>Payments, saved cards, receipts, refunds</td><td>Email, payment details, amounts</td></tr>
-            <tr><td>A third-party speech-recognition provider</td><td>Extra accurate transcription, extra accurate live captions and translations, and only when you choose them</td><td>The audio you choose to send (for translations: the text of your captions or transcript, never the audio). With extra accurate live captions also a scrambled identifier of your account, which lets it tell abuse by one account apart without knowing who you are. It may be processed in the United States and is not used for training</td></tr>
+            <tr><td>A third-party speech-recognition provider</td><td>Extra accurate transcription, extra accurate live captions and translations, and only when you choose them</td><td>The audio you choose to send (for translations: the text of your captions or transcript, never the audio). With extra accurate live captions also a scrambled identifier of your account, which lets it tell abuse by one account apart without knowing who you are. It may be processed in the United States and is not used for training. The provider may keep what it receives for up to 30 days to check for abuse</td></tr>
             <tr><td>Google</td><td>Optional sign-in</td><td>Their own sign-in data; we receive your verified email and name</td></tr>
             <tr><td>Email delivery provider</td><td>Sign-in links, and messages sent through the contact form</td><td>Your email address and the message</td></tr>
             <tr><td>Hugging Face</td><td>The free tools’ model files, which your browser downloads from them</td><td>Your IP address and browser type, as with any site your browser connects to</td></tr>
@@ -84,6 +84,7 @@ export default function Privacy() {
         <li>Messages sent through the contact form: they are not in our database. The email we receive is kept for as long as we need it to answer you and deal with your request.</li>
         <li>Backups of our database: kept for 30 days, so data you deleted can remain in a backup until it expires.</li>
         <li>Uploaded files and results: as described in section 4.</li>
+        <li>What the speech-recognition provider receives when you choose Extra accurate or translations: it may keep it for up to 30 days to check for abuse (section 6).</li>
       </ul>
 
       <h2 id="rights">9. Your rights</h2>
