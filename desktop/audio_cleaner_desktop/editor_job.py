@@ -333,7 +333,7 @@ def render_timeline(
             raise MediaError("The model that rebuilds the voice is not installed. Download it in Settings.")
         if not resources.noise_ready() and any(s in ("light", "heavy") for s in missing):
             raise MediaError("The noise removal models are not installed.")
-    y = editor.render(tl, inputs, cache, runner(threads, timings=timings), out=out, work_dir=work,
+    y = editor.render(tl, inputs, cache, runner(threads, timings=timings), out=out, work_dir=work, reserve=True,
                       progress=(lambda f: progress(0.02 + 0.98 * f)) if progress else None, cancel=cancel)
     return y, tl, decided, notice, made
 

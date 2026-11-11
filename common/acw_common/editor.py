@@ -712,7 +712,7 @@ def find_pause(lead: np.ndarray, lead_start: int, t0: int, max_shift: int) -> tu
 # ---------------------------------------------------------------------------------------------------------------------
 class _Render:
     def __init__(self, tl: Timeline, inputs: Inputs, cache: blocks.BlockCache, runner: Runner | None, out: np.ndarray | None,
-                 work_dir: Path | None, progress, cancel, browser: BrowserAudio | None = None):
+                 work_dir: Path | None, progress, cancel, browser: BrowserAudio | None = None, reserve: bool = False):
         self.tl, self.inputs, self.cache, self.runner = tl, inputs, cache, runner
         self.lay = Layout(tl, inputs)
         self.browser = browser
@@ -725,6 +725,7 @@ class _Render:
         self.keys = _Keys(self.lay, inputs)
         self.n, self.ch = inputs.n, inputs.channels
         self.work_dir, self.progress, self.cancel = work_dir, progress, cancel
+        self.reserve = reserve
         self.lru = _LRU(cache)
         self.temp: list[Path] = []  # (before the first `alloc`: it records the scratch files it makes here)
         self.maps: list[weakref.ref] = []  # ... and their memory maps
@@ -738,7 +739,10 @@ class _Render:
             return np.zeros(shape, np.float32)
         p = Path(self.work_dir) / f"editor-{name}-{uuid.uuid4().hex[:8]}.npy"
         self.temp.append(p)
-        m = np.lib.format.open_memmap(p, mode="w+", dtype=np.float32, shape=shape)
+        if self.reserve:
+            m = pipeline.scratch_array(p, shape)
+        else:
+            m = np.lib.format.open_memmap(p, mode="w+", dtype=np.float32, shape=shape)
         self.maps.append(weakref.ref(m))
         return m
 
@@ -1032,12 +1036,14 @@ def render(
     progress: Callable[[float], None] | None = None,
     cancel: threading.Event | None = None,
     browser: BrowserAudio | None = None,
+    reserve: bool = False,
 ) -> np.ndarray:
     """The audio the timeline stands for, (samples, channels) float32, channels as `pipeline.channel_plan` has them (a channel that
     duplicates another is the same result, a silent one stays silent). Blocks the cache lacks are run with `runner` and put in
     the cache (`cache` None: kept for this call only, in `work_dir` when given); `out`: written into this array (e.g. a memory
     map). `browser`: the audio of the noise parts the browser cleaned (they need it). The noise remover of every part must be decided ("light" / "heavy": resolve_removers). A whole-file run is the
-    default timeline (every layer on the whole file)."""
+    default timeline (every layer on the whole file). `reserve`: the scratch arrays in `work_dir` take their room on the disk when
+    they are made (pipeline.scratch_array), so a disk that is too full is an OSError and not the end of the program."""
     wd = Path(work_dir) if work_dir is not None else None
     own = None
     if cache is None:
@@ -1048,7 +1054,7 @@ def render(
             cache = blocks.MemoryCache()
     if out is not None and out.shape != (inputs.n, inputs.channels):
         raise ValueError("out must be shaped (samples, channels) like the recording")
-    r = _Render(tl, inputs, cache, runner, out, wd, progress, cancel, browser)
+    r = _Render(tl, inputs, cache, runner, out, wd, progress, cancel, browser, reserve)
     try:
         return r.run()
     finally:

@@ -11,6 +11,7 @@ subtitles). Subtitles ("<name>-cleaned.srt" ...) go next to it, or into the vide
 from __future__ import annotations
 
 import dataclasses
+import errno
 import gc
 import logging
 import os
@@ -104,6 +105,7 @@ _PIECE_SECONDS = 300
 _PIECE_SEARCH_SECONDS = 30
 
 SCRATCH_SAFETY = 1.1  # free space wanted in the scratch folder, as a share more than the estimate
+FULL_DISK_BYTES = 32 << 20  # a disk with less free than this is full (what a write that ran out of room leaves)
 STALE_SECONDS = 24 * 3600  # leftovers of a crashed run older than this are swept away
 _WORK_PREFIX = ".acw-work-"
 _LEFTOVER_FILE = re.compile(r"^\.acw-[0-9a-f]{32}\.[A-Za-z0-9]{1,5}$")
@@ -389,6 +391,20 @@ def scratch_root() -> Path | None:
         return Path(env)
     if sys.platform in ("win32", "darwin"):
         return models.app_data_dir() / "scratch"
+    return None
+
+
+def disk_full_error(e: BaseException, *folders: Path | None) -> OSError | None:
+    """"The disk is full" to raise in place of `e` when a folder the run wrote to has no room left and `e` is a MediaError
+    (FFmpeg only says that it failed, not why); None otherwise. Ask before the files of the failed run are removed."""
+    if not isinstance(e, MediaError):
+        return None
+    for folder in folders:
+        try:
+            if folder is not None and shutil.disk_usage(folder).free < FULL_DISK_BYTES:
+                return OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        except OSError:
+            pass
     return None
 
 
@@ -839,12 +855,15 @@ def process(
         except BaseException as e:
             # A cancelled or failed job's traceback still holds the memory-mapped scratch arrays
             # (in the renderer's frames); Windows can't delete a file that is still mapped.
+            full = disk_full_error(e, work, dest_dir)
             x = y = ref = inputs = None
             traceback.clear_frames(e.__traceback__)
             if keeper is not None:  # stopped: nothing is kept. Failed: what was made before it failed stays (changing it later may still work)
                 keeper.discard() if isinstance(e, Cancelled) else keeper.finish()
             elif keep_dir is not None:  # stopped or failed before the first copy could be made
                 copies.delete_job_dir(Path(keep_dir).parent, Path(keep_dir).name)
+            if full is not None:
+                raise full from e
             raise
         finally:
             x = y = ref = inputs = None

@@ -62,10 +62,13 @@ class Session:
                 progress(1.0)
             return session
         except BaseException as e:
+            full = engine.disk_full_error(e, work)
             # Windows can't delete a mapped file: let go of the decoded recording here and in the error's frames first
             inputs = session = None
             traceback.clear_frames(e.__traceback__)
             editor_job.remove_work(work)
+            if full is not None:
+                raise full from e
             raise
 
     def prepare(self, tl: Timeline, *, cancel: threading.Event | None = None, progress: Progress | None = None) -> None:
@@ -132,9 +135,12 @@ class PlanSession:
             inputs = editor.Inputs(x, copies.source_id_of(copies.fingerprint(path)))
             return cls(path, info, work, inputs, threads)
         except BaseException as e:
+            full = engine.disk_full_error(e, work)
             x = inputs = None  # (as above)
             traceback.clear_frames(e.__traceback__)
             editor_job.remove_work(work)
+            if full is not None:
+                raise full from e
             raise
 
     def baseline(self, options: engine.JobOptions, *, cancel: threading.Event | None = None) -> Timeline:

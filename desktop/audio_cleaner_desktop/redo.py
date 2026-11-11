@@ -355,8 +355,11 @@ def run(
             editor_job.remember(job, done, decided)
             job.add_save([final, *([sub_final] if sub_final else [])], made)
         except BaseException as e:
+            full = engine.disk_full_error(e, work, dest_dir)
             x = y = inputs = None
             traceback.clear_frames(e.__traceback__)
+            if full is not None:
+                raise full from e
             raise
         finally:
             x = y = inputs = None

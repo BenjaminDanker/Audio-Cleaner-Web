@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from acw_common import clarity, editor
+from acw_common import clarity, editor, pipeline
 from acw_common.timeline import Timeline
 
 log = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ class Layers:
                 self.arrays[step] = np.zeros(shape, np.float32)
             else:
                 path = self.work / f"live-{step}-{uuid.uuid4().hex[:8]}.npy"
-                self.arrays[step] = np.lib.format.open_memmap(path, mode="w+", dtype=np.float32, shape=shape)
+                self.arrays[step] = pipeline.scratch_array(path, shape)  # (a full disk is an error here, never later)
         return self.arrays[step]
 
     def mark(self, step: str, s: int, e: int) -> None:

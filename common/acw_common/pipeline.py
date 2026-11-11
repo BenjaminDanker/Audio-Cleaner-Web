@@ -25,6 +25,8 @@ a = 10 ** (-dB / 20)); tests/test_blend.py checks it against the models' own lim
 """
 from __future__ import annotations
 
+import errno
+import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -233,11 +235,52 @@ def decode_for_clean(
     return ff.decode_to_file(src, probe, SAMPLE_RATE, channels, max_seconds, Path(work_dir) / "decoded.f32")
 
 
+def scratch_array(path: Path, shape: tuple[int, ...]) -> np.ndarray:
+    """A float32 array of zeros in the file `path` (a memory map), whose room on the disk is taken here and now.
+
+    A map's file otherwise takes its room only as it is written to, and a write into a map that finds the disk full is
+    not an error anything can catch: it ends the whole program. Raises OSError (ENOSPC) when the disk does not have the
+    room; the file is gone again then."""
+    path = Path(path)
+    m = None
+    try:
+        m = np.lib.format.open_memmap(path, mode="w+", dtype=np.float32, shape=shape)
+        _take_room(path, m.offset, m.nbytes)
+    except BaseException:
+        m = None  # (lets go of the map: its file's room is only given back once nothing holds it)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return m
+
+
+def _take_room(path: Path, offset: int, size: int) -> None:
+    """Have the file system set aside the `size` bytes from `offset` of a file that has its full length already."""
+    if size <= 0 or os.name == "nt":
+        return  # (Windows takes the room when the file gets its length)
+    with open(path, "r+b", buffering=0) as f:  # (unbuffered: a full disk shows at the write itself)
+        if hasattr(os, "posix_fallocate"):
+            try:
+                os.posix_fallocate(f.fileno(), offset, size)
+                return
+            except OSError as e:
+                if e.errno in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG):
+                    raise
+                # (a file system that cannot do it: writing the zeros does)
+        # macOS has no such call: writing the zeros out takes the room. Only the samples, never the file's header.
+        f.seek(offset)
+        zeros = bytes(1 << 20)
+        while size > 0:
+            size -= f.write(zeros[:size])
+
+
 def output_buffer(like: np.ndarray, work_dir: Path | None = None) -> np.ndarray:
-    """A float32 array shaped like `like`: memory-mapped in `work_dir` when given."""
+    """A float32 array shaped like `like`: memory-mapped in `work_dir` when given (see scratch_array)."""
     if work_dir is None:
         return np.empty(like.shape, dtype=np.float32)
-    return np.lib.format.open_memmap(Path(work_dir) / "cleaned.npy", mode="w+", dtype=np.float32, shape=like.shape)
+    return scratch_array(Path(work_dir) / "cleaned.npy", like.shape)
 
 
 def to_speech_16k(x: np.ndarray) -> np.ndarray:
@@ -259,7 +302,7 @@ def to_speech_16k(x: np.ndarray) -> np.ndarray:
 
 __all__ = [
     "SAMPLE_RATE", "CleanOptions", "Cancelled", "automatic_choices", "strength_mix",
-    "channel_plan", "decode_for_clean", "output_buffer", "as_output", "to_speech_16k",
+    "channel_plan", "decode_for_clean", "scratch_array", "output_buffer", "as_output", "to_speech_16k",
 ]
 
 
