@@ -2,7 +2,7 @@
 // limit), a page file that cannot be loaded (one retry, then a friendly screen, never a white page), the delete-now
 // confirmation for a finished job, and what a finished job hands over after a reload. The rest of the old audit checks are covered by the suites next to this one.
 // Needs the local test backend (port 8792, see helpers.mjs) serving `npm run build`. Usage: node tests/fixes.mjs [section ...]
-// sections: pure pages jobs
+// sections: pure pages jobs jobpage
 import { BASE, check, launch, signIn, summary } from './helpers.mjs';
 
 const only = process.argv.slice(2);
@@ -168,6 +168,49 @@ if (want('jobs')) {
     }
   });
 
+  await browser.close();
+}
+
+if (want('jobpage')) {
+  const first = await launch();
+  await signIn(first.page, EMAIL);
+  const state = await first.context.storageState();
+  await first.browser.close();
+  const { browser, page } = await launch([], { storageState: state });
+  await check('a job page whose lookup says "no such job" (404) says it is gone; any other failed lookup (server error, asked to wait) says it could not be loaded and "Try again" asks again, down to the job', async () => {
+    const id = 'e'.repeat(32);
+    let answer = 404; // an error status, or 'ok' ('no connection' is not tried here: the whole site then says it is taking a break)
+    let lookups = 0;
+    await page.route(new RegExp(`/api/jobs/${id}$`), (r) => {
+      lookups += 1;
+      if (answer === 'ok') {
+        return r.fulfill({ json: { id, kind: 'denoise', free: false, status: 'failed', error: 'It did not work.', inputName: 'x.wav', createdAt: now(), durationSeconds: 60, progress: 0, stage: '',
+          outputs: [], costMicros: 0, expiresAt: null, queuePosition: null, queueWaitSeconds: null } });
+      }
+      return r.fulfill({ status: answer, json: { detail: answer === 404 ? 'Not found.' : 'Something broke.' } });
+    });
+    const text = (t) => page.getByTestId(t).innerText();
+    await page.goto(`${BASE}/app/job/${id}`);
+    await page.getByTestId('job-gone').waitFor({ timeout: 15000 });
+    if (!/isn’t here any more/.test(await text('job-gone')) || (await page.getByTestId('job-load-failed').count())) throw new Error('404: ' + await page.getByTestId('job-page').innerText());
+    for (const how of [500, 429]) {
+      answer = how;
+      await page.goto(`${BASE}/app/job/${id}`);
+      await page.getByTestId('job-load-failed').waitFor({ timeout: 15000 });
+      if (!/couldn’t load this job/.test(await text('job-load-failed'))) throw new Error(`${how}: ` + await text('job-load-failed'));
+      if ((await page.getByTestId('job-gone').count()) || (await page.getByTestId('job-retry').count()) !== 1) throw new Error(`${how}: "gone" shown, or no single Try again`);
+    }
+    const before = lookups;
+    await page.getByTestId('job-retry').click(); // still failing: it asks again and says so again
+    for (let i = 0; i < 50 && lookups === before; i++) await page.waitForTimeout(100);
+    if (lookups !== before + 1) throw new Error(`lookups ${before} -> ${lookups}`);
+    await page.getByTestId('job-load-failed').waitFor();
+    answer = 'ok';
+    await page.getByTestId('job-retry').click();
+    await page.locator(`[data-testid=job][data-job-id="${id}"]`).waitFor({ timeout: 15000 });
+    if ((await page.getByTestId('job-load-failed').count()) || (await page.getByTestId('job-gone').count())) throw new Error('the failure notice stayed after the job loaded');
+    return `404 -> gone; 500 and 429 -> "couldn’t load"; Try again asked again (${lookups} lookups), then the job`;
+  });
   await browser.close();
 }
 

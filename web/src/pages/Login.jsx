@@ -95,8 +95,8 @@ export default function Login() {
         )}
         {sent && (
           <div className="banner banner-success" role="status">
-            <p><b>Check your inbox.</b> If {email} can sign in, a link is on its way. It works once and runs out in 15 minutes.</p>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setSent(false); setToken(null); setResetKey((k) => k + 1); }}>Use a different email</button>
+            <p><b>Check your inbox.</b> If {email} can sign in, a link is on its way. It works once and runs out in 15 minutes. Nothing after a minute or two? Take a look in your spam folder.</p>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setSent(false); setToken(null); setResetKey((k) => k + 1); }}>Send it again or use a different email</button>
           </div>
         )}
         <p className="small muted mb0">By signing in you agree to the <Link to="/terms">Terms</Link> and <Link to="/privacy">Privacy Policy</Link>.</p>

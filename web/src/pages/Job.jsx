@@ -23,7 +23,7 @@ export default function Job() {
   const nav = useNavigate();
   const loc = useLocation();
   const { jobs, limits, error, reload } = useJobs({ onFinished: refresh });
-  const [solo, setSolo] = useState(null); // the job asked for by itself, when the list doesn't have it: {job} or {gone: true}
+  const [solo, setSolo] = useState(null); // the job asked for by itself, when the list doesn't have it: {job}, {gone: true} or {failed: true}
   const [welcome, setWelcome] = useState(() => loc.state?.submitted || '');
   const localCards = useLocalCards(); // a free run made in this tab has no job on our side: it lives in this tab only
   const isLocal = isLocalJobId(id);
@@ -57,12 +57,17 @@ export default function Job() {
     let alive = true;
     api(`jobs/${id}`).then(
       (j) => alive && setSolo(j.status === 'expired' ? { gone: true } : { job: j }),
-      () => alive && setSolo({ gone: true }),
+      (e) => {
+        // only "no such job" means it is gone; a server that can't be reached (or asks us to wait) says nothing about the job
+        if (!alive || e?.status === 401) return; // (401: the api layer is already taking the visitor to the sign-in page)
+        setSolo(e?.status === 404 ? { gone: true } : { failed: true });
+      },
     );
     return () => { alive = false; };
   }, [jobs, listed, solo, id, isLocal]);
 
-  const gone = !job && (isLocal ? true : solo?.gone || (error && jobs?.length === 0 && !solo));
+  const gone = !job && (isLocal ? true : !!solo?.gone);
+  const failed = !job && !isLocal && !!solo?.failed;
   // the editor opens jobs that have audio steps (and any card or job made in this tab); a failed or canceled one shows what happened
   const editable = !!job && !['failed', 'canceled', 'expired'].includes(job.status) && (isLocal || !!sessionFor(job.id) || (!!job.edit && (job.edit.available || job.status !== 'done')));
   const session = editable ? (sessionFor(job.id) || Session.forJob(job, finishOf(job))) : null;
@@ -86,7 +91,13 @@ export default function Job() {
         <Link to="/app" className="btn btn-primary" data-testid="start-another">Start another file</Link>
       </header>
       {welcome && <div className="banner banner-success" role="status" data-testid="submitted">{welcome}</div>}
-      {!job && !gone && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading this job…</p>}
+      {!job && !gone && !failed && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading this job…</p>}
+      {failed && (
+        <div className="banner banner-error stack" role="alert" data-testid="job-load-failed">
+          <p className="mb0"><b>We couldn’t load this job just now.</b> {error || 'Check your connection and try again.'}</p>
+          <div><button type="button" className="btn btn-secondary" data-testid="job-retry" onClick={() => { setSolo(null); reload(); }}>Try again</button></div>
+        </div>
+      )}
       {gone && (
         <div className="card stack" data-testid="job-gone">
           <p className="mb0"><b>This job isn’t here any more.</b></p>

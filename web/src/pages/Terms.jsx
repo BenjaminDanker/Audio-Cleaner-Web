@@ -83,6 +83,7 @@ export default function Terms() {
         <li>reverse engineer the Service except where the law allows it, or use automated means other than our documented API keys (see <Link to="/developers">For developers</Link>).</li>
       </ul>
       <p>We apply rate limits to protect the Service for everyone. We may remove content, stop jobs or sessions, and suspend accounts that break these rules, without refund of credit where the breach is serious.</p>
+      <p><b>Copyright complaints.</b> If you believe something processed with the Service infringes your copyright, tell us through the <Link to="/contact?topic=copyright">contact form</Link> (topic &ldquo;A copyright complaint&rdquo;): what the work is, what you object to and how we can reach you. We look into it, delete what we still hold where the complaint is justified, and may close the accounts of people who infringe repeatedly.</p>
 
       <h2 id="content">7. Your content</h2>
       <p>You keep all rights in the audio, video and text you provide and in the results. You give us only the limited permission needed to receive, process and temporarily store your files to provide the Service to you. We do not use your audio or transcripts to train models. You confirm that you have the rights needed to process what you upload.</p>

@@ -181,7 +181,7 @@ export default function Landing() {
               <li><b>No subscription.</b> Add credit from {pricing ? moneyCents(pricing.topup.minCents) : '$5'} and use it when you need it.</li>
               <li><b>You only pay for what you use.</b> You see an estimate before you upload. Live is counted by the second.</li>
               <li><b>Auto-reload is optional.</b> It tops you up when you run low, up to a monthly limit you choose. Turn it off any time.</li>
-              <li><b>Changed your mind?</b> Unused credit can be refunded within 14 days. The <Link to="/terms">Terms</Link> have the details.</li>
+              <li><b>Changed your mind?</b> Unused credit can be refunded within 14 days, minus the card fee (about 2.9% + 30¢). The <Link to="/terms">Terms</Link> have the details.</li>
             </ul>
             <div className="row">
               <Link to="/app/billing" className="btn btn-primary">Add credit</Link>

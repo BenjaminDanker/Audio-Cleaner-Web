@@ -12,6 +12,7 @@ const TOPICS = [
   ['billing', 'Billing or a refund'],
   ['job', 'A problem with a job'],
   ['privacy', 'Privacy or my data'],
+  ['copyright', 'A copyright complaint'],
   ['other', 'Something else'],
 ];
 const MIN = 10;

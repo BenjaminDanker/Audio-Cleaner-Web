@@ -59,12 +59,12 @@ export default function Privacy() {
           <thead><tr><th>Who</th><th>Why</th><th>What they receive</th></tr></thead>
           <tbody>
             <tr><td>Stripe</td><td>Payments, saved cards, receipts, refunds</td><td>Email, payment details, amounts</td></tr>
-            <tr><td>A third-party speech-recognition provider</td><td>Extra accurate transcription and extra accurate live captions only, and only when you choose them</td><td>The audio you choose to send. It may be processed in the United States and is not used for training</td></tr>
+            <tr><td>A third-party speech-recognition provider</td><td>Extra accurate transcription, extra accurate live captions and translations, and only when you choose them</td><td>The audio you choose to send (for translations: the text of your captions or transcript, never the audio). With extra accurate live captions also a scrambled identifier of your account, which lets it tell abuse by one account apart without knowing who you are. It may be processed in the United States and is not used for training</td></tr>
             <tr><td>Google</td><td>Optional sign-in</td><td>Their own sign-in data; we receive your verified email and name</td></tr>
             <tr><td>Email delivery provider</td><td>Sign-in links, and messages sent through the contact form</td><td>Your email address and the message</td></tr>
             <tr><td>Hugging Face</td><td>The free tools’ model files, which your browser downloads from them</td><td>Your IP address and browser type, as with any site your browser connects to</td></tr>
             <tr><td>Cloudflare (Turnstile)</td><td>The check that you are a person, on the email sign-in and contact forms</td><td>Your IP address, browser details and signals from the page while the check runs, which Cloudflare handles under its own privacy policy</td></tr>
-            <tr><td>Hosting provider</td><td>Running the website and servers</td><td>Technical traffic data</td></tr>
+            <tr><td>Hosting provider</td><td>Running the server that connects you to the Service</td><td>Technical traffic data. What you send and receive passes through that server on its way; nothing of it is stored there</td></tr>
           </tbody>
         </table>
       </div>
@@ -77,8 +77,8 @@ export default function Privacy() {
       <ul>
         <li>Account data: while your account exists, then deleted on request unless we must keep it by law.</li>
         <li>A one-way hash of your email address, kept for good, even after you delete your account, only so the free live trial is not given twice. It cannot be turned back into your address and is not linked to your account.</li>
-        <li>Payment and ledger records: 7 years, as tax and accounting law requires (when an account is deleted they are kept without your name or email). Records that go with them, such as that you accepted the Terms, started a payment, turned automatic top-up on or off, or were refunded or credited, are kept just as long.</li>
-        <li>Job records and live-session records (metadata only, no content): deleted 12 months after the job or session. File names are removed from your credit history after 12 months; what you paid stays there as a line without the name (date, kind of work, length, amount) for the 7 years above.</li>
+        <li>Payment and ledger records: 7 years, as tax and accounting law requires (when an account is deleted they are kept without your name or email, and we have Stripe delete its customer record of you with your saved card; Stripe keeps the payments themselves as the law requires of it). Records that go with them, such as that you accepted the Terms, started a payment, turned automatic top-up on or off, or were refunded or credited, are kept just as long.</li>
+        <li>Job records and live-session records (metadata only, no content): deleted 12 months after the job or session. File names are removed from your credit history after 12 months, or at once when you delete your account; what you paid stays there as a line without the name (date, kind of work, length, amount) for the 7 years above.</li>
         <li>Security logs, including IP addresses and browser types of sign-ins and live sessions: 90 days. The entries themselves (a sign-in, a key created, a contact message sent) are deleted after 12 months, without IP addresses after the first 90 days.</li>
         <li>Sign-in sessions and sign-in links: deleted when they run out, and in any case within 30 days after that. Small bookkeeping rows: payment notification ids about 90 days.</li>
         <li>Messages sent through the contact form: they are not in our database. The email we receive is kept for as long as we need it to answer you and deal with your request.</li>
