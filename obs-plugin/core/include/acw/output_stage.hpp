@@ -9,7 +9,8 @@
 //
 // Alignment: the server returns, for input frame k, the processed samples
 // P[k*960 .. k*960+960) where P[i] is the cleaned version of input sample
-// i - L (L = model latency, 1440 samples = 30 ms for "light"). Output block k
+// i - L (L = the latency the server reports: the model's 1440 samples plus 432
+// for echo removal, 1872 samples = 39 ms for "light"). Output block k
 // therefore starts at output index  k*960 + (D - L)  and the original audio
 // for the same block is x[i - L] = x[o - D].
 //
@@ -38,16 +39,20 @@ public:
 
 	// network thread -------------------------------------------------------
 	void publish(uint64_t seq, const float *pcm /* kFrameSamples */);
-	void mark_sent(uint64_t seq);
+	// False: the frame's place in the output was already filled with the original audio before it could be sent
+	// (see mark_skipped), so whatever the server answers comes too late.
+	bool mark_sent(uint64_t seq);
 
 	// audio thread ---------------------------------------------------------
 	const float *get(uint64_t seq) const;  // nullptr if the frame did not arrive
 	bool was_sent(uint64_t seq) const;
+	void mark_skipped(uint64_t seq);  // its block was decided (original audio) and the frame had not been sent yet
 
 private:
 	std::vector<float> pcm_;
 	std::unique_ptr<std::atomic<uint64_t>[]> arrived_;  // seq + 1
 	std::unique_ptr<std::atomic<uint64_t>[]> sent_;     // seq + 1
+	std::unique_ptr<std::atomic<uint64_t>[]> skipped_;  // seq + 1
 };
 
 class OutputStage {

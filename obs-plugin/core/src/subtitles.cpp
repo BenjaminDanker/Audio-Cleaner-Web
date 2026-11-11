@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 
 namespace acw {
 
@@ -25,13 +26,17 @@ std::string srt_time(double seconds)
 std::string make_srt(std::vector<SrtCue> cues, size_t line_chars)
 {
 	std::stable_sort(cues.begin(), cues.end(), [](const SrtCue &a, const SrtCue &b) { return a.start < b.start; });
-	// Every cue is on screen for a readable time, then cut where the next one starts.
-	for (size_t i = 0; i < cues.size(); ++i) {
+	// Every cue is on screen for a readable time, then cut where the same voice's next one starts. Two people talking
+	// at once keep their own lines (players show both): cutting one where the other begins left it on for a moment only.
+	std::map<uint64_t, double> next_start;  // per voice, of the cue after the one looked at (walking backwards)
+	for (size_t i = cues.size(); i-- > 0;) {
 		SrtCue &c = cues[i];
 		if (!(c.end > c.start))
 			c.end = c.start + std::min(6.0, std::max(1.0, static_cast<double>(utf8_count(c.text)) / 15.0));
-		if (i + 1 < cues.size())
-			c.end = std::max(std::min(c.end, cues[i + 1].start), c.start + 0.2);
+		const auto next = next_start.find(c.voice);
+		if (next != next_start.end())
+			c.end = std::max(std::min(c.end, next->second), c.start + 0.2);
+		next_start[c.voice] = c.start;
 	}
 	std::string out;
 	int n = 0;
@@ -165,6 +170,7 @@ void SubtitleRecorder::add(const SubtitleCue &cue)
 	c.start = position(cue.start);
 	c.end = position(cue_end);
 	c.text = cue.text;
+	c.voice = cue.voice;
 	if (std::max(c.start, c.end) <= 0.0)
 		return;  // spoken before the recording began
 	if (cue.end > cue.start && c.end - c.start < 1e-6)

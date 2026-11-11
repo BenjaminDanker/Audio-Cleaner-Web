@@ -1108,8 +1108,13 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 					queue.pop();
 					continue;
 				}
-				if (static_cast<int64_t>(f->seq) >= att->first_valid_seq.load(std::memory_order_relaxed))
-					store.mark_sent(f->seq);
+				if (static_cast<int64_t>(f->seq) >= att->first_valid_seq.load(std::memory_order_relaxed) && !store.mark_sent(f->seq)) {
+					// The delay leaves so little time that the frame's place in the output was filled (with the
+					// original audio) before the frame could even be sent: that is a late frame like any other,
+					// and has to count as one or nobody is told that nothing is being cleaned.
+					counters.late.fetch_add(1, std::memory_order_relaxed);
+					counters.passthrough.fetch_sub(1, std::memory_order_relaxed);
+				}
 				if (send(len)) {
 					counters.sent.fetch_add(1, std::memory_order_relaxed);
 					if (as_silence)

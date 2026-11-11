@@ -81,6 +81,7 @@ void CaptionRouter::on_caption(const CaptionEvent &ev)
 		SubtitleCue c;
 		c.lang = spoken;
 		c.text = ev.text;
+		c.voice = ev.voice;
 		cue_times(ev.origin, ev.start, ev.end, arrival, c.start, c.end);
 		sinks_.subtitle(c);
 	}
@@ -122,6 +123,7 @@ void CaptionRouter::on_translation(const TranslationEvent &ev)
 		SubtitleCue c;
 		c.lang = ev.lang;
 		c.text = ev.text;
+		c.voice = ev.voice;
 		cue_times(ev.origin, ev.start, ev.end, arrival, c.start, c.end);
 		sinks_.subtitle(c);
 	}

@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <string>
@@ -17,6 +18,7 @@ struct SubtitleCue {
 	std::string lang;  // "" = the spoken language when it is not known (the file then has no language in its name)
 	std::chrono::steady_clock::time_point start, end;
 	std::string text;
+	uint64_t voice = 0;  // who spoke (CaptionEvent::voice)
 };
 
 // "00:01:02,345" for 62.345 seconds (negative = 0).
@@ -25,9 +27,11 @@ std::string srt_time(double seconds);
 struct SrtCue {
 	double start = 0, end = 0;  // seconds from the start of the recording
 	std::string text;
+	uint64_t voice = 0;  // who spoke
 };
 
-// The text of an SRT file: cues in time order, no overlaps, long text wrapped into lines of at most `line_chars`.
+// The text of an SRT file: cues in time order, a voice's own cues never overlapping (two voices talking at once do),
+// long text wrapped into lines of at most `line_chars`.
 std::string make_srt(std::vector<SrtCue> cues, size_t line_chars = 42);
 
 // "/videos/2026-10-16 12-00-00.mkv" + "es" -> "/videos/2026-10-16 12-00-00.es.srt" (lang "" -> "... .srt").

@@ -311,6 +311,21 @@ static void test_speaker_labels()
 	t.of = "l0";
 	label_speaker(t, "Sam", "R/");
 	CHECK(t.text == "Sam: hola" && t.of == "R/l0");  // the translation still finds its caption
+	CHECK(c.voice == 0 && unnamed.voice == 0 && t.voice == 0);  // no voice given: the only one
+	CaptionEvent v;
+	v.text = "hello";
+	v.id = "l2";
+	label_speaker(v, "Sam", "R/", 7);
+	CHECK(v.voice == 7 && v.text == "Sam: hello" && v.id == "R/l2");
+	CaptionEvent plain;
+	plain.text = "hi";
+	label_speaker(plain, "", "", 3);
+	CHECK(plain.voice == 3 && plain.text == "hi" && plain.id.empty());  // the voice is set without a name or a prefix too
+	TranslationEvent tv;
+	tv.text = "hola";
+	tv.of = "l2";
+	label_speaker(tv, "Sam", "R/", 9);
+	CHECK(tv.voice == 9 && tv.text == "Sam: hola" && tv.of == "R/l2");
 }
 
 static void test_caption_lines()
@@ -656,6 +671,48 @@ static void test_output_stage()
 	std::printf("  used %llu late %llu passthrough %llu max_step %.4f\n",
 		    static_cast<unsigned long long>(counters.used.load()), static_cast<unsigned long long>(counters.late.load()),
 		    static_cast<unsigned long long>(counters.passthrough.load()), max_step);
+}
+
+// A frame whose block was decided (original audio played) before the frame could be sent: mark_sent says so, once.
+static void test_output_stage_frame_decided_before_it_was_sent()
+{
+	std::printf("output stage (a frame that is sent after its block was decided)\n");
+	ProcessedStore store;
+	CHECK(store.mark_sent(5));  // nothing decided about it: an ordinary sent frame
+	CHECK(store.was_sent(5));
+	store.mark_skipped(7);
+	CHECK(!store.was_sent(7));
+	CHECK(!store.mark_sent(7));  // its block played the original audio: whatever the server says comes too late
+	CHECK(store.was_sent(7));
+	CHECK(!store.mark_sent(7));
+	CHECK(store.mark_sent(7 + ProcessedStore::kSlots));  // the next frame in that slot is not the skipped one
+	CHECK(store.mark_sent(8));  // a neighbour is not either
+
+	// With the delay no longer than the model's latency a block is decided 5 ms before it starts, which is before its
+	// frame is complete: every block gets the original audio, counted as passthrough, and its frame comes too late.
+	ProcessedStore s2;
+	Counters counters;
+	OutputStage stage(1440, 1440, s2, counters);
+	std::vector<float> x(480, 0.25f), out(480);
+	for (int i = 0; i < 10; ++i) {  // 4800 samples: the blocks up to 5 are decided
+		stage.push_input(x.data(), x.size());
+		stage.render(out.data(), out.size());
+	}
+	CHECK(counters.passthrough.load() == 6 && counters.late.load() == 0 && counters.used.load() == 0);
+	for (uint64_t k = 0; k <= 5; ++k)
+		CHECK(!s2.mark_sent(k));
+	CHECK(s2.mark_sent(6));  // not decided yet: it can still be in time
+	// A frame sent in time, whose reply does not come, is late, not passthrough: no skip is recorded for it.
+	ProcessedStore s3;
+	Counters c3;
+	OutputStage st3(2400, 1440, s3, c3);  // blocks start at 960 and are decided from 720
+	for (uint64_t k = 0; k < 3; ++k)
+		CHECK(s3.mark_sent(k));
+	for (int i = 0; i < 12; ++i) {
+		st3.push_input(x.data(), x.size());
+		st3.render(out.data(), out.size());
+	}
+	CHECK(c3.late.load() == 3 && c3.passthrough.load() == 3 && c3.used.load() == 0);  // blocks 0-2 late, 3-5 never sent
 }
 
 // Session without a network: the audio must come out unchanged and delayed by
@@ -1404,6 +1461,46 @@ static void test_subtitles()
 	for (char ch : srt)
 		lines += ch == '\n';
 	CHECK(lines == 5);  // number, time, two text lines, blank
+	// Two voices talking at once keep their full times; a voice's own cues are cut where its next one begins.
+	{
+		auto sc = [](double s, double e, const char *text, uint64_t voice) {
+			SrtCue x;
+			x.start = s;
+			x.end = e;
+			x.text = text;
+			x.voice = voice;
+			return x;
+		};
+		CHECK(make_srt({sc(0, 4, "Sam talks", 1), sc(2, 6, "Alex talks", 2)}) ==
+		      "1\n00:00:00,000 --> 00:00:04,000\nSam talks\n\n2\n00:00:02,000 --> 00:00:06,000\nAlex talks\n\n");
+		CHECK(make_srt({sc(0, 4, "first", 1), sc(2, 6, "second", 1)}) ==
+		      "1\n00:00:00,000 --> 00:00:02,000\nfirst\n\n2\n00:00:02,000 --> 00:00:06,000\nsecond\n\n");  // one voice: as before
+		CHECK(make_srt({sc(0, 4, "first", 0), sc(2, 6, "second", 0)}) == make_srt({sc(0, 4, "first", 5), sc(2, 6, "second", 5)}));
+		// Interleaved: Sam's first line is cut by Sam's next (at 3), and neither of Alex's lines by Sam's.
+		CHECK(make_srt({sc(0, 4, "Sam one", 1), sc(1, 6, "Alex one", 2), sc(3, 5, "Sam two", 1), sc(4, 8, "Alex two", 2)}) ==
+		      "1\n00:00:00,000 --> 00:00:03,000\nSam one\n\n"
+		      "2\n00:00:01,000 --> 00:00:04,000\nAlex one\n\n"
+		      "3\n00:00:03,000 --> 00:00:05,000\nSam two\n\n"
+		      "4\n00:00:04,000 --> 00:00:08,000\nAlex two\n\n");
+		// The voice goes from the recorder's cues into the file: two voices overlap there as well.
+		SubtitleRecorder vr;
+		vr.begin(at(0));
+		auto vcue = [&](double s, double e, const char *text, uint64_t voice) {
+			SubtitleCue x;
+			x.lang = "en";
+			x.start = at(s);
+			x.end = at(e);
+			x.text = text;
+			x.voice = voice;
+			vr.add(x);
+		};
+		vcue(1, 5, "Sam", 1);
+		vcue(3, 7, "Alex", 2);
+		const auto vf = vr.finish();
+		CHECK(vf.size() == 1 && vf[0].cues == 2);
+		if (vf.size() == 1)
+			CHECK(vf[0].srt == "1\n00:00:01,000 --> 00:00:05,000\nSam\n\n2\n00:00:03,000 --> 00:00:07,000\nAlex\n\n");
+	}
 	// Writing is atomic and replaces an old file.
 	const std::string path = (std::filesystem::temp_directory_path() / ("acw-srt-test-" + std::to_string(std::random_device{}()) + ".srt")).string();
 	std::string err;
@@ -2127,6 +2224,7 @@ int main()
 	test_input_advice();
 	test_room_test();
 	test_output_stage();
+	test_output_stage_frame_decided_before_it_was_sent();
 	test_session_passthrough(48000, 150);
 	test_session_passthrough(44100, 80);
 	test_reference_buffer();

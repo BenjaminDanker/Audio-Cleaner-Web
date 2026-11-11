@@ -11,11 +11,12 @@ namespace acw {
 
 ProcessedStore::ProcessedStore()
 	: pcm_(kSlots * kFrameSamples, 0.0f), arrived_(new std::atomic<uint64_t>[kSlots]),
-	  sent_(new std::atomic<uint64_t>[kSlots])
+	  sent_(new std::atomic<uint64_t>[kSlots]), skipped_(new std::atomic<uint64_t>[kSlots])
 {
 	for (size_t i = 0; i < kSlots; ++i) {
 		arrived_[i].store(0, std::memory_order_relaxed);
 		sent_[i].store(0, std::memory_order_relaxed);
+		skipped_[i].store(0, std::memory_order_relaxed);
 	}
 }
 
@@ -28,9 +29,16 @@ void ProcessedStore::publish(uint64_t seq, const float *pcm)
 	arrived_[slot].store(seq + 1, std::memory_order_release);
 }
 
-void ProcessedStore::mark_sent(uint64_t seq)
+bool ProcessedStore::mark_sent(uint64_t seq)
 {
-	sent_[static_cast<size_t>(seq % kSlots)].store(seq + 1, std::memory_order_release);
+	const size_t slot = static_cast<size_t>(seq % kSlots);
+	sent_[slot].store(seq + 1, std::memory_order_release);
+	return skipped_[slot].load(std::memory_order_acquire) != seq + 1;
+}
+
+void ProcessedStore::mark_skipped(uint64_t seq)
+{
+	skipped_[static_cast<size_t>(seq % kSlots)].store(seq + 1, std::memory_order_release);
 }
 
 const float *ProcessedStore::get(uint64_t seq) const
@@ -99,10 +107,12 @@ void OutputStage::decide(int64_t block)
 	} else {
 		modes_[i] = Mode::Orig;
 		ptrs_[i] = nullptr;
-		if (store_.was_sent(static_cast<uint64_t>(block)))
+		if (store_.was_sent(static_cast<uint64_t>(block))) {
 			counters_.late.fetch_add(1, std::memory_order_relaxed);
-		else
+		} else {
 			counters_.passthrough.fetch_add(1, std::memory_order_relaxed);
+			store_.mark_skipped(static_cast<uint64_t>(block));
+		}
 	}
 }
 

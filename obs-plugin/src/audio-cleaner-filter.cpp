@@ -323,6 +323,8 @@ struct SpeakerNames {
 	std::string left, right;
 };
 
+std::atomic<uint64_t> g_next_voice{1};  // see ac_filter::voice
+
 // What a "Create text source" button needs to know about its filter and language slot (-1 = the spoken language).
 struct overlay_button {
 	ac_filter *filter = nullptr;
@@ -356,9 +358,17 @@ struct ac_filter {
 	std::vector<float> mono;  // preallocated scratch for the downmix
 	std::vector<float> right; // ... and for the right side when it has its own session
 
+	// OBS runs with "low latency audio buffering" (Settings, Advanced): it drops sound that is stamped earlier than
+	// a few milliseconds ago, so the delayed sound cannot be back-dated there (the whole source went silent). It
+	// keeps its real time instead and is heard that much after the picture. Set once: OBS only reads it at start.
+	bool fixed_buffering = false;
+
 	// The speaker names put before each caption line. The sessions' callbacks read them, so a name can change
 	// without a new session (each key typed in the dialog is a settings change).
 	std::shared_ptr<SpeakerNames> names = std::make_shared<SpeakerNames>();
+	// This filter's number among the voices that share the captions (the right side of a split source is the next
+	// one): people at different microphones can talk at once, so their subtitle lines may overlap.
+	const uint64_t voice = g_next_voice.fetch_add(2);
 
 	// Where captions go; it outlives the sessions that call it (they hold a reference).
 	std::shared_ptr<acw::CaptionRouter> router;
@@ -524,26 +534,27 @@ acw::Session *make_session_unchecked(ac_filter *f, bool right)
 	std::shared_ptr<acw::CaptionRouter> router = f->router;
 	std::shared_ptr<SpeakerNames> names = f->names;
 	const std::string prefix = right ? "R/" : "";  // both sessions number their lines from l0
+	const uint64_t voice = f->voice + (right ? 1 : 0);
 	auto *session = new acw::Session(
 		cfg,
-		[router, names, right, prefix](const acw::CaptionEvent &ev) {
+		[router, names, right, prefix, voice](const acw::CaptionEvent &ev) {
 			if (!router)
 				return;
 			acw::CaptionEvent labelled = ev;
 			{
 				std::lock_guard<std::mutex> lk(names->mu);
-				acw::label_speaker(labelled, right ? names->right : names->left, prefix);
+				acw::label_speaker(labelled, right ? names->right : names->left, prefix, voice);
 			}
 			router->on_caption(labelled);
 		},
 		log_cb);
-	session->set_translation_callback([router, names, right, prefix](const acw::TranslationEvent &ev) {
+	session->set_translation_callback([router, names, right, prefix, voice](const acw::TranslationEvent &ev) {
 		if (!router)
 			return;
 		acw::TranslationEvent labelled = ev;
 		{
 			std::lock_guard<std::mutex> lk(names->mu);
-			acw::label_speaker(labelled, right ? names->right : names->left, prefix);
+			acw::label_speaker(labelled, right ? names->right : names->left, prefix, voice);
 		}
 		router->on_translation(labelled);
 	});
@@ -908,6 +919,11 @@ void *filter_create(obs_data_t *settings, obs_source_t *source)
 	}
 	if (f->sample_rate >= 8000 && f->sample_rate <= 48000)  // the rates the sessions support
 		f->reference = std::make_shared<acw::ReferenceBuffer>(static_cast<int>(f->sample_rate));
+	struct obs_audio_info2 audio_info = {};
+	f->fixed_buffering = obs_get_audio_info2(&audio_info) && audio_info.fixed_buffering;
+	if (f->fixed_buffering)
+		blog(LOG_WARNING, "[audio-cleaner] OBS uses low latency audio buffering: the filtered sound is heard after the "
+				  "picture by the filter's delay (turn that off in Settings, Advanced to keep them in sync)");
 
 	{
 		std::lock_guard<std::mutex> lk(f->mu);
@@ -990,6 +1006,27 @@ void filter_update(void *data, obs_data_t *settings)
 // ---------------------------------------------------------------------------
 // audio thread
 
+// The planes that carry the source's own sound. OBS has spread it over the project's speakers before the filters: a
+// stereo source sits on the front left and right of a surround layout (the other speakers are silent), a mono one on
+// every speaker but the subwoofer (in 5.1 on the subwoofer too: OBS's own table), and any other source fills them all.
+// Mixing the silent speakers in made the voice quieter (a stereo microphone in 5.1: a third of its level), and it came
+// back on all of them; a speaker left out here would keep the sound as it was before cleaning.
+size_t voice_planes(obs_source_t *parent, size_t nch, size_t *use)
+{
+	const enum speaker_layout native = parent ? obs_source_get_speaker_layout(parent) : SPEAKERS_UNKNOWN;
+	size_t n = 0;
+	if (nch > 2 && native == SPEAKERS_STEREO) {
+		use[n++] = 0;
+		use[n++] = 1;
+		return n;
+	}
+	const size_t lfe = nch == 3 ? 2 : (nch == 5 || nch == 8) ? 3 : nch;  // 2.1; 4.1, 7.1; else none is left silent
+	for (size_t c = 0; c < nch; ++c)
+		if (c != lfe || native != SPEAKERS_MONO)
+			use[n++] = c;
+	return n;
+}
+
 obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 {
 	auto *f = static_cast<ac_filter *>(data);
@@ -1010,10 +1047,12 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 		size_t nch = 0;
 		for (size_t c = 0; c < MAX_AV_PLANES && audio->data[c]; ++c)
 			planes[nch++] = reinterpret_cast<float *>(audio->data[c]);
+		size_t use[MAX_AV_PLANES];
+		const size_t nuse = voice_planes(parent, nch, use);
 
 		if (sr && nch >= 2) {
-			// Two people, one on each side: each side goes through its own session and stays on its side (more
-			// channels than two get the left side).
+			// Two people, one on each side: each side goes through its own session and stays on its side (the
+			// other speakers the source is on get the left side).
 			float *left = f->mono.data();
 			float *right = f->right.data();
 			size_t done = 0;
@@ -1025,35 +1064,36 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 				sr->process(right, n, muted);
 				std::copy(left, left + n, planes[0] + done);
 				std::copy(right, right + n, planes[1] + done);
-				for (size_t c = 2; c < nch; ++c)
-					std::copy(left, left + n, planes[c] + done);
+				for (size_t u = 0; u < nuse; ++u)
+					if (use[u] >= 2)
+						std::copy(left, left + n, planes[use[u]] + done);
 				done += n;
 			}
 			const double delay = s->delay_seconds();
-			if (delay > 0.0) {
+			if (delay > 0.0 && !f->fixed_buffering) {
 				const uint64_t d = static_cast<uint64_t>(delay * 1e9);
 				audio->timestamp = audio->timestamp > d ? audio->timestamp - d : 0;
 			}
-		} else if (nch > 0) {
+		} else if (nuse > 0) {
 			float *mono = f->mono.data();
-			const float inv = 1.0f / static_cast<float>(nch);
+			const float inv = 1.0f / static_cast<float>(nuse);
 			size_t done = 0;
 			while (done < audio->frames) {
 				const size_t n = std::min<size_t>(audio->frames - done, kMaxBlock);
 				for (size_t i = 0; i < n; ++i) {
-					float acc = planes[0][done + i];
-					for (size_t c = 1; c < nch; ++c)
-						acc += planes[c][done + i];
+					float acc = planes[use[0]][done + i];
+					for (size_t u = 1; u < nuse; ++u)
+						acc += planes[use[u]][done + i];
 					mono[i] = acc * inv;
 				}
 				s->process(mono, n, muted);
-				for (size_t c = 0; c < nch; ++c)
-					std::copy(mono, mono + n, planes[c] + done);
+				for (size_t u = 0; u < nuse; ++u)
+					std::copy(mono, mono + n, planes[use[u]] + done);
 				done += n;
 			}
 			// The output is the input delayed by D: back-date it so OBS keeps A/V in sync.
 			const double delay = s->delay_seconds();
-			if (delay > 0.0) {
+			if (delay > 0.0 && !f->fixed_buffering) {
 				const uint64_t d = static_cast<uint64_t>(delay * 1e9);
 				audio->timestamp = audio->timestamp > d ? audio->timestamp - d : 0;
 			}
@@ -1110,8 +1150,8 @@ std::string current_notice()
 	return g_notice;
 }
 
-// The plain-words status shown in the dialog. Called without the lock.
-std::string status_text(ac_filter *f)
+// What the filter is doing, in plain words. Called without the lock.
+std::string state_text(ac_filter *f)
 {
 	Settings st;
 	std::string line;
@@ -1138,6 +1178,8 @@ std::string status_text(ac_filter *f)
 			line = replace_all(replace_all(T_("AudioCleaner.Status.Sides"), "%1", line), "%2", sr->status_line(localized));
 		if (!st.echo_source.empty() && !f->ref_weak)
 			line += std::string(" ") + T_("AudioCleaner.Status.EchoWaiting");
+		if (f->fixed_buffering)
+			line += " " + replace_all(T_("AudioCleaner.Status.FixedBuffering"), "%1", std::to_string(st.latency_ms));
 	}
 	if (st.captions_wanted()) {
 		if (st.effective_captions().empty())
@@ -1160,6 +1202,14 @@ std::string status_text(ac_filter *f)
 			if (!text_source_exists(n.c_str()))
 				line += " " + replace_all(T_("AudioCleaner.Status.OverlayMissing"), "%1", n);
 	}
+	return line;
+}
+
+// The status shown in the dialog: what the filter is doing, then what the last "Create text source" press did (text
+// sources are mostly set up before going live, so that has to show whatever the filter is doing).
+std::string status_text(ac_filter *f)
+{
+	std::string line = state_text(f);
 	const std::string notice = current_notice();
 	if (!notice.empty())
 		line += " " + notice;
@@ -1270,7 +1320,9 @@ bool group_modified(obs_properties_t *props, obs_property_t *, obs_data_t *setti
 	return true;
 }
 
-// "Create text source for <language>": makes the source (not in any scene: the user adds it with "Add Existing") and
+void refresh_texts(ac_filter *f, obs_properties_t *props);
+
+// "Create text source": makes the source (not in any scene: the user adds it with "Add Existing") and
 // chooses it for that language. Runs on OBS's UI thread (a button click already does; obs_queue_task makes sure).
 bool create_overlay_clicked(obs_properties_t *props, obs_property_t *, void *data)
 {
@@ -1316,14 +1368,10 @@ bool create_overlay_clicked(obs_properties_t *props, obs_property_t *, void *dat
 			}
 		}
 	});
-	// From the UI thread (this is) the source exists and is chosen by now: show it in the lists. The dialog keeps its
-	// list of controls between redraws, so they have to be refilled here.
-	Settings cur;
-	{
-		std::lock_guard<std::mutex> lk(f->mu);
-		cur = f->settings;
-	}
-	refresh_group(props, cur);
+	// From the UI thread (this is) the source exists and is chosen by now: show it in the lists, and what was done
+	// (with what is left to do) in the status. The dialog keeps its list of controls between redraws, so they have
+	// to be refilled here.
+	refresh_texts(f, props);
 	return true;
 }
 

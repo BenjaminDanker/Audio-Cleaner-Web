@@ -66,7 +66,7 @@ Right-click an audio source > Filters > `+` > **Audio Cleaner (cloud)**.
   punctuation are kept; letters the format lacks (Polish ł, Czech č, Turkish ş ...) are written with plain ones.
   Twitch viewers switch captions on with the CC button; on YouTube choose *Embedded 608/708* captions for the stream in
   YouTube Studio first. Both show one caption track.
-* **On-screen text** - for the spoken language and for each translation: **Create text source for <language>** makes an OBS
+* **On-screen text** - for the spoken language and for each translation: **Create text source** under a language makes an OBS
   text source called "Audio Cleaner captions (<language>)" (GDI+ text on Windows, FreeType 2 text elsewhere; large white
   bold text with an outline, wrapped in a 1600 pixel box at the bottom) and chooses it; **On-screen text for <language>**
   picks any existing text source instead. The source is **not added to any scene**: put it where you want it with
