@@ -42,6 +42,8 @@ void mark(acw::LiveOutput o, bool active)
 }
 
 // What OBS says is running: only ever adds (an output that is "starting" is not running yet, and its event told us).
+// A paused recording records nothing, so it does not count: the sessions end after the grace period like after a stop
+// (and with them the billing), and new ones start when the recording goes on.
 bool poll_outputs()
 {
 	bool added = false;
@@ -50,7 +52,7 @@ bool poll_outputs()
 		bool on;
 	} now[] = {
 		{acw::LiveOutput::Stream, obs_frontend_streaming_active()},
-		{acw::LiveOutput::Recording, obs_frontend_recording_active()},
+		{acw::LiveOutput::Recording, obs_frontend_recording_active() && !obs_frontend_recording_paused()},
 		{acw::LiveOutput::Replay, obs_frontend_replay_buffer_active()},
 		{acw::LiveOutput::VirtualCam, obs_frontend_virtualcam_active()},
 	};
@@ -78,9 +80,11 @@ void on_frontend_event(enum obs_frontend_event event, void *)
 			break;
 		case OBS_FRONTEND_EVENT_RECORDING_STARTING:
 		case OBS_FRONTEND_EVENT_RECORDING_STARTED:
+		case OBS_FRONTEND_EVENT_RECORDING_UNPAUSED:
 			mark(acw::LiveOutput::Recording, true);
 			break;
 		case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
+		case OBS_FRONTEND_EVENT_RECORDING_PAUSED:
 			mark(acw::LiveOutput::Recording, false);
 			break;
 		case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTING:

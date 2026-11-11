@@ -38,17 +38,39 @@ std::string make_srt(std::vector<SrtCue> cues, size_t line_chars)
 			c.end = std::max(std::min(c.end, next->second), c.start + 0.2);
 		next_start[c.voice] = c.start;
 	}
-	std::string out;
-	int n = 0;
+	// A long sentence becomes several cues of at most two lines (what players and video sites show comfortably), one
+	// after the other, each on screen for its share of the sentence's time.
+	constexpr size_t kCueLines = 2;
+	struct Piece {
+		double start, end;
+		std::string text;
+	};
+	std::vector<Piece> pieces;
 	for (const SrtCue &c : cues) {
 		const std::vector<std::string> lines = split_caption_lines(c.text, std::max<size_t>(8, line_chars));
-		if (lines.empty())
-			continue;
-		out += std::to_string(++n) + "\n" + srt_time(c.start) + " --> " + srt_time(c.end) + "\n";
+		size_t total = 0;
 		for (const std::string &l : lines)
-			out += l + "\n";
-		out += "\n";
+			total += std::max<size_t>(1, utf8_count(l));
+		size_t done = 0;
+		double at = c.start;
+		for (size_t i = 0; i < lines.size(); i += kCueLines) {
+			const size_t last = std::min(lines.size(), i + kCueLines);
+			Piece p{at, c.end, std::string()};
+			for (size_t j = i; j < last; ++j) {
+				done += std::max<size_t>(1, utf8_count(lines[j]));
+				p.text += lines[j] + "\n";
+			}
+			if (last < lines.size())
+				p.end = c.start + (c.end - c.start) * static_cast<double>(done) / static_cast<double>(total);
+			at = p.end;
+			pieces.push_back(std::move(p));
+		}
 	}
+	std::stable_sort(pieces.begin(), pieces.end(), [](const Piece &a, const Piece &b) { return a.start < b.start; });
+	std::string out;
+	int n = 0;
+	for (const Piece &p : pieces)
+		out += std::to_string(++n) + "\n" + srt_time(p.start) + " --> " + srt_time(p.end) + "\n" + p.text + "\n";
 	return out;
 }
 

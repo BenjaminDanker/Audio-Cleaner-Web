@@ -62,7 +62,7 @@ function ObsSetup() {
         <li>Create an API key on this page with <b>OBS plugin and live</b> switched on, and copy it.</li>
         <li>Download and install the Audio Cleaner OBS plugin below. You need OBS 31 or newer; restart OBS afterwards.</li>
         <li>In OBS, add the <b>Audio Cleaner (cloud)</b> filter to your microphone source and paste the key.</li>
-        <li>Pick how much delay you can live with (80, 150 or 250 ms), turn on captions if you want them, and go live.</li>
+        <li>Pick how much delay you can live with (150 or 250 ms), turn on captions if you want them, and go live.</li>
       </ol>
       <PluginInstall />
       <p className="small muted mb0">Address for the plugin: <span className="mono">{streamUrl()}</span></p>

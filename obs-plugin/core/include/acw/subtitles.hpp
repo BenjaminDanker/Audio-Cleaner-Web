@@ -31,7 +31,8 @@ struct SrtCue {
 };
 
 // The text of an SRT file: cues in time order, a voice's own cues never overlapping (two voices talking at once do),
-// long text wrapped into lines of at most `line_chars`.
+// long text wrapped into lines of at most `line_chars` and shown two lines at a time (a longer cue becomes several, each
+// for its share of the time).
 std::string make_srt(std::vector<SrtCue> cues, size_t line_chars = 42);
 
 // "/videos/2026-10-16 12-00-00.mkv" + "es" -> "/videos/2026-10-16 12-00-00.es.srt" (lang "" -> "... .srt").

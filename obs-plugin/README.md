@@ -30,7 +30,10 @@ The plugin tells you when a newer one exists and installs it for you (see "Updat
 
 Right-click an audio source > Filters > `+` > **Audio Cleaner (cloud)**.
 
-* **API key** - create a dedicated key on the website with *OBS plugin and live* ticked.
+* **API key** - create a dedicated key on the website with *OBS plugin and live* ticked. A key typed in while the filter
+  waits for an output is checked with the service a moment later (the connection is opened as a session's would be and
+  closed again at once: nothing starts, nothing is billed), and the status says whether it works. A key that was already
+  saved is not asked about when OBS starts.
 * **Remove background noise** and **How much noise to remove** - Gentle / Balanced / Strong / Maximum (attenuation limit
   12 / 24 / 40 / 100 dB, the same levels as the website and the desktop app; changeable while streaming).
 * **Echo cancellation** - the source that plays through your speakers, default *Desktop Audio*; *None* turns it off.
@@ -80,12 +83,12 @@ Right-click an audio source > Filters > `+` > **Audio Cleaner (cloud)**.
   recording stops, saved next to it: `<recording without extension>.<language>.srt`, for example `2026-10-16 12-00-00.es.srt`
   (the spoken language of Standard captions is `en`; with *Detect automatically* the spoken file has no language in the name:
   `2026-10-16 12-00-00.srt`). Players such as VLC pick them up by themselves. Times are the service's own, so they are as exact
-  as the captions (within a fraction of a second of the video). With a recording split into several files only the last one
+  as the captions (within a fraction of a second of the video). A long sentence is shown two lines at a time. With a recording split into several files only the last one
   gets the file.
-* **Delay** - Low 80 ms, Balanced 150 ms, Safe 250 ms. Fixed for the whole session; changing it restarts the session. See below.
+* **Delay** - Balanced 150 ms or Safe 250 ms. Fixed for the whole session; changing it restarts the session. See below.
 * **Check for updates when OBS starts** (bottom of the dialog, on by default) - see "Update notice" below. It is one
   setting for the whole plugin, not per filter.
-* **Status** (press *Refresh status*): plain words about what is going on, plus *Try again* when the service refused
+* **Status** (the first thing in the dialog; press *Refresh status*): plain words about what is going on, plus *Try again* when the service refused
   something only you can fix (see "When something is wrong"). **Advanced** holds the server address, the audio format
   (compact Opus by default, ~60 kbps each way; uncompressed 16-bit PCM, ~770 kbps, as a fallback) and a technical line
   (round trip, frame counters).
@@ -94,7 +97,8 @@ Right-click an audio source > Filters > `+` > **Audio Cleaner (cloud)**.
 session, and so nothing is billed, until OBS is streaming, recording, running the replay buffer or running the virtual
 camera. The session starts as soon as one of them is *starting* (so processing is ready when the output begins) and ends
 about 10 seconds after the last one has stopped (a stream that restarts, or a recording that stops and starts again, keeps
-the same session). In between the microphone plays normally, unprocessed, and the status says "Waiting for you to go live
+the same session). A paused recording counts as stopped: the session ends 10 seconds into the pause and a new one starts
+when the recording goes on, so the first moment after resuming is not cleaned yet. In between the microphone plays normally, unprocessed, and the status says "Waiting for you to go live
 or record: nothing is billed until then." Outputs made by other plugins (a second stream, Source Record, NDI) are not
 seen: untick the box when you need the filter for those, or to test it without streaming. Without the OBS frontend API
 (a build with `ENABLE_FRONTEND_API=OFF`) the setting is not shown and the filter always runs.
@@ -174,7 +178,8 @@ keeps audio and video in sync (OBS adds audio buffering automatically). *Monitor
 If a processed frame misses its deadline, or the connection is down, the delayed *original* audio is played
 (5 ms cross-fade), so the audio never stops. Rule of thumb for the round-trip budget: `D - 30 ms (model) - 6.5 ms (Opus) - 25 ms (framing)`
 (and `- 9 ms` with echo cancellation, which delays the audio that much):
-Low leaves ~12 ms with Opus (a server on your own network only; ~3 ms with echo cancellation), Balanced ~85 ms (~76), Safe ~185 ms (~176).
+Balanced leaves ~85 ms with Opus (~76 ms with echo cancellation), Safe ~185 ms (~176). (Up to 0.1.11 there was also Low, 80 ms:
+it left ~12 ms, which no connection over the internet meets, so nothing was cleaned. A filter saved with it now uses Balanced.)
 The cliff is sharp: beyond the budget every frame is late. The filter watches this (a few seconds of frames) and the status
 tells you when the delay is too short. OBS at 44.1 kHz is resampled
 (linear-phase polyphase, 44.1 <-> 48 kHz); other rates are passed through unchanged with a status warning.
@@ -242,7 +247,7 @@ Apple, TLS 1.2 at most). Override with `-DACW_TLS_BACKEND=`. `-DACW_USE_OPUS=OFF
 
 Layout: `core/` OBS-independent library `acw_core` (SPSC rings, reframer, resampler, protocol, WebSocket thread, output stage,
 echo reference buffer, caption pacer, caption router (which language goes where), on-screen text logic, subtitle files (SRT),
-choice of the outputs to caption, the live-only decision (`LiveGate`), language lists, updates: the signed manifest check (Monocypher Ed25519 + SHA-512), the download,
+choice of the outputs to caption, the live-only decision (`LiveGate`), the API key check, language lists, updates: the signed manifest check (Monocypher Ed25519 + SHA-512), the download,
 and the installers that swap the plugin when OBS closes); `src/` thin OBS glue (`audio-cleaner-filter.cpp` the filter and its
 properties, `caption-output.cpp` the closed captions, `live-state.cpp` the stream / recording / replay buffer / virtual camera events, `text-sources.cpp` the on-screen text sources, `subtitle-files.cpp` the
 subtitle files, `update-notice.cpp` runs the check and, on the button, the download and install); `tests/` unit tests, `core_loopback_test` (the real session against a

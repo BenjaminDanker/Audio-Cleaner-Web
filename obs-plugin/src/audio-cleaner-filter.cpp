@@ -58,6 +58,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "acw/languages.hpp"
 #include "acw/reference.hpp"
 #include "acw/input_advice.hpp"
+#include "acw/key_check.hpp"
 #include "acw/session.hpp"
 
 #include <algorithm>
@@ -165,7 +166,7 @@ struct Settings {
 	bool split = false;               // left and right are different people: one session per side
 	std::string speaker_r;            // the right side's name when split
 	int strength = 100;            // attenuation limit in dB: 12 / 24 / 40 / 100 (same levels as the website and desktop app)
-	int latency_ms = 150;          // 80 / 150 / 250
+	int latency_ms = 150;          // 150 / 250
 	std::string codec = "opus";    // opus | pcm
 	std::string echo_source = ECHO_DESKTOP;  // name of the source that plays through the speakers
 	bool live_only = true;  // a session only while an output runs (false = always, as before; always false without the frontend API)
@@ -388,6 +389,11 @@ struct ac_filter {
 		float age_s;
 	};
 	std::vector<RetiredTap> retired_taps;
+
+	// A key (or server address) typed into the dialog is checked with the service once it has stood for a moment, while
+	// the filter waits for an output to start: a wrong key shows now, not at the moment of going live.
+	float key_wait_s = -1.0f;  // seconds since the key last changed (negative: nothing to check)
+	bool key_asked = false;    // the answer is still to be shown in an open dialog
 };
 
 Settings read_settings(obs_data_t *d)
@@ -412,7 +418,7 @@ Settings read_settings(obs_data_t *d)
 	s.speaker_r = obs_data_get_string(d, S_SPEAKER_R);
 	s.strength = static_cast<int>(obs_data_get_int(d, S_STRENGTH));
 	s.latency_ms = static_cast<int>(obs_data_get_int(d, S_LATENCY));
-	if (s.latency_ms != 80 && s.latency_ms != 250)
+	if (s.latency_ms != 250)
 		s.latency_ms = 150;
 	s.codec = obs_data_get_string(d, S_CODEC) == std::string("pcm") ? "pcm" : "opus";
 	s.echo_source = obs_data_get_string(d, S_ECHO_SOURCE);
@@ -440,6 +446,10 @@ Settings read_settings(obs_data_t *d)
 // Only at load: while a new filter is being set up in the dialog the same signs (a key, no other choice yet) mean nothing.
 void migrate_settings(obs_data_t *d)
 {
+	// The 80 ms delay is gone (it left no time for the sound to come back, so nothing was cleaned): a filter saved with
+	// it gets the usual one.
+	if (obs_data_get_int(d, S_LATENCY) == 80)
+		obs_data_set_int(d, S_LATENCY, 150);
 	if (obs_data_has_user_value(d, S_CFG_VERSION))
 		return;
 	if (obs_data_has_user_value(d, S_API_KEY)) {
@@ -496,6 +506,12 @@ void apply_outputs(ac_filter *f)
 	}
 }
 
+// What the plugin calls itself to the service.
+std::string client_name()
+{
+	return std::string("obs-audio-cleaner/") + PLUGIN_VERSION;
+}
+
 // Called with the lock held. Creates the session for the current settings and starts its network thread
 // (it only connects once audio flows, so this costs nothing while the filter is idle).
 // What a session of this filter does with the current settings (`right`: the right side's own session).
@@ -518,7 +534,7 @@ acw::SessionConfig session_config(const ac_filter *f, bool right)
 		cfg.reference = f->reference;  // one listener per echo buffer: the left side's session (or the only one)
 		cfg.echo = !s.echo_source.empty();  // echo removal can be switched on and off while the session runs
 	}
-	cfg.client = std::string("obs-audio-cleaner/") + PLUGIN_VERSION;
+	cfg.client = client_name();
 	return cfg;
 }
 
@@ -735,6 +751,39 @@ acw::AdviceContext advice_context(const Settings &s)
 
 void apply_live_locked(ac_filter *f);
 
+// The filter has all it needs and only waits for an output to start. Called with the lock held.
+bool waiting_for_live(const ac_filter *f)
+{
+	return f->enabled && f->settings.configured() && f->settings.live_only && !f->live_on;
+}
+
+// Asks the service about a key that was typed into the dialog (see ac_filter::key_wait_s), and makes an open dialog show
+// the answer. Only while the filter waits for an output: a session that runs says what is wrong with its key itself.
+// Called with the lock held, about once a second.
+void check_key(ac_filter *f, float elapsed_s)
+{
+	const Settings &s = f->settings;
+	try {
+		if (f->key_wait_s >= 0.0f) {
+			f->key_wait_s += elapsed_s;
+			if (f->key_wait_s >= 2.0f) {  // the typing has stopped
+				f->key_wait_s = -1.0f;
+				if (waiting_for_live(f)) {
+					acw::ask_key(s.url, s.api_key, client_name());
+					f->key_asked = true;
+				}
+			}
+		}
+		if (f->key_asked && !acw::key_check_running(s.url, s.api_key)) {
+			f->key_asked = false;
+			if (acw::key_verdict(s.url, s.api_key) != acw::KeyVerdict::Unknown)
+				obs_source_update_properties(f->context);
+		}
+	} catch (const std::exception &e) {
+		obs_log(LOG_WARNING, "could not check the API key: %s", e.what());  // the audio is not affected
+	}
+}
+
 // Graphics thread, every frame: retry the listening about once a second.
 void filter_tick(void *data, float seconds)
 {
@@ -758,6 +807,7 @@ void filter_tick(void *data, float seconds)
 	}
 	live_state_poll();      // an output that started without us hearing of it
 	apply_live_locked(f);   // ... and the end of the grace period after the last output stopped
+	check_key(f, elapsed);
 }
 
 // Ends a session that is no longer reachable through f->session. Called with the lock held.
@@ -984,6 +1034,10 @@ void filter_update(void *data, obs_data_t *settings)
 	const Settings prev = f->settings;
 	f->settings = next;
 	f->room_refusal = nullptr;  // the settings it was about may have changed
+	if (prev.api_key != next.api_key || prev.url != next.url) {
+		f->key_wait_s = 0.0f;  // checked once the typing has stopped (see check_key)
+		f->key_asked = false;
+	}
 	if (!prev.same_session_as(next)) {
 		if (!prev.same_connection_as(next) || !change_sessions(f)) {
 			rebuild_session(f);  // also applies the outputs
@@ -1168,8 +1222,19 @@ std::string state_text(ac_filter *f)
 									    : T_("AudioCleaner.Status.CaptionsNotSent");
 			return T_("AudioCleaner.Status.NothingEnabled");
 		}
-		if (st.live_only && !f->live_on)
+		if (st.live_only && !f->live_on) {
+			switch (acw::key_verdict(st.url, st.api_key)) {  // (only there for a key typed in since OBS started)
+			case acw::KeyVerdict::Wrong:
+				return T_("AudioCleaner.Status.KeyWrong");
+			case acw::KeyVerdict::Refused:
+				return T_("AudioCleaner.Status.KeyRefused");
+			case acw::KeyVerdict::Accepted:
+				return std::string(T_("AudioCleaner.Status.KeyAccepted")) + " " + T_("AudioCleaner.Status.WaitingLive");
+			case acw::KeyVerdict::Unknown:
+				break;
+			}
 			return T_("AudioCleaner.Status.WaitingLive");
+		}
 		acw::Session *s = f->session.load();
 		if (!s)
 			return T_("AudioCleaner.Status.NotRunning");
@@ -1205,11 +1270,22 @@ std::string state_text(ac_filter *f)
 	return line;
 }
 
+// A source that carries what the computer plays (Desktop Audio and the like), not a microphone.
+bool plays_computer_sound(obs_source_t *src)
+{
+	const char *id = src ? obs_source_get_unversioned_id(src) : nullptr;
+	const std::string kind = id ? id : "";
+	return kind == "wasapi_output_capture" || kind == "pulse_output_capture" || kind == "coreaudio_output_capture";
+}
+
 // The status shown in the dialog: what the filter is doing, then what the last "Create text source" press did (text
 // sources are mostly set up before going live, so that has to show whatever the filter is doing).
 std::string status_text(ac_filter *f)
 {
 	std::string line = state_text(f);
+	// Cleaning a guest's voice there is fine, so this is only said, never refused.
+	if (plays_computer_sound(obs_filter_get_parent(f->context)))
+		line += std::string(" ") + T_("AudioCleaner.Status.DesktopSource");
 	const std::string notice = current_notice();
 	if (!notice.empty())
 		line += " " + notice;
@@ -1522,6 +1598,11 @@ bool retry_clicked(obs_properties_t *props, obs_property_t *, void *data)
 			s->retry_now();
 		if (acw::Session *s = f->session_r.load())
 			s->retry_now();
+		if (waiting_for_live(f) && acw::key_verdict(f->settings.url, f->settings.api_key) != acw::KeyVerdict::Accepted) {
+			// The key was not taken (or never asked about): ask again, the answer shows in a moment.
+			acw::ask_key(f->settings.url, f->settings.api_key, client_name(), true);
+			f->key_asked = true;
+		}
 	}
 	refresh_texts(f, props);
 	return true;
@@ -1634,6 +1715,15 @@ obs_properties_t *filter_properties(void *data)
 						   T_(state == UPDATE_INSTALL_FAILED ? "AudioCleaner.Update.TryAgain" : "AudioCleaner.Update.Download"),
 						   update_download_clicked, nullptr);
 	}
+
+	// What the filter is doing, before everything else: it is what one opens the dialog for. Read-only: for
+	// OBS_TEXT_INFO the dialog shows the description when the stored value is empty, so the text is never written to the
+	// scene file.
+	const std::string st = f ? status_text(f) : std::string();
+	obs_property_t *status = obs_properties_add_text(p, S_STATUS, st.c_str(), OBS_TEXT_INFO);
+	obs_property_text_set_info_word_wrap(status, true);
+	obs_properties_add_button2(p, S_REFRESH, T_("AudioCleaner.RefreshStatus"), refresh_status_clicked, f);
+	obs_properties_add_button2(p, S_RETRY, T_("AudioCleaner.RetryNow"), retry_clicked, f);
 
 	obs_property_t *key = obs_properties_add_text(p, S_API_KEY, T_("AudioCleaner.ApiKey"), OBS_TEXT_PASSWORD);
 	obs_property_set_long_description(key, T_("AudioCleaner.ApiKey.Long"));
@@ -1762,7 +1852,6 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_t *lat = obs_properties_add_list(p, S_LATENCY, T_("AudioCleaner.Latency"), OBS_COMBO_TYPE_LIST,
 						      OBS_COMBO_FORMAT_INT);
 	obs_property_set_long_description(lat, T_("AudioCleaner.Latency.Long"));
-	obs_property_list_add_int(lat, T_("AudioCleaner.Latency.Low"), 80);
 	obs_property_list_add_int(lat, T_("AudioCleaner.Latency.Balanced"), 150);
 	obs_property_list_add_int(lat, T_("AudioCleaner.Latency.Safe"), 250);
 
@@ -1771,14 +1860,6 @@ obs_properties_t *filter_properties(void *data)
 		obs_property_set_long_description(live, T_("AudioCleaner.LiveOnly.Long"));
 		obs_property_text_set_info_word_wrap(obs_properties_add_text(p, "hint_live_only", T_("AudioCleaner.Hint.LiveOnly"), OBS_TEXT_INFO), true);
 	}
-
-	// Read-only status: for OBS_TEXT_INFO the dialog shows the description when the
-	// stored value is empty, so the text is never written to the scene file.
-	const std::string st = f ? status_text(f) : std::string();
-	obs_property_t *status = obs_properties_add_text(p, S_STATUS, st.c_str(), OBS_TEXT_INFO);
-	obs_property_text_set_info_word_wrap(status, true);
-	obs_properties_add_button2(p, S_REFRESH, T_("AudioCleaner.RefreshStatus"), refresh_status_clicked, f);
-	obs_properties_add_button2(p, S_RETRY, T_("AudioCleaner.RetryNow"), retry_clicked, f);
 
 	// "Test my room": twenty seconds of talking, then the settings that fit, put in place on request.
 	obs_property_t *room = obs_properties_add_text(p, S_ROOM_INFO, f ? room_text(f).c_str() : T_("AudioCleaner.Room.Hint"), OBS_TEXT_INFO);
@@ -1820,6 +1901,7 @@ obs_properties_t *filter_properties(void *data)
 // Called when the plugin unloads: lets network threads that had to be detached finish before the code goes.
 extern "C" void audio_cleaner_shutdown(void)
 {
+	acw::stop_key_checks(1500);
 	acw::wait_for_background_threads(1500);
 }
 

@@ -181,7 +181,7 @@ export default function DevelopersLive() {
       <Section id="client" title="Building a client">
         <ul>
           <li>Never block the audio thread: ring buffers in and out, with the network on its own thread.</li>
-          <li>Pick a fixed output delay D when you start (round trip plus 30 ms plus a safety margin; the plugin offers 80, 150 and 250 ms) and don&rsquo;t change it during the session. Date the output audio D later. If a cleaned frame misses its time, play the delayed original for that frame (cross-fade by 10 ms or less).</li>
+          <li>Pick a fixed output delay D when you start (round trip plus 30 ms plus a safety margin; the plugin offers 150 and 250 ms) and don&rsquo;t change it during the session. Date the output audio D later. If a cleaned frame misses its time, play the delayed original for that frame (cross-fade by 10 ms or less).</li>
           <li>Reconnect with growing waits and a little randomness. Keep passing the microphone through unprocessed while disconnected, and say why in your status.</li>
           <li>Show the state: connected, round trip, D, late or dropped frames, balance and spending limit warnings.</li>
           <li>Echo cancellation: capture the chosen source, mix it to mono, resample to 48 kHz, keep it in a lock-free buffer, and cut one reference frame for each microphone frame. Skip silent frames. Allow 9 ms more for D.</li>

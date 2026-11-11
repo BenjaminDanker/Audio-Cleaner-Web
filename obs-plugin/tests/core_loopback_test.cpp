@@ -3,6 +3,7 @@
 // internet, no account). The real Session runs its network thread against an IXWebSocket server that
 // plays the part of the service: it echoes frames, answers with errors, delays replies, sends garbage.
 // Run under ASan/UBSan and TSan in CI.
+#include "acw/key_check.hpp"
 #include "acw/reference.hpp"
 #include "acw/session.hpp"
 #include "acw/update_check.hpp"
@@ -1196,6 +1197,133 @@ static void test_http_refusals()
 	in_parallel(jobs);
 }
 
+// Is this key good? (key_check.hpp) The connection is opened as a session opens it and closed again, nothing is started; the answer
+// of a pair is kept and asked for only once, and a pair that got no answer can be asked again.
+static void test_key_check()
+{
+	std::printf("key check\n");
+	const std::string client = "acw-test";
+	auto verdict_is = [](const std::string &url, const std::string &key, KeyVerdict want) {
+		return wait_until([&] { return key_verdict(url, key) == want; }, 5000);
+	};
+	auto idle = [](const std::string &url, const std::string &key) {
+		return wait_until([&] { return !key_check_running(url, key); }, 5000);
+	};
+	// Once the question is no longer running its answer is there: nothing is waited for between the two looks.
+	auto answered_when_done = [](const std::string &url, const std::string &key, KeyVerdict want) {
+		bool done = wait_until([&] { return !key_check_running(url, key); }, 10000);
+		return done && key_verdict(url, key) == want;  // (immediately)
+	};
+	std::vector<std::function<void()>> jobs;
+	jobs.push_back([&] {
+		std::printf("  answered when no longer running\n");
+		FakeServer ok;
+		ask_key(ok.url(), "fresh-good", client);
+		CHECK(answered_when_done(ok.url(), "fresh-good", KeyVerdict::Accepted));
+		FakeHttp wrong;
+		wrong.status = 401;
+		ask_key(wrong.url(), "fresh-wrong", client);
+		CHECK(answered_when_done(wrong.url(), "fresh-wrong", KeyVerdict::Wrong));
+	});
+	jobs.push_back([&] {
+		std::printf("  accepted\n");
+		FakeServer srv;
+		const std::string url = srv.url();
+		CHECK(key_verdict(url, "good") == KeyVerdict::Unknown);  // not asked yet
+		ask_key(url, "good", client);
+		CHECK(verdict_is(url, "good", KeyVerdict::Accepted));
+		CHECK(idle(url, "good"));
+		CHECK(wait_until([&] { return srv.opens.load() == 1; }, 3000));
+		std::this_thread::sleep_for(milliseconds(200));
+		CHECK(srv.opens.load() == 1 && srv.starts.load() == 0 && srv.mic.load() == 0);  // opened and closed: nothing started
+		ask_key(url, "good", client);  // it has its answer: not asked again
+		std::this_thread::sleep_for(milliseconds(300));
+		CHECK(srv.opens.load() == 1 && key_verdict(url, "good") == KeyVerdict::Accepted && !key_check_running(url, "good"));
+		ask_key(url, "good", client, true);  // unless asked to
+		CHECK(wait_until([&] { return srv.opens.load() == 2; }, 3000));
+		CHECK(verdict_is(url, "good", KeyVerdict::Accepted) && idle(url, "good"));
+		CHECK(key_verdict(url, "another") == KeyVerdict::Unknown);  // every key has its own answer
+	});
+	struct C {
+		int status;
+		KeyVerdict want;
+		const char *what;
+	};
+	for (const C c : {C{401, KeyVerdict::Wrong, "401 (unknown key)"}, C{403, KeyVerdict::Refused, "403 (not for live audio)"}})
+		jobs.push_back([&, c] {
+			std::printf("  %s\n", c.what);
+			FakeHttp srv;
+			srv.status = c.status;
+			const std::string url = srv.url();
+			ask_key(url, "k", client);
+			CHECK(verdict_is(url, "k", c.want));
+			CHECK(idle(url, "k"));
+			ask_key(url, "k", client);  // an answer is an answer, also this one
+			std::this_thread::sleep_for(milliseconds(300));
+			CHECK(srv.requests.load() == 1 && key_verdict(url, "k") == c.want);
+		});
+	jobs.push_back([&] {
+		std::printf("  no answer, asked again\n");
+		FakeHttp srv;
+		srv.status = 502;  // the service is up but not answering about keys
+		const std::string url = srv.url();
+		ask_key(url, "k", client);
+		CHECK(wait_until([&] { return srv.requests.load() == 1; }, 3000) && idle(url, "k"));
+		CHECK(key_verdict(url, "k") == KeyVerdict::Unknown);
+		ask_key(url, "k", client);  // nothing was answered: this is asked again, without `again`
+		CHECK(wait_until([&] { return srv.requests.load() == 2; }, 3000) && idle(url, "k"));
+		CHECK(key_verdict(url, "k") == KeyVerdict::Unknown);
+		srv.status = 401;
+		ask_key(url, "k", client);
+		CHECK(verdict_is(url, "k", KeyVerdict::Wrong));
+	});
+	jobs.push_back([&] {
+		std::printf("  nothing listening\n");
+		const std::string url = "ws://127.0.0.1:" + std::to_string(ix::getFreePort()) + "/x";
+		ask_key(url, "k", client);
+		CHECK(idle(url, "k"));
+		std::this_thread::sleep_for(milliseconds(200));
+		CHECK(key_verdict(url, "k") == KeyVerdict::Unknown && !key_check_running(url, "k"));
+	});
+	jobs.push_back([&] {
+		std::printf("  nothing asked\n");
+		FakeServer srv;
+		const std::string port = srv.url().substr(srv.url().rfind(':') + 1);  // "<port>/x"
+		const std::string urls[] = {"ws://example.com/x", "ws://203.0.113.5/x", "ws://127.0.0.1.evil.example/x", "http://127.0.0.1:" + port, ""};
+		ask_key(srv.url(), "", client);  // no key
+		CHECK(!key_check_running(srv.url(), ""));
+		for (const std::string &u : urls) {  // an address a session would not use either: the key never goes there
+			ask_key(u, "k", client);
+			CHECK(!key_check_running(u, "k") && key_verdict(u, "k") == KeyVerdict::Unknown);
+		}
+		std::this_thread::sleep_for(milliseconds(300));
+		CHECK(srv.opens.load() == 0);
+	});
+	in_parallel(jobs);
+}
+
+// Last of all: stop_key_checks() ends the questions for the whole process, so nothing can be asked after it.
+static void test_key_check_stops()
+{
+	std::printf("key check stops\n");
+	FakeWeb web;
+	web.set("/x", "<hang>");  // a service that takes the connection and never answers
+	const std::string url = "ws://127.0.0.1:" + std::to_string(web.getPort()) + "/x";
+	ask_key(url, "slow", "acw-test");
+	CHECK(wait_until([&] { return web.requests.load() == 1; }, 3000));
+	CHECK(key_check_running(url, "slow"));
+	const auto t0 = steady_clock::now();
+	CHECK(stop_key_checks(5000));  // the connection that is being made is given up, the thread is gone
+	CHECK(duration_cast<milliseconds>(steady_clock::now() - t0).count() < 4000);
+	CHECK(!key_check_running(url, "slow") && key_verdict(url, "slow") == KeyVerdict::Unknown);
+	FakeServer srv;
+	ask_key(srv.url(), "late", "acw-test");  // nothing can be asked now
+	ask_key(srv.url(), "late", "acw-test", true);
+	std::this_thread::sleep_for(milliseconds(300));
+	CHECK(srv.opens.load() == 0 && !key_check_running(srv.url(), "late") && key_verdict(srv.url(), "late") == KeyVerdict::Unknown);
+	CHECK(stop_key_checks(100));  // (and again: nothing is left)
+}
+
 static void test_ready_validation()
 {
 	std::printf("ready message: invalid numbers are refused, not played\n");
@@ -2148,6 +2276,7 @@ int main(int argc, char **argv)
 	test_translations();
 	test_never_breaks_the_stream();
 	test_http_refusals();
+	test_key_check();
 	test_ready_validation();
 	test_captions_only();
 	test_return_audio();
@@ -2157,6 +2286,7 @@ int main(int argc, char **argv)
 	test_stop_paths();
 	test_update_check();
 	test_update_download();
+	test_key_check_stops();  // (ends every later key check)
 	ix::uninitNetSystem();
 	std::printf("\n%d checks, %d failures\n", g_checks.load(), g_failures.load());
 	return g_failures ? 1 : 0;

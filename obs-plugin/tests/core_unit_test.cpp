@@ -1461,6 +1461,42 @@ static void test_subtitles()
 	for (char ch : srt)
 		lines += ch == '\n';
 	CHECK(lines == 5);  // number, time, two text lines, blank
+	// A caption of more than two lines is shown two lines at a time, each piece for its share (by characters) of the time,
+	// one after the other inside the original cue (the lines here are 10, 10 and 5 characters: 20/25 of the time, then 5/25).
+	{
+		auto lc2 = [](double s, double e, const char *text, uint64_t voice = 0) {
+			SrtCue x;
+			x.start = s;
+			x.end = e;
+			x.text = text;
+			x.voice = voice;
+			return x;
+		};
+		const std::string three = "1\n00:00:00,000 --> 00:00:04,000\naaaaaaaaaa\nbbbbbbbbbb\n\n2\n00:00:04,000 --> 00:00:05,000\nccccc\n\n";
+		CHECK(make_srt({lc2(0, 5, "aaaaaaaaaa bbbbbbbbbb ccccc")}, 10) == three);
+		// Characters are counted, not bytes: the same shares for lines of 10, 10 and 5 letters with accents.
+		CHECK(make_srt({lc2(0, 5, "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9 "
+					  "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9 ccccc")}, 10)
+		      .find("00:00:04,000 --> 00:00:05,000\nccccc\n") != std::string::npos);
+		// Five lines of 10, 10, 10, 10 and 5 over nine seconds: three pieces, contiguous, ending where the cue ends.
+		CHECK(make_srt({lc2(0, 9, "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeee")}, 10) ==
+		      "1\n00:00:00,000 --> 00:00:04,000\naaaaaaaaaa\nbbbbbbbbbb\n\n"
+		      "2\n00:00:04,000 --> 00:00:08,000\ncccccccccc\ndddddddddd\n\n"
+		      "3\n00:00:08,000 --> 00:00:09,000\neeeee\n\n");
+		// Another voice talking meanwhile keeps its own time, and the pieces are in the order they begin.
+		CHECK(make_srt({lc2(0, 4, "aaaaaaaaaa bbbbbbbbbb ccccc", 1), lc2(1, 3, "Alex", 2)}, 10) ==
+		      "1\n00:00:00,000 --> 00:00:03,200\naaaaaaaaaa\nbbbbbbbbbb\n\n"
+		      "2\n00:00:01,000 --> 00:00:03,000\nAlex\n\n"
+		      "3\n00:00:03,200 --> 00:00:04,000\nccccc\n\n");
+		// The same voice's next cue cuts the whole caption short: its pieces share the shortened time.
+		CHECK(make_srt({lc2(0, 10, "aaaaaaaaaa bbbbbbbbbb ccccc", 1), lc2(5, 6, "next", 1)}, 10) ==
+		      "1\n00:00:00,000 --> 00:00:04,000\naaaaaaaaaa\nbbbbbbbbbb\n\n"
+		      "2\n00:00:04,000 --> 00:00:05,000\nccccc\n\n"
+		      "3\n00:00:05,000 --> 00:00:06,000\nnext\n\n");
+		// Short captions are as they were, and a caption with no words makes no cue (nor a number).
+		CHECK(make_srt({lc2(0, 2, "one line"), lc2(2, 3, "   "), lc2(3, 4, "aaaaaaaaaa bbbbbbbbbb")}, 10) ==
+		      "1\n00:00:00,000 --> 00:00:02,000\none line\n\n2\n00:00:03,000 --> 00:00:04,000\naaaaaaaaaa\nbbbbbbbbbb\n\n");
+	}
 	// Two voices talking at once keep their full times; a voice's own cues are cut where its next one begins.
 	{
 		auto sc = [](double s, double e, const char *text, uint64_t voice) {
