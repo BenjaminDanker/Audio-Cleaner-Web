@@ -440,3 +440,20 @@ def test_a_self_service_refund_never_pays_out_the_bonus(monkeypatch):
     _fake_refunds(monkeypatch, fee_cents=175)
     assert stripe_service.refund_unused(uid, "pay_b") == 5000 - 175
     assert ledger.balance(uid)["balance_micros"] == 0  # the bonus went with the payment, nothing left to spend
+
+
+def test_a_refused_self_service_refund_leaves_the_bonus_where_it_is(monkeypatch):
+    uid = auth.get_or_create_user("refused@example.com")["id"]
+    now = db.now()
+    db.execute(
+        "INSERT INTO payments(id, user_id, kind, status, amount_cents, refunded_cents, tax_cents, stripe_charge, created_at, updated_at)"
+        " VALUES ('pay_s', ?, 'checkout', 'succeeded', 5000, 0, 0, 'ch_s', ?, ?)", (uid, now, now))
+    ledger.credit(uid, 5000 * 10_000, "topup", "payment", "pay_s")
+    ledger.credit(uid, 1_000_000, "grant", "payment_bonus", "pay_s")
+    refunds = _fake_refunds(monkeypatch, fee_cents=175)
+    _spend(uid, 5000)  # all that was bought is used: only the bonus is left, and that is never paid out
+    with pytest.raises(ValueError, match="No unused credit"):
+        stripe_service.refund_unused(uid, "pay_s")
+    assert refunds == []
+    assert ledger.balance(uid)["balance_micros"] == 1_000_000  # the bonus is still there to spend
+    assert db.one("SELECT COUNT(*) n FROM ledger WHERE user_id = ? AND ref_type = 'payment_bonus_back'", (uid,))["n"] == 0

@@ -683,7 +683,6 @@ def refund_unused(user_id: str, payment_id: str) -> int:
         raise ValueError("This payment can't be refunded.")
     if db.now() - p["created_at"] > REFUND_DAYS * 86400:
         raise ValueError(f"Payments older than {REFUND_DAYS} days can't be refunded online; contact support.")
-    take_back_bonus(user_id, payment_id)
     refundable = refundable_cents(p, bought_micros(user_id))
     if refundable <= 0:
         raise ValueError("No unused credit to refund from this payment.")
@@ -692,6 +691,9 @@ def refund_unused(user_id: str, payment_id: str) -> int:
     fee = card_fee_cents(p) if p["refunded_cents"] == 0 else 0
     if refundable <= fee:
         raise ValueError(f"The unused credit (${refundable / 100:.2f}) doesn't cover the card fee (${fee / 100:.2f}).")
+    # Only now that the refund goes ahead: a refund that is refused above leaves the bonus where it is. (Taking it
+    # back lowers the available and the given credit alike, so `refundable` is the same before and after.)
+    take_back_bonus(user_id, payment_id)
     to_card = refundable - fee
     gross = to_card + tax_part(to_card, p["amount_cents"], p["tax_cents"])
     hold_id = ledger.create_hold(user_id, refundable * MICROS_PER_CENT, "refund", payment_id)

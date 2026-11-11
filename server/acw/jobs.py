@@ -277,13 +277,18 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
 REBUILD_PAUSED = "Voice rebuilding is paused right now. Try again later, or choose Denoising."
 
 
+TOO_SHORT = "This file is too short to process (under half a second)."
+
+
 def check_duration(kind: str, denoise_tier: str | None, seconds: float) -> None:
     """The length of the file fits the job, and the job can be done now (the voice rebuild runs only on the GPU)."""
     from .broker import rebuild_available
 
     if denoise_tier == "rebuild" and kind != "transcribe" and not rebuild_available():
         raise JobError(REBUILD_PAUSED)
-    if not 0.5 <= seconds <= pricing.MAX_JOB_SECONDS:
+    if seconds < 0.5:
+        raise JobError(TOO_SHORT)
+    if seconds > pricing.MAX_JOB_SECONDS:
         raise JobError(f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours.")
     if denoise_tier == "rebuild" and kind != "transcribe" and seconds > pricing.MAX_REBUILD_SECONDS:
         raise JobError(
@@ -388,7 +393,9 @@ def estimate_timeline(kind: str, denoise_tier: str | None, transcribe_tier: str 
     from . import edit_prices, edit_subtitles, editing
 
     tl, d_tier = editing.prepare_timeline_job(kind, denoise_tier, options, duration_seconds, timeline, transcribe_tier)
-    if not 0.5 <= duration_seconds <= pricing.MAX_JOB_SECONDS:
+    if duration_seconds < 0.5:
+        raise JobError(TOO_SHORT)
+    if duration_seconds > pricing.MAX_JOB_SECONDS:
         raise JobError(f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours.")
     opts = validate_options(editing.options_kind(kind, tl), d_tier, transcribe_tier, options)
     rates = edit_prices.step_rates()

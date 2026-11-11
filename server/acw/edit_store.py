@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import stat
 from pathlib import Path
@@ -246,6 +247,8 @@ def cache_size(job_id: str) -> int:
     except OSError:
         return 0
 SCRATCH_NAMES = {"decoded.f32", "reference.f32", "echo-free.npy", "cleaned.npy", "kept-decoded.f32", "spec.json", "main-state.json"}
+# ... and the files a stage leaves under names of its own: its result, the browser's audio, the editor's scratch arrays and blocks
+_SCRATCH_FILE = re.compile(r"result-[a-z]+\.json(\.tmp)?|browser-\d+\.(f32|npy)|editor-.+-[0-9a-f]{8}(\.npy)?")
 STAGED = ".run"  # the audio an edit run made, under this extra ending, until the run is complete (`swap_in`)
 BACKUP = ".bak"  # ... and the audio it replaces, while the run is being committed
 
@@ -307,7 +310,7 @@ def clear_scratch(d: Path) -> None:
             if n.endswith(STAGED) and not p.is_dir():
                 p.unlink(missing_ok=True)
                 continue
-            if n in SCRATCH_NAMES or n.startswith(("result-", "editor-", "browser-")) or n == "asr_chunks":
+            if n in SCRATCH_NAMES or _SCRATCH_FILE.fullmatch(n) or n == "asr_chunks":
                 if p.is_dir() and not p.is_symlink():
                     shutil.rmtree(p, ignore_errors=True)
                 else:

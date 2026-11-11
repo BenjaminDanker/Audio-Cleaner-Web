@@ -74,6 +74,31 @@ def test_one_account_cannot_reserve_more_than_8_gb_of_uploads_and_a_size_must_fi
         make_job(uid, size_bytes=4 * GB, claimed_seconds=0.5)
 
 
+def test_a_file_under_half_a_second_is_called_too_short_and_one_over_the_maximum_too_long():
+    uid = user()
+    too_long = f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours."
+    tl = {"version": 1, "seconds": 0.3, "layers": {"noise": [{"start": 0, "end": 0.3, "strength_db": 40, "remover": "light"}]}}
+    for seconds in (0.0, 0.3, 0.49):
+        with pytest.raises(jobs.JobError) as e:
+            jobs.check_duration("denoise", "standard", seconds)  # (what an estimate and a new job check first)
+        assert str(e.value) == jobs.TOO_SHORT
+        with pytest.raises(jobs.JobError) as e:
+            make_job(uid, claimed_seconds=seconds)
+        assert str(e.value) == jobs.TOO_SHORT
+    with pytest.raises(jobs.JobError) as e:
+        jobs.estimate_timeline("denoise", None, None, 0.3, {}, tl)
+    assert str(e.value) == jobs.TOO_SHORT
+    jobs.check_duration("denoise", "standard", 0.5)  # (half a second is enough)
+    for over in (pricing.MAX_JOB_SECONDS + 1, 10 * pricing.MAX_JOB_SECONDS):
+        with pytest.raises(jobs.JobError) as e:
+            jobs.check_duration("denoise", "standard", over)
+        assert str(e.value) == too_long
+        with pytest.raises(jobs.JobError) as e:
+            jobs.estimate_timeline("denoise", None, None, over, {}, {**tl, "seconds": over})
+        assert str(e.value) == too_long
+    assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 0  # a refused job leaves nothing behind
+
+
 def test_an_upload_that_sends_nothing_is_canceled_after_ten_minutes_and_the_money_comes_back():
     uid = user()
     before = ledger.balance(uid)["held_micros"]

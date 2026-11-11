@@ -761,3 +761,19 @@ def test_audio_that_was_being_put_in_place_when_the_process_stopped_is_put_back_
     (d / "talk-cleaned.flac.run").write_bytes(b"x")
     edit_store.clear_scratch(d)
     assert (d / "talk-cleaned.flac").read_bytes() == b"OLD AUDIO" and not {n for n in files_of(jid) if n.endswith((".bak", ".run"))}
+
+
+def test_clearing_the_scratch_removes_what_a_run_leaves_and_keeps_files_that_only_look_like_it(tmp_path):
+    d = tmp_path / "job"
+    d.mkdir()
+    scratch = ["result-main.json", "result-edit.json.tmp", "browser-0.f32", "browser-12.npy", "editor-cleaned-1a2b3c4d.npy", "editor-blocks-1a2b3c4d",
+               "decoded.f32", "spec.json"]
+    kept = ["result-final.wav", "result-.json", "editor-notes.txt", "editor-notes-final.wav", "browser-export.mp3", "browser-1.mp3", "talk.wav"]
+    for n in scratch + kept:
+        if n == "editor-blocks-1a2b3c4d":  # (a folder: the editor's blocks)
+            (d / n).mkdir()
+            (d / n / "0.npy").write_bytes(b"x")
+        else:
+            (d / n).write_bytes(b"x")
+    edit_store.clear_scratch(d)
+    assert {p.name for p in d.iterdir()} == set(kept)
