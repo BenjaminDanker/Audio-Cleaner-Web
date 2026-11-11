@@ -144,7 +144,7 @@ offset size  field
 
 ```json
 {"type": "caption", "text": "...", "final": true, "start": 12.34, "end": 15.02}
-{"type": "caption", "text": "partial words", "final": false, "id": "item_..."}   // premium only
+{"type": "caption", "text": "partial words", "final": false, "id": "l12"}   // the line so far, while it is said
 {"type": "warning", "code": "low_balance", "secondsLeft": 180, "availableMicros": 0}
 {"type": "warning", "code": "trial_low", "secondsLeft": 290}   // free trial: sent once, at 5 minutes left (or at once if less is left at the start)
 {"type": "warning", "code": "trial_used_up_now_paid", "usdPerMinute": 0.01}   // the trial ran out and the session went on from credit (a hold is set aside now); no audio is dropped
@@ -162,9 +162,11 @@ the OBS plugin and the website do), `no_audio` (**microphone audio arrived for l
 was revoked, or the browser session ended; checked every 30 s). A session replaced by a newer one of the same
 account (see `too_many_sessions`) is closed with WebSocket code 1001 and no event.
 
-`start`/`end` are seconds of audio since the session started. Local captions
-arrive once per utterance (~1-3 s after the speaker pauses); premium captions
-also stream partial text.
+`start`/`end` are seconds of audio since the session started. Both kinds of captions stream the line while it is
+said: non-final events carry the whole line so far (standard: about every half second while it changes; extra
+accurate: as the words come), each replacing the one before with the same `id`, and the final event of that `id`
+closes it (standard: ~1-3 s after the speaker pauses). The last word of a non-final line may be cut off ("hel"
+before "hello"); the OBS plugin shows every word but the last until the next one has started.
 
 ### Translations (optional)
 
@@ -270,9 +272,11 @@ behave exactly as described above.
   audio capture callback, downmix to mono, resample to 48 kHz and keep it in a
   lock-free buffer; the audio thread cuts one reference frame per microphone
   frame from it. Skip silent frames. Budget 9 ms more for D.
-- Captions: forward `final` captions to `obs_output_output_caption_text2`
+- Captions: forward captions to `obs_output_output_caption_text2`
   on the streaming output, paced (≤ 32 chars per line, don't queue a
-  backlog), or to a text source. The embedded caption track carries one
+  backlog; the line being said is sent again as it grows), or to a text
+  source (word by word, replaced by the final line). Subtitle files take
+  `final` captions only. The embedded caption track carries one
   language (Latin script only); further languages (`translation` events) go
   to text sources and to one subtitle file per language next to a recording.
 - A stopped session is not the end: after `no_audio` (and `idle_timeout`)

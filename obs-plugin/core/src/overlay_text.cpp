@@ -19,20 +19,62 @@ double OverlayText::hold_for(const std::string &line) const
 
 void OverlayText::rebuild()
 {
+	std::vector<std::string> lines;
+	for (const Shown &l : shown_)
+		lines.push_back(l.text);
+	for (const auto &kv : live_)
+		for (std::string &l : split_caption_lines(kv.second, std::max<size_t>(8, opt_.line_chars)))
+			lines.push_back(std::move(l));
+	const size_t max_lines = std::max<size_t>(1, opt_.max_lines);
 	text_.clear();
-	for (size_t i = 0; i < shown_.size(); ++i) {
-		if (i > 0)
+	for (size_t i = lines.size() > max_lines ? lines.size() - max_lines : 0; i < lines.size(); ++i) {
+		if (!text_.empty())
 			text_ += '\n';
-		text_ += shown_[i].text;
+		text_ += lines[i];
 	}
 }
 
-void OverlayText::push(const std::string &text, double now)
+bool OverlayText::live_text() const
 {
-	for (std::string &l : split_caption_lines(text, std::max<size_t>(8, opt_.line_chars)))
+	for (const auto &kv : live_)
+		if (!kv.second.empty())
+			return true;
+	return false;
+}
+
+void OverlayText::push(const std::string &text, double now, uint64_t voice)
+{
+	std::vector<std::string> lines = split_caption_lines(text, std::max<size_t>(8, opt_.line_chars));
+	const auto live = live_.find(voice);
+	if (live != live_.end()) {
+		// Its words are on screen already: the final version goes up in their place, now.
+		live_.erase(live);
+		const double t = std::max(now, last_reveal_);
+		for (std::string &l : lines) {
+			shown_.push_back(Shown{std::move(l), t + opt_.min_line_s});
+			while (shown_.size() > std::max<size_t>(1, opt_.max_lines))
+				shown_.pop_front();
+		}
+		last_reveal_ = t;
+		clear_at_ = t + opt_.clear_after_s;
+		rebuild();
+		return;
+	}
+	for (std::string &l : lines)
 		pending_.push_back(Line{std::move(l), now});
 	while (pending_.size() > std::max<size_t>(1, opt_.max_pending))
 		pending_.pop_front();
+}
+
+void OverlayText::set_live(uint64_t voice, const std::string &text, double now)
+{
+	std::string &have = live_[voice];
+	if (have == text)
+		return;
+	have = text;
+	if (!text.empty())
+		clear_at_ = now + opt_.clear_after_s;
+	rebuild();
 }
 
 // When the front waiting line may go up: at once while there is room, otherwise when the oldest line on screen has
@@ -62,8 +104,11 @@ bool OverlayText::update(double now)
 		clear_at_ = t + std::max(opt_.clear_after_s, hold);
 		pending_.pop_front();
 	}
-	if (pending_.empty() && !shown_.empty() && now >= clear_at_)
+	if (pending_.empty() && (!shown_.empty() || live_text()) && now >= clear_at_) {
 		shown_.clear();
+		for (auto &kv : live_)
+			kv.second.clear();  // (a voice that went quiet without a final: its next words start a fresh screen)
+	}
 	rebuild();
 	return text_ != before;
 }
@@ -80,7 +125,7 @@ double OverlayText::seconds_until_change(double now) const
 		const Line &l = pending_.front();
 		const size_t max_lines = std::max<size_t>(1, opt_.max_lines);
 		consider(reveal_time(l.arrived, shown_.size(), max_lines, shown_.empty() ? 0.0 : shown_.front().ready_at, last_reveal_) - now);
-	} else if (!shown_.empty()) {
+	} else if (!shown_.empty() || live_text()) {
 		consider(clear_at_ - now);
 	}
 	return best;
@@ -88,6 +133,7 @@ double OverlayText::seconds_until_change(double now) const
 
 void OverlayText::clear()
 {
+	live_.clear();
 	pending_.clear();
 	shown_.clear();
 	text_.clear();
@@ -201,14 +247,26 @@ void OverlayDisplay::set_targets(const std::map<std::string, OverlayText::Option
 	st_->cv.notify_all();
 }
 
-void OverlayDisplay::push(const std::string &target, const std::string &text)
+void OverlayDisplay::push(const std::string &target, const std::string &text, uint64_t voice)
 {
 	{
 		std::lock_guard<std::mutex> lk(st_->mu);
 		auto it = st_->entries.find(target);
 		if (it == st_->entries.end() || st_->stop)
 			return;
-		it->second.text.push(text, st_->now_s());
+		it->second.text.push(text, st_->now_s(), voice);
+	}
+	st_->cv.notify_all();
+}
+
+void OverlayDisplay::set_live(const std::string &target, uint64_t voice, const std::string &text)
+{
+	{
+		std::lock_guard<std::mutex> lk(st_->mu);
+		auto it = st_->entries.find(target);
+		if (it == st_->entries.end() || st_->stop)
+			return;
+		it->second.text.set_live(voice, text, st_->now_s());
 	}
 	st_->cv.notify_all();
 }

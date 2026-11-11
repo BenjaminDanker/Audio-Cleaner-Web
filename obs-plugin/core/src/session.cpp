@@ -93,7 +93,7 @@ constexpr uint64_t kLateMinFrames = 100;  // ... needs at least this many frames
 constexpr double kLateSetPct = 30.0;     // more than this many percent late: the link is too slow
 constexpr double kLateClearPct = 15.0;   // ... until it is below this again
 constexpr int kFramingMs = 25;           // 20 ms frame + 5 ms cross-fade: what the delay budget loses to framing
-constexpr size_t kMaxCaptionBytes = 4000;  // a translation longer than this is cut (the service sends sentences)
+constexpr size_t kMaxCaptionBytes = 4000;  // a translation (or a caption still being said) longer than this is cut
 constexpr int kOpusMinBitrate = 24000;   // the lowest the server accepts: enough when only captions are wanted
 
 bool is_secure_url(const std::string &u)
@@ -1310,10 +1310,10 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			break;
 		}
 		case EventType::Caption:
-			if (ev.is_final && !ev.text.empty()) {
+			if (ev.is_final ? !ev.text.empty() : !ev.caption_id.empty()) {
 				CaptionEvent ce;
-				ce.text = ev.text;
-				ce.is_final = true;
+				ce.text = ev.is_final ? ev.text : settled_words(ev.text.substr(0, kMaxCaptionBytes));
+				ce.is_final = ev.is_final;
 				ce.start = ev.start;
 				ce.end = ev.end;
 				ce.id = ev.caption_id;

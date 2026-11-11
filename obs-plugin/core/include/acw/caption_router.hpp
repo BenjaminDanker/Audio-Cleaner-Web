@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Where the captions and translations of one filter go: the closed-caption channel (one language), an on-screen
-// text source per language, and the subtitle recorder. OBS independent: the plugin supplies the three sinks.
+// text source per language, and the subtitle recorder. OBS independent: the plugin supplies the sinks. A caption still
+// being said goes to the closed captions and the on-screen text word by word; the subtitle files only get final ones
+// (they are read later: the final words are the better ones). Translations come per caption, once it is final.
 #pragma once
 
 #include "acw/caption_events.hpp"
@@ -34,6 +36,9 @@ class CaptionRouter {
 public:
 	struct Sinks {
 		std::function<void(const std::string &text)> closed_caption;                                  // the paced caption channel
+		// ... a caption of the spoken language as far as it has been said (`key`: the same for all its versions).
+		// Not set: closed captions get final captions only.
+		std::function<void(const std::string &key, const std::string &text, bool final)> closed_caption_live;
 		std::function<void(const std::string &source, const std::string &text)> overlay;               // set a text source's text
 		std::function<void(const SubtitleCue &cue)> subtitle;                                          // a cue for the recording's files
 	};

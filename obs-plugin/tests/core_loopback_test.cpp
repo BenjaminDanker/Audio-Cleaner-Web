@@ -1359,6 +1359,49 @@ static void test_ready_validation()
 	in_parallel(jobs);
 }
 
+static void test_live_captions()
+{
+	std::printf("live captions: a caption being said arrives word by word (settled words), then final\n");
+	FakeServer srv;
+	{
+		std::lock_guard<std::mutex> lk(srv.mu);
+		srv.after_ready =
+			"{\"type\":\"caption\",\"id\":\"l7\",\"text\":\"hello\",\"final\":false}\n"
+			"{\"type\":\"caption\",\"id\":\"l7\",\"text\":\"hello wor\",\"final\":false}\n"
+			"{\"type\":\"caption\",\"text\":\"no id here\",\"final\":false}\n"
+			"{\"type\":\"caption\",\"id\":\"l7\",\"text\":\"hello world\",\"final\":true,\"start\":1.0,\"end\":2.0}";
+	}
+	std::mutex mu;
+	std::vector<CaptionEvent> caps;
+	SessionConfig cfg = base_config(srv.url());
+	cfg.denoise = false;
+	cfg.captions = "local";
+	Session s(cfg,
+		  [&](const CaptionEvent &e) {
+			  std::lock_guard<std::mutex> lk(mu);
+			  caps.push_back(e);
+		  },
+		  nullptr);
+	s.start();
+	Feeder f(s, nullptr);
+	CHECK(wait_until([&] { std::lock_guard<std::mutex> lk(mu); return caps.size() >= 3; }, 5000));
+	std::this_thread::sleep_for(milliseconds(200));
+	{
+		std::lock_guard<std::mutex> lk(mu);
+		// "hello" alone has no settled word, but is still delivered (an empty text: it clears nothing, the router ignores
+		// it); "hello wor" -> "hello"; no id: dropped; the final as it was said.
+		CHECK(caps.size() == 3);
+		if (caps.size() == 3) {
+			CHECK(!caps[0].is_final && caps[0].id == "l7" && caps[0].text.empty());
+			CHECK(!caps[1].is_final && caps[1].id == "l7" && caps[1].text == "hello");
+			CHECK(caps[2].is_final && caps[2].id == "l7" && caps[2].text == "hello world");
+			CHECK(caps[1].origin == caps[2].origin);
+		}
+	}
+	f.stop();
+	s.stop(0, 500);
+}
+
 static void test_captions_only()
 {
 	std::printf("captions only: smallest return stream, captions delivered, audio untouched\n");
@@ -2279,6 +2322,7 @@ int main(int argc, char **argv)
 	test_key_check();
 	test_ready_validation();
 	test_captions_only();
+	test_live_captions();
 	test_return_audio();
 	test_silence_frames();
 	test_network_thread_sleeps();

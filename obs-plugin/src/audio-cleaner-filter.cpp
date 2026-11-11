@@ -37,8 +37,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * (unreachable, slow, ends the session) the microphone audio keeps passing through
  * unprocessed; captions just stop and the status says why.
  *
- * Captions: the final captions (and their translations, when chosen) go through a
- * per-filter acw::CaptionRouter to: the paced closed-caption channel (one language),
+ * Captions: the captions (word by word while they are said, then final) and their
+ * translations, when chosen, go through a per-filter acw::CaptionRouter to: the paced closed-caption channel (one language),
  * OBS text sources (one per language, on screen) and the subtitle files written next
  * to recordings (subtitle-files.cpp). Everything about which output gets what is
  * decided in the OBS-independent core; this file only wires the settings to it.
@@ -487,6 +487,9 @@ acw::CaptionRouter::Sinks make_sinks()
 {
 	acw::CaptionRouter::Sinks sinks;
 	sinks.closed_caption = [](const std::string &text) { caption_output_push(text.c_str()); };
+	sinks.closed_caption_live = [](const std::string &key, const std::string &text, bool final) {
+		caption_output_push_live(key.c_str(), text.c_str(), final);
+	};
 	sinks.overlay = [](const std::string &source, const std::string &text) { text_source_set_text(source.c_str(), text.c_str()); };
 	sinks.subtitle = [](const acw::SubtitleCue &cue) { subtitle_files_add(cue); };
 	return sinks;

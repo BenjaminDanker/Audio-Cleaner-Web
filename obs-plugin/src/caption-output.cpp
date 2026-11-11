@@ -198,3 +198,12 @@ extern "C" void caption_output_push(const char *text)
 	if (g_pacer)
 		g_pacer->push(text);
 }
+
+extern "C" void caption_output_push_live(const char *key, const char *text, bool final)
+{
+	if (!key || !text)
+		return;
+	std::lock_guard<std::mutex> lk(g_mu);
+	if (g_pacer)
+		g_pacer->push_live(key, text, final);
+}

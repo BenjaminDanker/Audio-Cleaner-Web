@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <iterator>
 #include <memory>
 
 namespace acw {
@@ -249,6 +250,15 @@ struct CaptionPacer::State {
 	std::mutex mu;
 	std::condition_variable cv;
 	std::deque<Item> q;
+	// Captions being said: per key, how many of its lines are queued or sent as complete, the line that is growing
+	// and the version of it that went out last.
+	struct Live {
+		size_t done = 0;
+		std::string line, sent;
+		std::chrono::steady_clock::time_point changed;
+	};
+	std::map<std::string, Live> live;
+	std::deque<std::string> finished;  // keys whose final came (a late piece of them is ignored)
 	bool enabled = true;
 	bool stop = false;
 	bool done = false;
@@ -263,19 +273,67 @@ struct CaptionPacer::State {
 		return std::max(opt.min_gap_seconds, static_cast<double>(chars) / opt.chars_per_second);
 	}
 
+	// The display time handed on with a line that is followed by the next one after `gap`. OBS takes it as the time
+	// before it may send its next caption (the line stays up until it is replaced): longer than the gap, captions
+	// would queue up in OBS and fall further and further behind the talk. A frame less, so video frame steps never add up.
+	static double display_for(double gap) { return std::max(0.1, gap - 0.05); }
+
+	// Called with `mu` held: queues a complete line, making room by dropping the oldest lines (never this one).
+	void enqueue(const std::string &line, std::chrono::steady_clock::time_point now, double ahead)
+	{
+		using Clock = std::chrono::steady_clock;
+		while (!q.empty() && q.size() + 1 > opt.max_queue_lines) {
+			q.pop_front();
+			dropped.fetch_add(1);
+		}
+		const auto fresh = now + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(opt.stale_seconds + ahead));
+		q.push_back(Item{line, now, fresh});
+	}
+
+	// Called with `mu` held: the growing line that has changed since it went out, the one that changed first.
+	Live *next_live()
+	{
+		Live *best = nullptr;
+		for (auto &kv : live) {
+			Live &l = kv.second;
+			if (!l.line.empty() && l.line != l.sent && (!best || l.changed < best->changed))
+				best = &l;
+		}
+		return best;
+	}
+
 	void run()
 	{
 		using Clock = std::chrono::steady_clock;
 		Clock::time_point not_before = Clock::now();
 		std::unique_lock<std::mutex> lk(mu);
 		while (!stop) {
-			if (q.empty()) {
+			Live *grow = q.empty() ? next_live() : nullptr;
+			if (q.empty() && !grow) {
 				cv.wait(lk);
 				continue;
 			}
 			const auto now = Clock::now();
 			if (now < not_before) {
 				cv.wait_until(lk, not_before);
+				continue;
+			}
+			if (grow) {
+				// Only the newest version is sent; what it adds to the version on screen sets the pace.
+				const std::string line = grow->line;
+				const size_t added = grow->sent.size() < line.size() && line.compare(0, grow->sent.size(), grow->sent) == 0
+							     ? utf8_count(line.substr(grow->sent.size()))
+							     : utf8_count(line);
+				grow->sent = line;
+				const double gap = std::max(opt.live_min_gap_seconds, static_cast<double>(added) / opt.chars_per_second);
+				const bool en = enabled;
+				lk.unlock();
+				if (en) {
+					send(line, display_for(gap));
+					sent.fetch_add(1);
+				}
+				lk.lock();
+				not_before = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(gap));
 				continue;
 			}
 			Item it = std::move(q.front());
@@ -287,13 +345,12 @@ struct CaptionPacer::State {
 			const bool en = enabled;
 			lk.unlock();
 			const size_t chars = utf8_count(it.line);
+			const double gap = gap_for(chars);
 			if (en) {
-				const double dur = std::min(4.0, std::max(1.5, static_cast<double>(chars) / 12.0));
-				send(it.line, dur);
+				send(it.line, display_for(gap));
 				sent.fetch_add(1);
 			}
 			lk.lock();
-			const double gap = gap_for(chars);
 			not_before = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(gap));
 		}
 		{
@@ -362,13 +419,62 @@ void CaptionPacer::push(const std::string &text_in)
 	st.cv.notify_all();
 }
 
+void CaptionPacer::push_live(const std::string &key, const std::string &text_in, bool final)
+{
+	State &st = *st_;
+	std::string text = text_in;
+	bool unshowable = false;
+	if (st.opt.cea608) {
+		double lost = 0.0;
+		text = to_cea608(text_in, &lost);
+		unshowable = lost > 0.5;  // as in push(): better nothing than gibberish
+	}
+	const std::vector<std::string> lines = unshowable ? std::vector<std::string>() : split_caption_lines(text, st.opt.max_chars);
+	using Clock = std::chrono::steady_clock;
+	const auto now = Clock::now();
+	{
+		std::lock_guard<std::mutex> lk(st.mu);
+		if (!st.enabled || st.stop)
+			return;
+		if (std::find(st.finished.begin(), st.finished.end(), key) != st.finished.end())
+			return;
+		// A caption whose final never came (the connection dropped while it was said) is let go after a while.
+		for (auto it = st.live.begin(); it != st.live.end();)
+			it = it->first != key && now - it->second.changed > std::chrono::seconds(30) ? st.live.erase(it) : std::next(it);
+		State::Live &lv = st.live[key];
+		const size_t complete = final ? lines.size() : (lines.empty() ? 0 : lines.size() - 1);
+		double ahead = 0.0;
+		for (size_t i = lv.done; i < complete; ++i) {
+			if (i == lv.done && lines[i] == lv.sent)
+				continue;  // on screen as it is
+			st.enqueue(lines[i], now, ahead);
+			ahead += st.gap_for(utf8_count(lines[i]));
+		}
+		if (complete > lv.done) {
+			lv.done = complete;
+			lv.sent.clear();
+		}
+		lv.line = !final && lines.size() > lv.done ? lines[lv.done] : std::string();
+		lv.changed = now;
+		if (final) {
+			st.live.erase(key);
+			st.finished.push_back(key);
+			while (st.finished.size() > 32)
+				st.finished.pop_front();
+		}
+	}
+	st.cv.notify_all();
+}
+
 void CaptionPacer::set_enabled(bool on)
 {
 	{
 		std::lock_guard<std::mutex> lk(st_->mu);
 		st_->enabled = on;
-		if (!on)
+		if (!on) {
 			st_->q.clear();
+			st_->live.clear();
+		}
 	}
 	st_->cv.notify_all();
 }
@@ -383,6 +489,7 @@ void CaptionPacer::stop(int timeout_ms)
 		s.stop = true;
 		s.enabled = false;
 		s.q.clear();
+		s.live.clear();
 	}
 	s.cv.notify_all();
 	bool ok;

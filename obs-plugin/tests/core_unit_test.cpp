@@ -359,7 +359,7 @@ static void test_caption_lines()
 	CaptionPacer p(
 		[&](const std::string &line, double dur) {
 			std::lock_guard<std::mutex> lk(m);  // runs on the pacer's thread: record, check on this one
-			if (!(dur >= 1.5 && dur <= 4.0))
+			if (!(dur >= 0.1 - 1e-9 && dur <= 0.3))  // gap - 0.05, at least 0.1 (the gap here is 0.05)
 				bad_durations = true;
 			sent.push_back(line);
 		},
@@ -1792,6 +1792,525 @@ static void test_caption_router()
 }
 
 // ---------------------------------------------------------------------------------------------------
+// Live captions, word by word
+
+static void test_settled_words()
+{
+	std::printf("live captions: settled words (every word but the last)\n");
+	CHECK(settled_words("").empty());
+	CHECK(settled_words("   ").empty());
+	CHECK(settled_words("hello").empty());
+	CHECK(settled_words("hello ").empty());  // trailing space: the word may still go on
+	CHECK(settled_words("hello\n").empty());
+	CHECK(settled_words("hello wor") == "hello");
+	CHECK(settled_words("hello world") == "hello");
+	CHECK(settled_words("hello world ") == "hello");
+	CHECK(settled_words("  hello   wor") == "hello");  // leading spaces trimmed
+	CHECK(settled_words("one two three") == "one two");
+	CHECK(settled_words("one  two thr") == "one  two");  // spaces between words stay as they are
+	CHECK(settled_words("a\tb\tc") == "a\tb");
+	CHECK(settled_words("one\ntwo\nthr") == "one\ntwo");
+	CHECK(settled_words("one two\r\n") == "one");
+	CHECK(settled_words("\t one two \t") == "one");
+	CHECK(settled_words("h\xc3\xa9llo w\xc3\xb6rld \xf0\x9f\x98\x80 \xe6\x97\xa5\xe6\x9c\xac") ==
+	      "h\xc3\xa9llo w\xc3\xb6rld \xf0\x9f\x98\x80");
+	CHECK(settled_words("\xe6\x97\xa5\xe6\x9c\xac") .empty());
+	CHECK(settled_words("caf\xc3\xa9 \xc3\xb1" "and") == "caf\xc3\xa9");  // a UTF-8 word is never cut
+}
+
+static void test_overlay_live()
+{
+	std::printf("on-screen text: live words show at once, the final replaces them at once\n");
+	OverlayText::Options o;
+	o.max_lines = 2;
+	o.line_chars = 20;
+	o.clear_after_s = 5.0;
+	// Shown at once, no pacing; growing; rolls up to the last max_lines lines.
+	{
+		OverlayText t(o);
+		t.set_live(1, "hello there", 10.0);
+		CHECK(t.text() == "hello there");
+		t.set_live(1, "hello there my friend how are", 10.1);
+		CHECK(t.text() == split_caption_lines("hello there my friend how are", 20).front() + "\n" + split_caption_lines("hello there my friend how are", 20)[1]);
+		const std::string long_live = "one two three four five six seven eight nine ten eleven";
+		t.set_live(1, long_live, 10.2);
+		const auto ll = split_caption_lines(long_live, 20);
+		CHECK(ll.size() == 3);
+		CHECK(ll.size() == 3 && t.text() == ll[1] + "\n" + ll[2]);  // only the last two lines: it rolls up
+		CHECK(!t.update(10.3));  // update has nothing more to change
+		t.set_live(1, "", 10.4);  // nothing yet
+		CHECK(t.text().empty());
+	}
+	// Finished lines + live: the last max_lines of them.
+	{
+		OverlayText t(o);
+		t.push("first line", 10.0);
+		t.update(10.0);
+		t.push("second line", 10.0);
+		t.update(10.0);
+		CHECK(t.text() == "first line\nsecond line");
+		t.set_live(1, "live words", 10.5);
+		CHECK(t.text() == "second line\nlive words");
+		// The final of that voice: up at once in place of the live words, not paced (the first line is not 'read' yet).
+		t.push("final lines here ok", 10.6, 1);
+		CHECK(t.text() == "second line\nfinal lines here ok");
+		CHECK(!t.update(10.6) || t.text() == "second line\nfinal lines here ok");
+		CHECK(t.text() == "second line\nfinal lines here ok");
+		// Live text is forgotten: a next live caption starts again below the finished lines.
+		t.set_live(1, "next one", 10.7);
+		CHECK(t.text() == "final lines here ok\nnext one");
+	}
+	// The final of a long caption: its own lines, the last max_lines of them, at once.
+	{
+		OverlayText t(o);
+		t.set_live(3, "hello there my", 20.0);
+		const std::string fin = "hello there my friend how are you doing today";
+		const auto fl = split_caption_lines(fin, 20);
+		CHECK(fl.size() >= 3);
+		t.push(fin, 20.2, 3);
+		CHECK(fl.size() >= 3 && t.text() == fl[fl.size() - 2] + "\n" + fl[fl.size() - 1]);
+		CHECK(t.seconds_until_change(20.2) > 4.5);  // nothing waits to come up: only the clearing is pending
+	}
+	// A final for a voice without live text keeps the old pace: the third line waits for the first to be read.
+	{
+		OverlayText t(o);
+		t.push("aaa bbb", 0.0, 5);
+		CHECK(t.update(0.0) && t.text() == "aaa bbb");
+		t.push("ccc ddd", 0.1, 5);
+		CHECK(t.update(0.1) && t.text() == "aaa bbb\nccc ddd");
+		t.push("eee fff", 0.2, 5);
+		CHECK(!t.update(0.2));
+		CHECK(t.text() == "aaa bbb\nccc ddd");
+		CHECK(t.seconds_until_change(0.2) > 0.0);
+		CHECK(t.update(3.5) && t.text() == "ccc ddd\neee fff");
+	}
+	// Another voice's final is paced while a voice is live (only the voice that had live text jumps ahead).
+	{
+		OverlayText t(o);
+		t.set_live(1, "talking now", 0.0);
+		t.push("aaa", 0.0, 2);
+		t.push("bbb", 0.0, 2);
+		t.update(0.0);
+		CHECK(t.text() == "bbb\ntalking now");  // finished lines (paced, room for two) + the live line: the last two
+		t.push("ccc", 0.0, 2);
+		CHECK(!t.update(0.0) && t.text() == "bbb\ntalking now");  // ccc waits for the reading pace
+		CHECK(t.update(3.0) && t.text() == "ccc\ntalking now");
+	}
+	// Two voices talking at once: both are shown, each with its own lines.
+	{
+		OverlayText t(o);
+		t.set_live(1, "alpha beta", 1.0);
+		t.set_live(2, "gamma delta", 1.1);
+		CHECK(t.text() == "alpha beta\ngamma delta");
+		t.set_live(1, "alpha beta gamma", 1.2);
+		CHECK(t.text() == "alpha beta gamma\ngamma delta");
+		t.push("alpha beta gamma now", 1.3, 1);  // voice 1 is final, voice 2 still talks
+		CHECK(t.text() == "alpha beta gamma now\ngamma delta");
+		t.set_live(2, "gamma delta epsilon", 1.4);
+		CHECK(t.text() == "alpha beta gamma now\ngamma delta epsilon");
+	}
+	// Cleared after clear_after_s without changes, live text with the rest.
+	{
+		OverlayText t(o);
+		t.set_live(1, "some words", 10.0);
+		CHECK(t.seconds_until_change(10.0) > 4.9 && t.seconds_until_change(10.0) <= 5.0);
+		CHECK(!t.update(14.9) && t.text() == "some words");
+		CHECK(t.update(15.1) && t.text().empty());
+		CHECK(t.seconds_until_change(15.1) < 0);
+		t.set_live(1, "new words", 20.0);  // a voice that went quiet: its next words start a fresh screen
+		CHECK(t.text() == "new words");
+	}
+	// Each change of the live text moves the clearing time on.
+	{
+		OverlayText t(o);
+		t.set_live(1, "one", 10.0);
+		t.set_live(1, "one two", 13.0);
+		CHECK(!t.update(15.5) && t.text() == "one two");
+		CHECK(t.update(18.1) && t.text().empty());
+	}
+	// clear() forgets live text, and a voice without live text is paced again.
+	{
+		OverlayText t(o);
+		t.set_live(1, "some words", 10.0);
+		t.clear();
+		CHECK(t.text().empty() && t.seconds_until_change(10.0) < 0);
+		CHECK(!t.update(11.0) && t.text().empty());
+		t.push("fresh final", 12.0, 1);
+		CHECK(t.update(12.0) && t.text() == "fresh final");
+	}
+}
+
+static void test_pacer_live()
+{
+	std::printf("caption pacing: a caption being said is sent as it grows\n");
+	using namespace std::chrono;
+	struct Rec {
+		std::mutex mu;
+		std::vector<std::string> lines;
+		std::vector<steady_clock::time_point> at;
+		bool bad_dur = false;
+		std::vector<double> dur;
+	};
+	auto make = [](Rec &rec, const CaptionPacer::Options &o) {
+		return std::make_unique<CaptionPacer>(
+			[&rec](const std::string &line, double dur) {
+				std::lock_guard<std::mutex> lk(rec.mu);
+				// The display time is the gap before the next send minus 0.05, at least 0.1: never over the gap
+				// (at most 0.32 s in these tests).
+				if (!(dur >= 0.1 - 1e-9 && dur <= 0.32))
+					rec.bad_dur = true;
+				rec.dur.push_back(dur);
+				rec.lines.push_back(line);
+				rec.at.push_back(steady_clock::now());
+			},
+			o);
+	};
+	auto count = [](Rec &rec) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		return rec.lines.size();
+	};
+	auto snapshot = [](Rec &rec) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		return rec.lines;
+	};
+	CaptionPacer::Options o;
+	o.live_min_gap_seconds = 0.15;
+	o.min_gap_seconds = 0.02;
+	o.chars_per_second = 1000;
+	o.cea608 = true;
+
+	// A growing line goes out as it grows; faster than the gap: only the newest version.
+	{
+		Rec rec;
+		auto p = make(rec, o);
+		p->push_live("k", "hello", false);
+		CHECK(wait_until([&] { return count(rec) == 1; }, 1000));
+		p->push_live("k", "hello world", false);
+		p->push_live("k", "hello world this", false);
+		p->push_live("k", "hello world this is", false);
+		CHECK(wait_until([&] { return count(rec) == 2; }, 1000));
+		std::this_thread::sleep_for(milliseconds(350));  // nothing more: the older versions are gone
+		CHECK(snapshot(rec) == (std::vector<std::string>{"hello", "hello world this is"}));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			if (rec.at.size() >= 2)
+				CHECK(rec.at[1] - rec.at[0] >= milliseconds(130));  // at most every live_min_gap_seconds
+			// gap 0.15 (live_min_gap): shown for 0.10; a send is never shown longer than the time to the next one
+			for (size_t i = 0; i + 1 < rec.at.size() && i < rec.dur.size(); ++i)
+				CHECK(rec.dur[i] <= duration<double>(rec.at[i + 1] - rec.at[i]).count() + 0.01);
+			CHECK(!rec.dur.empty() && rec.dur[0] >= 0.1 - 1e-9 && rec.dur[0] <= 0.11);
+		}
+		// The final: the rest goes out as a complete line, once; then the key is done.
+		p->push_live("k", "hello world this is it", true);
+		CHECK(wait_until([&] { return count(rec) == 3; }, 1000));
+		CHECK(snapshot(rec).back() == "hello world this is it");
+		p->push_live("k", "hello world this is it and more", false);  // a late piece: ignored
+		p->push_live("k", "hello world this is it and more", true);
+		std::this_thread::sleep_for(milliseconds(300));
+		CHECK(count(rec) == 3);
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(!rec.bad_dur);
+		}
+		// Another key is not affected.
+		p->push_live("k2", "other", false);
+		CHECK(wait_until([&] { return count(rec) == 4; }, 1000));
+		p->stop();
+	}
+	// A line that becomes complete is sent once: the growing version already sent equals it, so it is not sent again.
+	{
+		Rec rec;
+		auto p = make(rec, o);
+		const std::string l1 = "aaaa bbbb cccc dddd eeee ffff";  // 29 characters
+		CHECK(split_caption_lines(l1 + " gggg", 32).size() == 2 && split_caption_lines(l1 + " gggg", 32)[0] == l1);
+		p->push_live("m", l1, false);
+		CHECK(wait_until([&] { return count(rec) == 1; }, 1000));
+		p->push_live("m", l1 + " gggg", false);  // l1 complete (already on screen as it is), "gggg" grows
+		CHECK(wait_until([&] { return count(rec) == 2; }, 1000));
+		p->push_live("m", l1 + " gggg hhhh", true);
+		CHECK(wait_until([&] { return count(rec) == 3; }, 1000));
+		std::this_thread::sleep_for(milliseconds(300));
+		CHECK(snapshot(rec) == (std::vector<std::string>{l1, "gggg", "gggg hhhh"}));
+		p->stop();
+	}
+	// A complete line that differs from what was sent as the growing version is queued (once), then the new growing line.
+	{
+		Rec rec;
+		auto p = make(rec, o);
+		const std::string text = "abc def ghi jkl mno pqr stu vwx yz1 234 567 890";
+		const auto ls = split_caption_lines(text, 32);
+		CHECK(ls.size() == 2);
+		p->push_live("n", "abc def", false);
+		CHECK(wait_until([&] { return count(rec) == 1; }, 1000));
+		p->push_live("n", text, false);
+		CHECK(wait_until([&] { return count(rec) == 3; }, 1500));
+		std::this_thread::sleep_for(milliseconds(250));
+		auto got = snapshot(rec);
+		CHECK(got.size() == 3 && ls.size() == 2 && got == (std::vector<std::string>{"abc def", ls[0], ls[1]}));
+		p->push_live("n", text, true);  // the final changes nothing in what was said: the last line is queued once as complete
+		std::this_thread::sleep_for(milliseconds(300));
+		got = snapshot(rec);
+		CHECK(std::count(got.begin(), got.end(), ls[0]) == 1);
+		p->stop();
+	}
+	// A regular push() line goes before a pending growing line.
+	{
+		Rec rec;
+		auto p = make(rec, o);
+		p->push_live("g", "grow one", false);
+		CHECK(wait_until([&] { return count(rec) == 1; }, 1000));
+		p->push_live("g", "grow one two", false);  // waits: the gap after the first
+		p->push("regular line");
+		CHECK(wait_until([&] { return count(rec) == 3; }, 1500));
+		CHECK(snapshot(rec) == (std::vector<std::string>{"grow one", "regular line", "grow one two"}));
+		p->stop();
+	}
+	// Text the channel cannot show is not sent (live or final); nothing is sent while disabled.
+	{
+		Rec rec;
+		auto p = make(rec, o);
+		p->push_live("c", u8"Привет мир", false);
+		p->push_live("c", u8"Привет мир друг", false);
+		p->push_live("c", u8"Привет мир друг", true);
+		std::this_thread::sleep_for(milliseconds(300));
+		CHECK(count(rec) == 0);
+		p->set_enabled(false);
+		p->push_live("d", "hello", false);
+		p->push_live("d", "hello there", true);
+		std::this_thread::sleep_for(milliseconds(250));
+		CHECK(count(rec) == 0);
+		p->set_enabled(true);
+		p->push_live("e", "back again", false);
+		CHECK(wait_until([&] { return count(rec) == 1; }, 1000));
+		CHECK(snapshot(rec).front() == "back again");
+		p->stop();
+	}
+	// A pending growing line is dropped when the pacer is disabled (nothing is sent after that).
+	{
+		Rec rec;
+		auto p = make(rec, o);
+		p->push_live("h", "one", false);
+		CHECK(wait_until([&] { return count(rec) == 1; }, 1000));
+		p->push_live("h", "one two", false);  // waiting for the gap
+		p->set_enabled(false);
+		std::this_thread::sleep_for(milliseconds(300));
+		CHECK(count(rec) == 1);
+		p->stop();
+	}
+	// A slow channel: a version that adds many characters waits for them (chars_per_second), not just the minimum gap.
+	{
+		Rec rec;
+		CaptionPacer::Options slow = o;
+		slow.live_min_gap_seconds = 0.05;
+		slow.chars_per_second = 100;
+		auto p = make(rec, slow);
+		p->push_live("s", "0123456789 0123456789 0123456789", false);  // 32 chars: 0.32 s at 100 per second
+		CHECK(wait_until([&] { return count(rec) == 1; }, 1000));
+		p->push_live("s", "0123456789 0123456789 0123456789 x", false);
+		CHECK(wait_until([&] { return count(rec) == 2; }, 1500));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(rec.at.size() == 2 && rec.at[1] - rec.at[0] >= milliseconds(300));
+			// 32 characters at 100 per second: the gap is 0.32 s, shown for gap - 0.05 = 0.27 s; the next send came
+			// after at least the gap, i.e. not before the first one's display time was over.
+			CHECK(rec.dur.size() == 2 && rec.dur[0] > 0.25 && rec.dur[0] < 0.30);
+			CHECK(rec.dur.size() == 2 && rec.at.size() == 2 && duration<double>(rec.at[1] - rec.at[0]).count() >= rec.dur[0]);
+		}
+		p->stop();
+	}
+}
+
+static void test_router_live()
+{
+	std::printf("caption routing: a caption being said goes to the text and closed captions, finals as before\n");
+	using namespace std::chrono;
+	struct Live {
+		std::string key, text;
+		bool final;
+	};
+	struct Rec {
+		std::mutex mu;
+		std::vector<std::string> cc;
+		std::vector<Live> live;
+		std::vector<std::pair<std::string, std::string>> overlay;
+		std::vector<SubtitleCue> cues;
+	} rec;
+	CaptionRouter::Sinks sinks;
+	sinks.closed_caption = [&](const std::string &t) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		rec.cc.push_back(t);
+	};
+	sinks.closed_caption_live = [&](const std::string &k, const std::string &t, bool f) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		rec.live.push_back(Live{k, t, f});
+	};
+	sinks.overlay = [&](const std::string &s, const std::string &t) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		rec.overlay.emplace_back(s, t);
+	};
+	sinks.subtitle = [&](const SubtitleCue &c) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		rec.cues.push_back(c);
+	};
+	auto wait_overlay = [&](const std::string &src, const std::string &want) {
+		for (int i = 0; i < 300; ++i) {
+			{
+				std::lock_guard<std::mutex> lk(rec.mu);
+				std::string v = "<none>";
+				for (const auto &o : rec.overlay)
+					if (o.first == src)
+						v = o.second;
+				if (v == want)
+					return true;
+			}
+			std::this_thread::sleep_for(milliseconds(10));
+		}
+		return false;
+	};
+	auto overlay_count = [&] {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		return rec.overlay.size();
+	};
+	const auto origin = steady_clock::now() - seconds(100);
+	const std::string key = "l1@" + std::to_string(origin.time_since_epoch().count());
+	auto cap = [&](const char *text, const char *id, bool fin) {
+		CaptionEvent c;
+		c.text = text;
+		c.id = id;
+		c.is_final = fin;
+		c.start = 1;
+		c.end = 2;
+		c.origin = origin;
+		return c;
+	};
+	{
+		CaptionRouter r(sinks);
+		RouterConfig cfg;
+		cfg.spoken = "en";
+		cfg.closed_captions = true;
+		cfg.overlay_spoken = "Live English";
+		cfg.subtitles = true;
+		cfg.overlay_options.clear_after_s = 30;
+		r.configure(cfg);
+		r.on_caption(cap("hello there", "l1", false));
+		CHECK(wait_overlay("Live English", "hello there"));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(rec.live.size() == 1);
+			if (rec.live.size() == 1)
+				CHECK(rec.live[0].key == key && rec.live[0].text == "hello there" && !rec.live[0].final);
+			CHECK(rec.cc.empty() && rec.cues.empty());  // not to the plain channel, not to the subtitle files
+		}
+		r.on_caption(cap("hello there my friend", "l1", false));
+		CHECK(wait_overlay("Live English", "hello there my friend"));
+		// Without an id: ignored altogether.
+		const size_t n_overlay = overlay_count();
+		r.on_caption(cap("no id words", "", false));
+		std::this_thread::sleep_for(milliseconds(100));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(rec.live.size() == 2 && rec.cc.empty() && rec.cues.empty());
+		}
+		CHECK(overlay_count() == n_overlay);
+		// Empty text with an id: the on-screen text empties, closed captions get nothing.
+		r.on_caption(cap("", "l1", false));
+		CHECK(wait_overlay("Live English", ""));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(rec.live.size() == 2);
+		}
+		// The final: closed_caption_live with final=true and not closed_caption; on screen at once; a subtitle cue.
+		r.on_caption(cap("hello there my friend how are you", "l1", true));
+		CHECK(wait_overlay("Live English", "hello there my friend how are you"));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(rec.live.size() == 3);
+			if (rec.live.size() == 3)
+				CHECK(rec.live[2].key == key && rec.live[2].text == "hello there my friend how are you" && rec.live[2].final);
+			CHECK(rec.cc.empty());
+			CHECK(rec.cues.size() == 1 && rec.cues[0].text == "hello there my friend how are you");
+		}
+		// A final without an id goes the plain way even though the live sink is set.
+		r.on_caption(cap("plain final", "", true));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(rec.cc.size() == 1 && rec.cc[0] == "plain final");
+			CHECK(rec.live.size() == 3 && rec.cues.size() == 2);
+		}
+		r.stop();
+	}
+	// The live sink is not set: finals go to closed_caption as before, a non-final reaches only the on-screen text.
+	{
+		rec.cc.clear();
+		rec.live.clear();
+		rec.overlay.clear();
+		rec.cues.clear();
+		CaptionRouter::Sinks plain = sinks;
+		plain.closed_caption_live = nullptr;
+		CaptionRouter r(plain);
+		RouterConfig cfg;
+		cfg.spoken = "en";
+		cfg.closed_captions = true;
+		cfg.overlay_spoken = "Plain English";
+		cfg.subtitles = true;
+		cfg.overlay_options.clear_after_s = 30;
+		r.configure(cfg);
+		r.on_caption(cap("so far", "l1", false));
+		CHECK(wait_overlay("Plain English", "so far"));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(rec.cc.empty() && rec.cues.empty());
+		}
+		r.on_caption(cap("so far and done", "l1", true));
+		CHECK(wait_overlay("Plain English", "so far and done"));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(rec.cc.size() == 1 && rec.cc[0] == "so far and done" && rec.live.empty() && rec.cues.size() == 1);
+		}
+		r.stop();
+	}
+	// Closed captions in a translation language (or none): no live calls for the spoken captions; the text still grows.
+	for (int variant = 0; variant < 2; ++variant) {
+		rec.cc.clear();
+		rec.live.clear();
+		rec.overlay.clear();
+		rec.cues.clear();
+		CaptionRouter r(sinks);
+		RouterConfig cfg;
+		cfg.spoken = "en";
+		cfg.translate = {"de"};
+		cfg.closed_captions = variant == 0;
+		cfg.closed_caption_language = variant == 0 ? "de" : "";
+		cfg.overlay_spoken = "Src English";
+		cfg.overlay_options.clear_after_s = 30;
+		r.configure(cfg);
+		r.on_caption(cap("how are", "l1", false));
+		CHECK(wait_overlay("Src English", "how are"));
+		r.on_caption(cap("how are you", "l1", true));
+		CHECK(wait_overlay("Src English", "how are you"));
+		std::this_thread::sleep_for(milliseconds(100));
+		{
+			std::lock_guard<std::mutex> lk(rec.mu);
+			CHECK(rec.live.empty() && rec.cc.empty());
+		}
+		r.stop();
+	}
+	// After stop: nothing more.
+	{
+		rec.live.clear();
+		CaptionRouter r(sinks);
+		RouterConfig cfg;
+		cfg.closed_captions = true;
+		cfg.overlay_spoken = "Src English";
+		r.configure(cfg);
+		r.stop();
+		r.on_caption(cap("late words", "l9", false));
+		std::lock_guard<std::mutex> lk(rec.mu);
+		CHECK(rec.live.empty());
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------
 // Silence frames, returnAudio, "only while streaming or recording", the resampler against a reference
 
 static void test_silence_protocol()
@@ -2253,6 +2772,10 @@ int main()
 	test_output_select();
 	test_delayed_sender_tags();
 	test_caption_router();
+	test_settled_words();
+	test_overlay_live();
+	test_pacer_live();
+	test_router_live();
 	test_resampler();
 	test_resampler_reference();
 	test_silence_protocol();

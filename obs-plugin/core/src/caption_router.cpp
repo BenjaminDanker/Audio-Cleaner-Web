@@ -2,6 +2,7 @@
 #include "acw/caption_router.hpp"
 
 #include <algorithm>
+#include <string>
 
 namespace acw {
 
@@ -22,6 +23,12 @@ void cue_times(Clock::time_point origin, double start, double end, Clock::time_p
 	}
 	e = arrival;
 	s = arrival - secs(std::min(6.0, std::max(1.0, end - start)));
+}
+
+// One caption's versions share this: its id within the connection it came from (every new session counts from l0).
+std::string live_key(const CaptionEvent &ev)
+{
+	return ev.id + "@" + std::to_string(ev.origin.time_since_epoch().count());
 }
 
 }  // namespace
@@ -59,7 +66,23 @@ void CaptionRouter::configure(const RouterConfig &cfg)
 
 void CaptionRouter::on_caption(const CaptionEvent &ev)
 {
-	if (!ev.is_final || ev.text.empty())
+	if (!ev.is_final) {
+		if (ev.id.empty())
+			return;
+		bool to_cc = false;
+		{
+			std::lock_guard<std::mutex> lk(mu_);
+			if (stopped_)
+				return;
+			to_cc = cfg_.closed_captions && cfg_.closed_caption_language.empty();
+			if (display_ && !cfg_.overlay_spoken.empty())
+				display_->set_live(cfg_.overlay_spoken, ev.voice, ev.text);
+		}
+		if (to_cc && sinks_.closed_caption_live && !ev.text.empty())
+			sinks_.closed_caption_live(live_key(ev), ev.text, false);
+		return;
+	}
+	if (ev.text.empty())
 		return;
 	const Clock::time_point arrival = Clock::now();
 	bool to_cc = false;
@@ -71,11 +94,13 @@ void CaptionRouter::on_caption(const CaptionEvent &ev)
 			return;
 		to_cc = cfg_.closed_captions && cfg_.closed_caption_language.empty();
 		if (display_ && !cfg_.overlay_spoken.empty())
-			display_->push(cfg_.overlay_spoken, ev.text);
+			display_->push(cfg_.overlay_spoken, ev.text, ev.voice);
 		spoken = cfg_.spoken;
 		subtitles = cfg_.subtitles;
 	}
-	if (to_cc && sinks_.closed_caption)
+	if (to_cc && sinks_.closed_caption_live && !ev.id.empty())
+		sinks_.closed_caption_live(live_key(ev), ev.text, true);
+	else if (to_cc && sinks_.closed_caption)
 		sinks_.closed_caption(ev.text);
 	if (subtitles && sinks_.subtitle) {
 		SubtitleCue c;

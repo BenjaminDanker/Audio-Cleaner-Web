@@ -6,6 +6,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,6 +28,9 @@ void caption_output_set_targets(const void *owner, unsigned targets);
 
 /* Queue caption text for the chosen outputs; a no-op while none of them runs. */
 void caption_output_push(const char *text);
+/* A caption as far as it has been said (`key` names it, the same for all its versions; `final` = complete): shown word
+ * by word as it grows. */
+void caption_output_push_live(const char *key, const char *text, bool final);
 
 #ifdef __cplusplus
 }

@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // The text of an on-screen caption: the last one or two lines, rolled up at reading pace and cleared after a while of
-// silence. OverlayText is the pure logic (times are plain seconds, so it is testable without waiting);
-// OverlayDisplay runs it on its own thread and hands the text to a callback (the plugin writes it into an OBS text source).
+// silence. A caption that is still being said (set_live) shows at once and grows word by word; its final version then
+// takes its place without waiting for the reading pace (it was read as it came). OverlayText is the pure logic (times
+// are plain seconds, so it is testable without waiting); OverlayDisplay runs it on its own thread and hands the text to
+// a callback (the plugin writes it into an OBS text source).
 #pragma once
 
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -33,8 +36,12 @@ public:
 
 	void set_options(const Options &o) { opt_ = o; }
 
-	// A new caption, `now` seconds on any steady scale (the same scale for every call).
-	void push(const std::string &text, double now);
+	// A new caption, `now` seconds on any steady scale (the same scale for every call). When `voice` had a caption
+	// being said (set_live), this is its final version and replaces it.
+	void push(const std::string &text, double now, uint64_t voice = 0);
+	// What `voice` has said so far of the caption it is saying (replaces what it had; "" = nothing yet): shown below the
+	// finished lines straight away. Several voices can be talking at once: each has its own lines.
+	void set_live(uint64_t voice, const std::string &text, double now);
 	// Moves on to `now`; true when the text changed.
 	bool update(double now);
 	// What is on screen: the lines joined with "\n" ("" = nothing).
@@ -55,8 +62,10 @@ private:
 	};
 	double hold_for(const std::string &line) const;
 	void rebuild();
+	bool live_text() const;
 
 	Options opt_;
+	std::map<uint64_t, std::string> live_;  // per voice: the caption being said (the key stays until its final comes)
 	std::deque<Line> pending_;
 	std::deque<Shown> shown_;
 	std::string text_;
@@ -78,7 +87,8 @@ public:
 	// The targets that exist now, with the options of their text; targets no longer listed are cleared and dropped.
 	void set_targets(const std::map<std::string, OverlayText::Options> &targets);
 	// Any thread. Unknown targets are ignored.
-	void push(const std::string &target, const std::string &text);
+	void push(const std::string &target, const std::string &text, uint64_t voice = 0);
+	void set_live(const std::string &target, uint64_t voice, const std::string &text);
 	// Empties every target (the text sources get "" at once).
 	void clear_all();
 	// Stops the thread (waits at most `timeout_ms`, then lets it go). Clears the targets first.

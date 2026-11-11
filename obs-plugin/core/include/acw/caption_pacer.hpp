@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Turns final caption texts into short, paced lines for CEA-608/708 caption
+// Turns caption texts into short, paced lines for CEA-608/708 caption
 // output. No backlog: stale lines are dropped, but a long caption is never cut
-// at its beginning.
+// at its beginning. A caption that is still being said (push_live) is shown
+// word by word: its line is sent again as it grows, and only the newest
+// version of it ever waits.
 #pragma once
 
 #include <chrono>
@@ -10,6 +12,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -32,13 +35,15 @@ size_t utf8_count(const std::string &s);
 
 class CaptionPacer {
 public:
-	// send(line, display_seconds) runs on the pacer thread.
+	// send(line, display_seconds) runs on the pacer thread. display_seconds: the time until the pacer sends its next line
+	// at the earliest (OBS waits that long before it takes the next caption; a line stays up until it is replaced).
 	using SendFn = std::function<void(const std::string &line, double display_seconds)>;
 
 	struct Options {
 		size_t max_chars = 32;                // CEA-608 line width
 		double chars_per_second = 24.0;       // stay below the ~60 byte/s 608 channel
 		double min_gap_seconds = 0.25;
+		double live_min_gap_seconds = 0.3;    // a growing line is sent again at most this often
 		double stale_seconds = 5.0;           // drop lines that waited longer than this beyond the time
 						      // their own caption needs to be shown line by line
 		size_t max_queue_lines = 12;
@@ -54,6 +59,9 @@ public:
 
 	// Any thread. Ignored while disabled.
 	void push(const std::string &text);
+	// The caption `key` as far as it has been said (`final` = all of it; afterwards that key is done). Its lines that
+	// are complete are queued like push() (once each); the one still growing is sent as it grows.
+	void push_live(const std::string &key, const std::string &text, bool final);
 	void set_enabled(bool on);
 
 	// Stops the thread; waits at most `timeout_ms` for it, then detaches.
