@@ -265,6 +265,16 @@ def _models_in_a_scratch_folder(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _unfinished_notes_in_a_scratch_folder(tmp_path_factory, monkeypatch):
+    """The notes a run writes about its temporary files (engine.note_unfinished) go to a folder of the test, and the sweep reads only
+    that one: no test writes to, or removes what is noted in, the real app data folder of whoever runs the tests."""
+    from audio_cleaner_desktop import engine
+
+    folder = tmp_path_factory.mktemp("unfinished")
+    monkeypatch.setattr(engine, "_unfinished_dir", lambda: folder)
+
+
+@pytest.fixture(autouse=True)
 def _noise_models_count_as_there(monkeypatch):
     """A window whose noise removal models are missing downloads them by itself, so every test counts them as there
     (a test about them overrides this and fakes the download)."""

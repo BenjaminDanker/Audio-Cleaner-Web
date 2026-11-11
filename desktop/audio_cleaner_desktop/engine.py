@@ -435,10 +435,34 @@ def _remove_quietly(path: Path) -> None:
         pass
 
 
+def _unfinished_dir() -> Path:
+    return models.app_data_dir() / "unfinished"
+
+
+def note_unfinished(path: Path) -> Path | None:
+    """Write down a temporary result file or work folder that is made beside the person's own files, so that a run
+    that dies hard does not leave it there: sweep_leftovers removes it at the next start, whichever folder it is in.
+    Returns the note for forget_unfinished; None when it could not be written (the sweep by age is what is left)."""
+    try:
+        folder = _unfinished_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        note = folder / f"{os.getpid()}-{uuid.uuid4().hex}"
+        note.write_text(str(path.absolute()), encoding="utf-8")
+        return note
+    except OSError:
+        return None
+
+
+def forget_unfinished(note: Path | None) -> None:
+    if note is not None:
+        _remove_quietly(note)
+
+
 def sweep_leftovers(folders=(), *, now: float | None = None) -> int:
     """Remove what a crashed or killed run left behind: everything in the scratch folder whose process is gone,
-    and ".acw-work-*" folders and ".acw-<id>.<ext>" files older than a day in `folders` (the folders results
-    were written to). Never touches anything else. Returns how many items were removed."""
+    what such a run wrote down (note_unfinished), and ".acw-work-*" folders and ".acw-<id>.<ext>" files older than
+    a day in `folders` (the folders results were written to). Never touches anything else. Returns how many items
+    were removed."""
     now = time.time() if now is None else now
     removed = 0
     root = scratch_root()
@@ -461,6 +485,24 @@ def sweep_leftovers(folders=(), *, now: float | None = None) -> int:
                 if _age(entry, now) >= STALE_SECONDS:
                     _remove_quietly(entry)
                     removed += 1
+    try:
+        notes = list(_unfinished_dir().iterdir())
+    except OSError:
+        notes = []
+    for note in notes:
+        match = re.match(r"^(\d+)-", note.name)
+        if match and _pid_alive(int(match.group(1))):
+            continue  # still being made
+        try:
+            target = Path(note.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            target = None
+        # (only the two kinds of names this app gives its temporary files, whatever the note says)
+        if target is not None and ((target.name.startswith(_WORK_PREFIX) and target.is_dir()) or _LEFTOVER_FILE.match(target.name)):
+            if os.path.lexists(target):
+                _remove_quietly(target)
+                removed += 1
+        _remove_quietly(note)
     return removed
 
 
@@ -663,6 +705,7 @@ def process(
             tmp_out.touch(exist_ok=False)
         except OSError as e:
             raise MediaError(f"Cannot write to the folder {dest_dir}: {e.strerror or e}") from e
+        notes = [note_unfinished(tmp_out)]
     except BaseException:  # refused or stopped before the job began: the folder made for its copies is not needed
         if keep_dir is not None:
             copies.delete_job_dir(Path(keep_dir).parent, Path(keep_dir).name)
@@ -688,6 +731,8 @@ def process(
             dir=_work_parent(dest_dir, estimated_scratch_gb(info.duration, info.audio_channels)),
             prefix=f"{_WORK_PREFIX}{os.getpid()}-",
         ))
+        if work.parent != scratch_root():
+            notes.append(note_unfinished(work))
         try:
             _check_cancel(cancel)
             if keep_dir is not None:
@@ -814,6 +859,8 @@ def process(
                 threading.Thread(target=_remove_work_dir, args=(work,), name="scratch-cleanup", daemon=True).start()
     finally:
         tmp_out.unlink(missing_ok=True)
+        for note in notes:
+            forget_unfinished(note)
     report(1.0)
     kept_here = keeper is not None and keeper.job is not None and bool(keeper.job)
     return JobResult(

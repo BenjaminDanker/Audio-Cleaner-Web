@@ -254,6 +254,30 @@ def test_a_stopped_change_leaves_nothing_behind_and_the_blocks_stay(clip, tmp_pa
         redo.run(job, redo.Wanted(timeline=timeline(24.0), output_name="never.wav"), cancel=cancel)
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == [first.output.name]
     assert job.has_blocks and len(job.saves) == 1
+    assert list(engine._unfinished_dir().iterdir()) == []  # (the notes of its temporary file and folder are gone too)
+
+
+@pytest.mark.native
+def test_a_change_writes_down_its_temporary_file_and_folder_while_it_works_and_leaves_no_note(clip, tmp_path, monkeypatch):
+    first, job = first_run(clip, tmp_path, strength="max")
+    no_models(monkeypatch)
+    monkeypatch.delenv("ACW_DESKTOP_SCRATCH", raising=False)  # (Linux: no scratch folder, the work folder is made beside the result)
+    seen = []
+    real = engine.note_unfinished
+
+    def record(path):
+        note = real(path)
+        seen.append((Path(path).name, Path(path).parent, Path(path).is_dir(), note is not None and note.is_file()))
+        return note
+
+    monkeypatch.setattr(engine, "note_unfinished", record)
+    changed = redo.run(job, redo.Wanted(timeline=timeline(24.0), output_name="changed.wav"))
+    (file,) = [x for x in seen if not x[2]]
+    (folder,) = [x for x in seen if x[2]]
+    assert engine._LEFTOVER_FILE.match(file[0]) and file[1] == changed.output.parent and file[3]  # (a name the sweep accepts)
+    assert folder[0].startswith(".acw-work-") and folder[1] == changed.output.parent and folder[3]
+    assert list(engine._unfinished_dir().iterdir()) == []
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == sorted([first.output.name, "changed.wav"])
 
 
 # ---------------------------------------------------------------------------------------------------- Voice rebuild

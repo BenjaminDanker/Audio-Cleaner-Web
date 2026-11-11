@@ -74,6 +74,215 @@ def test_sweep_removes_old_leftovers_and_nothing_else(monkeypatch, tmp_path):
     assert removed == 4
 
 
+DEAD_PID = 2147483646  # (no process has it)
+
+
+@pytest.fixture
+def notes(monkeypatch, tmp_path):
+    """A folder for the notes of unfinished temporary files (never the real app data folder), and a way to write one."""
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    monkeypatch.setattr(engine, "_unfinished_dir", lambda: folder)
+    monkeypatch.delenv("ACW_DESKTOP_SCRATCH", raising=False)
+
+    def write(target, pid=DEAD_PID, text=None):
+        note = folder / f"{pid}-{os.urandom(16).hex()}"
+        note.write_text(str(target) if text is None else text, encoding="utf-8")
+        return note
+
+    write.folder = folder
+    return write
+
+
+def test_a_note_of_a_dead_run_removes_its_temporary_file_in_a_folder_the_sweep_is_not_given(notes, tmp_path):
+    elsewhere = tmp_path / "somewhere" / "else"
+    elsewhere.mkdir(parents=True)
+    leftover = elsewhere / f".acw-{'0123456789abcdef' * 2}.mp4"
+    leftover.write_bytes(b"half a result")
+    mine = elsewhere / "holiday.mp4"
+    mine.write_bytes(b"x")
+    note = notes(leftover)
+    assert engine.sweep_leftovers() == 1  # (no folders passed, and the file is brand new: the note alone names it)
+    assert not leftover.exists() and not note.exists() and mine.exists()
+    assert engine.sweep_leftovers() == 0  # nothing more to do the second time
+
+
+def test_a_note_of_a_dead_run_removes_its_work_folder_with_what_is_in_it(notes, tmp_path):
+    work = tmp_path / "out" / ".acw-work-123-x"
+    (work / "deeper").mkdir(parents=True)
+    (work / "decoded.f32").write_bytes(b"x" * 100)
+    (work / "deeper" / "blocks.bin").write_bytes(b"y")
+    note = notes(work)
+    assert engine.sweep_leftovers() == 1
+    assert not work.exists() and not note.exists() and work.parent.is_dir()  # (the folder it was made in stays)
+
+
+def test_a_note_of_a_run_that_is_still_going_removes_nothing(notes, tmp_path):
+    leftover = tmp_path / f".acw-{'a' * 32}.wav"
+    leftover.write_bytes(b"being written")
+    work = tmp_path / ".acw-work-1-y"
+    work.mkdir()
+    n1, n2 = notes(leftover, pid=os.getpid()), notes(work, pid=os.getpid())
+    assert engine.sweep_leftovers([tmp_path]) == 0  # (and the age rule does not touch them either: they are new)
+    assert leftover.exists() and work.is_dir() and n1.exists() and n2.exists()
+
+
+@pytest.mark.parametrize("name", [
+    "holiday.mp4",                       # something of the person's
+    f".acw-{'a' * 31}.mp4",              # one character short of the id this app makes
+    f".acw-{'A' * 32}.mp4",              # the id is lower case hex
+    f".acw-{'a' * 32}",                  # no ending
+    f".acw-{'a' * 32}.mp4.bak",          # something after the ending
+    f"x.acw-{'a' * 32}.mp4",             # not at the start
+    "notes.txt",
+])
+def test_a_note_naming_another_file_removes_the_note_and_leaves_the_file(notes, tmp_path, name):
+    target = tmp_path / name
+    target.write_bytes(b"the person's own file")
+    note = notes(target)
+    assert engine.sweep_leftovers() == 0
+    assert target.read_bytes() == b"the person's own file" and not note.exists()
+
+
+def test_a_note_naming_a_plain_file_called_like_a_work_folder_leaves_it(notes, tmp_path):
+    target = tmp_path / ".acw-work-5-notafolder"  # (only a folder is a work folder)
+    target.write_bytes(b"x")
+    note = notes(target)
+    assert engine.sweep_leftovers() == 0 and target.exists() and not note.exists()
+
+
+def test_a_note_naming_a_link_removes_the_link_not_what_it_points_at(notes, tmp_path):
+    if os.name == "nt":
+        pytest.skip("links need rights on Windows")
+    real = tmp_path / "holiday.mp4"
+    real.write_bytes(b"mine")
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "pic.jpg").write_bytes(b"p")
+    link_file = tmp_path / f".acw-{'c' * 32}.mp4"
+    link_file.symlink_to(real)
+    link_dir = tmp_path / ".acw-work-9-z"
+    link_dir.symlink_to(folder, target_is_directory=True)
+    n1, n2 = notes(link_file), notes(link_dir)
+    engine.sweep_leftovers()
+    assert not link_file.is_symlink() and not link_dir.is_symlink() and not n1.exists() and not n2.exists()
+    assert real.read_bytes() == b"mine" and (folder / "pic.jpg").read_bytes() == b"p"
+
+
+def test_a_note_whose_file_is_already_gone_is_just_removed(notes, tmp_path):
+    note = notes(tmp_path / f".acw-{'d' * 32}.mp4")
+    assert engine.sweep_leftovers() == 0 and not note.exists()
+
+
+def test_an_unreadable_or_empty_note_does_not_raise_and_does_not_delete_anything(notes, tmp_path):
+    keep = tmp_path / "keep"
+    keep.mkdir()
+    (keep / "a.txt").write_bytes(b"a")
+    bad = [
+        notes(None, text=""),  # empty
+        notes(None, text="   \n"),  # blank
+        notes(None, text="a\x00b"),  # an embedded NUL
+        notes(None, text=str(keep)),  # a folder that is not a work folder
+        notes(None, text=str(tmp_path / ("x" * 300) / "y")),  # a name too long for the file system
+    ]
+    garbage = notes(None, text="")
+    garbage.write_bytes(b"\xff\xfe\x00\xc3\x28")  # not text
+    (notes.folder / f"{DEAD_PID}-isadir").mkdir()  # not a file at all
+    (notes.folder / "no-pid-in-the-name").write_text(str(tmp_path / "nothing"), encoding="utf-8")
+    locked = notes(None, text=str(tmp_path / "nothing"))
+    locked.chmod(0)  # unreadable
+    try:
+        assert engine.sweep_leftovers([tmp_path]) == 0
+    finally:
+        if locked.exists():
+            locked.chmod(0o600)
+    assert (keep / "a.txt").read_bytes() == b"a"
+    assert not any(n.exists() for n in [*bad, garbage])  # (every note of a dead run goes, whatever it holds)
+
+
+def test_a_missing_notes_folder_is_not_an_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(engine, "_unfinished_dir", lambda: tmp_path / "never-made")
+    monkeypatch.delenv("ACW_DESKTOP_SCRATCH", raising=False)
+    assert engine.sweep_leftovers() == 0
+
+
+def test_notes_are_written_for_the_run_and_forgotten(monkeypatch, tmp_path):
+    folder = tmp_path / "n" / "deeper"
+    monkeypatch.setattr(engine, "_unfinished_dir", lambda: folder)  # (made when the first note is written)
+    target = tmp_path / f".acw-{'e' * 32}.wav"
+    note = engine.note_unfinished(target)
+    assert note is not None and note.parent == folder
+    pid, _, rest = note.name.partition("-")
+    assert pid == str(os.getpid()) and len(rest) == 32 and int(rest, 16) >= 0
+    assert note.read_text(encoding="utf-8") == str(target)
+    other = engine.note_unfinished(target)
+    assert other != note  # (one per file: two runs of the same process do not share)
+    monkeypatch.chdir(tmp_path)
+    relative = engine.note_unfinished(Path("rel.wav"))
+    assert Path(relative.read_text(encoding="utf-8")) == tmp_path / "rel.wav"  # (an absolute path: the sweep runs from anywhere)
+    for n in (note, other, relative):
+        engine.forget_unfinished(n)
+        assert not n.exists()
+    engine.forget_unfinished(note)  # (twice is fine)
+    engine.forget_unfinished(None)  # (and no note at all, when it could not be written)
+
+
+def test_a_note_that_cannot_be_written_is_not_an_error(monkeypatch, tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_bytes(b"x")
+    monkeypatch.setattr(engine, "_unfinished_dir", lambda: blocker / "notes")  # (a folder cannot be made under a file)
+    assert engine.note_unfinished(tmp_path / "a.wav") is None
+    engine.forget_unfinished(None)
+
+
+def test_a_run_writes_down_its_temporary_file_and_folder_while_it_works_and_leaves_no_note(speech_wav, tmp_path, monkeypatch, quick_clean, notes):
+    pytest.importorskip("numpy")
+    from audio_cleaner_desktop import resources
+
+    if resources.check():
+        pytest.skip("native components missing")
+    out = tmp_path / "out"
+    seen = []
+    real = engine.note_unfinished
+
+    def record(path):
+        note = real(path)
+        # what the sweep would be told: the kind of name it accepts, and the thing is there to remove
+        seen.append((Path(path).name, Path(path).parent, Path(path).is_dir(), Path(path).exists(), note is not None and note.is_file()))
+        return note
+
+    monkeypatch.setattr(engine, "note_unfinished", record)  # (no scratch folder is set: the work folder is made beside the result)
+    result = engine.process(speech_wav, engine.JobOptions(audio_format="flac"), out_dir=out)
+    files = [x for x in seen if not x[2]]
+    folders = [x for x in seen if x[2]]
+    assert len(files) == 1 and len(folders) == 1
+    assert engine._LEFTOVER_FILE.match(files[0][0]) and files[0][1] == out and files[0][3] and files[0][4]
+    assert folders[0][0].startswith(f".acw-work-{os.getpid()}-") and folders[0][1] == out and folders[0][4]
+    assert sorted(p.name for p in out.iterdir()) == [result.output.name]
+    assert list(notes.folder.iterdir()) == []
+
+
+def test_a_stopped_or_failed_run_leaves_no_note(speech_wav, tmp_path, monkeypatch, quick_clean, notes):
+    from audio_cleaner_desktop import editor_job, resources
+
+    if resources.check():
+        pytest.skip("native components missing")
+    out = tmp_path / "out"
+    written = []
+    real = engine.note_unfinished
+    monkeypatch.setattr(engine, "note_unfinished", lambda path: written.append(Path(path).name) or real(path))
+    for error in (engine.Cancelled(), RuntimeError("the render broke")):  # (stopped, and failed: both in the middle of the work)
+        def render(*a, **k):
+            raise error
+
+        monkeypatch.setattr(editor_job, "render_timeline", render)
+        before = len(written)
+        with pytest.raises(type(error)):
+            engine.process(speech_wav, engine.JobOptions(audio_format="flac"), out_dir=out)
+        assert len(written) == before + 2  # (the temporary file and the work folder were both written down ...)
+        assert list(notes.folder.iterdir()) == [] and list(out.iterdir()) == []  # (... and are gone, with their notes)
+
+
 def test_a_job_writes_its_work_files_to_the_scratch_folder(speech_wav, tmp_path, monkeypatch, quick_clean):
     pytest.importorskip("numpy")
     from audio_cleaner_desktop import resources
@@ -96,6 +305,7 @@ def test_a_job_writes_its_work_files_to_the_scratch_folder(speech_wav, tmp_path,
     assert seen == [tmp_path / "scratch"]
     assert sorted(p.name for p in out.iterdir()) == [result.output.name]
     assert list((tmp_path / "scratch").iterdir()) == []
+    assert list(engine._unfinished_dir().iterdir()) == []  # (a normal run leaves no note behind)
 
 
 # -- output names ---------------------------------------------------------------------------------------------

@@ -288,6 +288,7 @@ def run(
         tmp_out.touch(exist_ok=False)
     except OSError as e:
         raise MediaError(f"Cannot write to the folder {dest_dir}: {e.strerror or e}") from e
+    notes = [engine.note_unfinished(tmp_out)]  # (so that a run that dies hard does not leave it there: engine.sweep_leftovers)
 
     embed = wanted.subtitles == "embed" and ext in engine._EMBED_ENDINGS
     sub_kind = "srt" if wanted.subtitles == "embed" else wanted.subtitles
@@ -300,6 +301,8 @@ def run(
             dir=engine._work_parent(dest_dir, engine.estimated_scratch_gb(info.duration, info.audio_channels) * 1.5),
             prefix=f"{engine._WORK_PREFIX}{os.getpid()}-",
         ))
+        if work.parent != engine.scratch_root():
+            notes.append(engine.note_unfinished(work))
         try:
             _check_cancel(cancel)
             report(0.02)
@@ -365,6 +368,8 @@ def run(
                 threading.Thread(target=engine._remove_work_dir, args=(work,), name="scratch-cleanup", daemon=True).start()
     finally:
         tmp_out.unlink(missing_ok=True)
+        for note in notes:
+            engine.forget_unfinished(note)
     report(1.0)
     return engine.JobResult(
         final, info.duration, info.has_video, sub_final, embedded=embed and sub_tmp is not None, language=language,
