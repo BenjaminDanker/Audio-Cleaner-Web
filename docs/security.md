@@ -118,7 +118,7 @@ also removes the shared-UID risk with the Minecraft servers.
   memory / file-size limits, a 20 s timeout), decodes only files named `<sha1>.flac` that are regular files, and writes the stretch to its standard output.
   The cache's files are keyed by a hash, only ever written by the runner, and deleted with the job. Reads of the timeline and previews are not edits, so
   an open tab cannot hold a job's files past their 2 hours.
-- Stretches of the kept copies (`GET /api/jobs/{id}/kept/{noise|input}?start=&seconds=`, `acw/stretch.py`): the same authentication, scope and
+- Stretches of what a job holds (`GET /api/jobs/{id}/preview/{source|echo|noise|rebuild}?start=&seconds=`, `acw/stretch.py`): the same authentication, scope and
   ownership as the other reads of a job (the job is looked up by id **and** account; a link or a non-regular file in the place of a copy is a
   404), numbers validated and the length capped at 30 s, a rate limit of its own (`kept_cut`, per account, 429 with `Retry-After`) and at most 4
   cuts at once. The copies were written by the sandboxed runner, which handles untrusted uploads, so the web process never opens one with a decoder:
@@ -137,8 +137,8 @@ also removes the shared-UID risk with the Minecraft servers.
 - Upload: declared size enforced, streamed to disk, extension allowlist,
   filenames never used as paths (`input.<ext>`), outputs sanitized. An upload that sends nothing for 30 s is
   dropped; upload bandwidth is capped per account and overall; the declared bytes of uploads in progress are
-  reserved against free disk space and the space is re-checked while data arrives; a free job's size must fit
-  its claimed length at 12 Mbit/s.
+  reserved against free disk space and the space is re-checked while data arrives; a file's size must fit
+  its claimed length (40 MB for each second, or 200 MB whatever the length).
 - Database and file I/O in request handlers (uploads, live sessions, housekeeping) run off the event loop that
   carries live audio.
 - Outbound calls (SMTP, Stripe checkout/portal/refund) share a budget of 8 threads out of the pool and have
