@@ -23,8 +23,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from .. import alerts, auth, db, keycaps
-from ..billing import ledger, trust
+from .. import alerts, auth, db, keycaps, retention
+from ..billing import ledger, stripe_service, trust
 from ..config import get_settings
 from ..security import canonical_email, client_ip, client_net, consteq, enforce, random_token, run_outbound, sha256_hex
 from .turnstile import verify_turnstile
@@ -422,6 +422,12 @@ def delete_account(body: DeleteBody, request: Request, response: Response,
     )["n"]
     if active:
         raise HTTPException(status_code=409, detail="Wait for your running jobs to finish first.")
+    try:
+        stripe_service.forget_customer(uid)  # first, while nothing is deleted yet: a failure here can simply be tried again
+    except stripe_service.BillingUnavailable:
+        log.exception("could not delete the Stripe customer of %s", uid)
+        raise HTTPException(status_code=503, detail="We couldn't reach our payment provider to remove your card details, so nothing "
+                                                     "was deleted. Please try again in a few minutes.") from None
     for row in db.all_rows("SELECT id FROM jobs WHERE user_id = ?", (uid,)):
         shutil.rmtree(jobs_mod.job_dir(row["id"]), ignore_errors=True)
     with db.tx() as c:
@@ -435,6 +441,12 @@ def delete_account(body: DeleteBody, request: Request, response: Response,
         c.execute("DELETE FROM job_callbacks WHERE user_id = ?", (uid,))  # the addresses people gave us
         c.execute("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?", (db.now(), uid))
         c.execute("UPDATE jobs SET input_name = 'deleted', params_json = json_remove(params_json, '$.display_name'), outputs_json = NULL, status = CASE WHEN status = 'done' THEN 'expired' ELSE status END WHERE user_id = ?", (uid,))
+        # ... and the file names in the credit history's usage lines ("Denoising: talk.wav (1.2 min)")
+        for r in c.execute("SELECT id, description FROM ledger WHERE user_id = ? AND kind = 'usage' AND ref_type = 'job'"
+                           " AND description LIKE '%: %'", (uid,)).fetchall():
+            plain = retention.strip_file_name(r["description"])
+            if plain is not None:
+                c.execute("UPDATE ledger SET description = ? WHERE id = ?", (plain, r["id"]))
         c.execute("UPDATE stream_sessions SET client_ip = NULL WHERE user_id = ?", (uid,))
         c.execute("UPDATE audit_log SET ip = NULL WHERE user_id = ?", (uid,))
         c.execute(

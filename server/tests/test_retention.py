@@ -278,6 +278,17 @@ def test_vacuum_waits_for_live_sessions_and_for_disk_space(monkeypatch):
     assert retention.maintain_storage(hour=3) == "vacuumed"
 
 
+def test_vacuum_waits_while_a_job_runs(monkeypatch):
+    monkeypatch.setattr(retention, "VACUUM_MIN_FREE_PAGES", 5)
+    uid = user()
+    _fill_and_delete()
+    running = job(uid, "running", 0)  # (its worker writes the progress all the time and must not wait for the copy)
+    assert retention.maintain_storage(hour=3) == "skipped: job running"
+    assert db.one("SELECT 1 FROM meta WHERE key = 'retention.vacuumed_at'") is None
+    db.execute("UPDATE jobs SET status = 'done' WHERE id = ?", (running,))
+    assert retention.maintain_storage(hour=3) == "vacuumed"
+
+
 # ---------------------------------------------------------------- money records after 7 years (by hand)
 
 def _sum(uid):

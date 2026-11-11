@@ -64,7 +64,7 @@ def _claim_cloud_jobs(limit: int, phase: str | None = None) -> list[dict]:
 def _cloud_done(job: dict) -> None:
     db.execute(
         "UPDATE jobs SET status = 'queued', next_stage = 'finalize', stage = 'Finishing', progress = 90,"
-        " queued_at = ? WHERE id = ? AND status = 'cloud_asr'",
+        " queued_at = ?, attempts = 0 WHERE id = ? AND status = 'cloud_asr'",  # (the finishing step has its own two attempts)
         (db.now(), job["id"]),
     )
 

@@ -19,7 +19,7 @@ import re
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from .. import downloads
 from ..security import client_ip, client_net, enforce
@@ -27,6 +27,8 @@ from ..security import client_ip, client_net, enforce
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
 
 CHUNK = 256 * 1024
+MAX_PER_NET = 8  # file downloads in flight per network and process (a download manager's usual number of connections)
+_in_flight: dict[str, int] = {}  # touched on the event loop only
 TYPES = {
     ".json": "application/json",
     ".sig": "application/octet-stream",
@@ -42,14 +44,30 @@ REVALIDATE = "no-cache"
 
 class FileBody(Response):
     """A file (or a byte range of it) read from an open descriptor in chunks, so the process-wide byte-rate cap
-    (middleware around `send`) sees every chunk. The descriptor is closed when the response ends or the client goes."""
+    (middleware around `send`) sees every chunk. The descriptor is closed when the response ends or the client goes.
 
-    def __init__(self, fd: int, start: int, length: int, status: int, headers: dict[str, str], head: bool):
+    With `net` the body counts as one of that network's downloads in flight for as long as it is being sent: a reader
+    that takes the bytes very slowly holds a connection of the server the whole time, and nothing else limits how many
+    of those one address can hold (starting them is cheap, see _limit). Above MAX_PER_NET the answer is 429."""
+
+    def __init__(self, fd: int, start: int, length: int, status: int, headers: dict[str, str], head: bool,
+                 net: str | None = None):
         super().__init__(content=None, status_code=status, headers=headers)
-        self.fd, self.start, self.length, self.head = fd, start, length, head
+        self.fd, self.start, self.length, self.head, self.net = fd, start, length, head, net
 
     async def __call__(self, scope, receive, send) -> None:
+        counted = False
         try:
+            if self.net is not None and not self.head and self.length > 0:
+                if _in_flight.get(self.net, 0) >= MAX_PER_NET:
+                    busy = JSONResponse(
+                        {"detail": "Too many downloads at once from this network, try again in a moment."},
+                        status_code=429, headers={"Retry-After": "10", "Cache-Control": "no-store"},
+                    )
+                    await busy(scope, receive, send)
+                    return
+                _in_flight[self.net] = _in_flight.get(self.net, 0) + 1
+                counted = True
             await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
             if self.head or self.length <= 0:
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
@@ -64,6 +82,12 @@ class FileBody(Response):
                 await send({"type": "http.response.body", "body": chunk, "more_body": left > 0})
         finally:
             os.close(self.fd)
+            if counted:
+                left_open = _in_flight.get(self.net, 0) - 1
+                if left_open > 0:
+                    _in_flight[self.net] = left_open
+                else:
+                    _in_flight.pop(self.net, None)
 
 
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)")
@@ -135,7 +159,8 @@ def serve(channel: str, entry: dict, request: Request, *, public_name: str | Non
         status, start, length = 206, first, last - first + 1
         headers["Content-Range"] = f"bytes {first}-{last}/{size}"
     headers["Content-Length"] = str(length)
-    return FileBody(fd, start, length, status, headers, head)
+    net = None if is_manifest else client_net(client_ip(request))
+    return FileBody(fd, start, length, status, headers, head, net)
 
 
 def _limit(request: Request, entry: dict) -> None:

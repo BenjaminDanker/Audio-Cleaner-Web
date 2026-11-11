@@ -153,15 +153,16 @@ def test_the_machines_own_addresses_are_found_and_refused(monkeypatch):
 # ---------------------------------------------------------------- resolving and one attempt
 
 def test_every_resolved_address_must_be_public_and_a_failing_lookup_is_a_refusal(net, monkeypatch):
+    def refusal(host):
+        with pytest.raises(webhooks.Refused) as e:
+            run(webhooks.resolve_public(host))
+        return str(e.value)
+
     net.dns["mixed.example.com"] = [PUBLIC, "10.0.0.8"]  # a rebinding answer: one good, one private
-    with pytest.raises(webhooks.Refused, match="can't be called"):
-        run(webhooks.resolve_public("mixed.example.com"))
     net.dns["mapped.example.com"] = ["::ffff:127.0.0.1"]
-    with pytest.raises(webhooks.Refused):
-        run(webhooks.resolve_public("mapped.example.com"))
+    net.dns["private.example.com"] = ["192.168.1.10"]
     net.dns["empty.example.com"] = []
-    with pytest.raises(webhooks.Refused, match="DNS"):
-        run(webhooks.resolve_public("empty.example.com"))
+    said = {host: refusal(host) for host in ("mixed.example.com", "mapped.example.com", "private.example.com", "empty.example.com")}
     net.dns["ok.example.com"] = [PUBLIC, "2606:4700:4700::1111"]
     assert run(webhooks.resolve_public("ok.example.com")) == PUBLIC
 
@@ -169,8 +170,9 @@ def test_every_resolved_address_must_be_public_and_a_failing_lookup_is_a_refusal
         raise OSError("no such host")
 
     monkeypatch.setattr(webhooks, "_getaddrinfo", boom)
-    with pytest.raises(webhooks.Refused, match="DNS"):
-        run(webhooks.resolve_public("nowhere.example.com"))
+    said["nowhere.example.com"] = refusal("nowhere.example.com")
+    # one text for a name that does not exist and for one that is not public: it does not tell which private names exist here
+    assert len(set(said.values())) == 1 and "can't be called" in said["mixed.example.com"] and "not found" in said["mixed.example.com"]
 
 
 def test_a_delivery_goes_to_the_checked_address_with_a_valid_signature(net):

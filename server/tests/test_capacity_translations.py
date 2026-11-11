@@ -84,6 +84,19 @@ def test_after_the_transcription_a_job_with_translations_waits_for_a_translation
     assert [x["id"] for x in appmod._claim_cloud_jobs(2, "translate")] == [j]
 
 
+def test_a_job_coming_back_from_the_cloud_starts_its_finishing_step_with_its_attempts_unused():
+    uid = _rich_user()
+    j = _cloud_job(uid, "premium")
+    db.execute("UPDATE jobs SET attempts = 1 WHERE id = ?", (j,))  # (the main stage used one)
+    appmod._cloud_done(dict(db.one("SELECT * FROM jobs WHERE id = ?", (j,))))
+    row = db.one("SELECT status, next_stage, attempts FROM jobs WHERE id = ?", (j,))
+    assert (row["status"], row["next_stage"], row["attempts"]) == ("queued", "finalize", 0)
+    other = _cloud_job(uid, "premium")  # a job that is not waiting for the cloud (canceled meanwhile) is left as it is
+    db.execute("UPDATE jobs SET status = 'canceled', attempts = 1 WHERE id = ?", (other,))
+    appmod._cloud_done({"id": other})
+    assert tuple(db.one("SELECT status, attempts FROM jobs WHERE id = ?", (other,))) == ("canceled", 1)
+
+
 def test_a_job_being_translated_is_not_started_a_second_time():
     uid = _rich_user()
     j = _cloud_job(uid, "local", ["es"], with_segments=True)

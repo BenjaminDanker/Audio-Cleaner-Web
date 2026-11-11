@@ -11,7 +11,7 @@
 
 `sweep()` is cheap and idempotent; the web process runs it from its housekeeping loop (at most hourly). Deletes run
 in small batches so a first run over a big backlog never holds the write lock for long. The database file is
-compacted by `maintain_storage()` (a monthly VACUUM at a quiet hour, never while a live session runs), because
+compacted by `maintain_storage()` (a monthly VACUUM at a quiet hour, never while a live session or a job runs), because
 SQLite keeps the space of deleted rows for itself and never gives it back to the disk otherwise.
 """
 from __future__ import annotations
@@ -163,8 +163,8 @@ def _page_facts() -> tuple[int, int, int]:
 
 def maintain_storage(now: int | None = None, *, hour: int | None = None) -> str | None:
     """Give deleted rows' space back to the disk: a VACUUM about once a month, in the small hours, when at least
-    ~8 MB (or a quarter of the file) is free inside it, no live session is running and the disk has room for the
-    copy SQLite makes. Returns what it did ("vacuumed") or why not (None when it is simply not due)."""
+    ~8 MB (or a quarter of the file) is free inside it, no live session and no job is running and the disk has room
+    for the copy SQLite makes. Returns what it did ("vacuumed") or why not (None when it is simply not due)."""
     now = db.now() if now is None else now
     hour = time.localtime(now).tm_hour if hour is None else hour
     if hour not in VACUUM_HOURS:
@@ -177,6 +177,8 @@ def maintain_storage(now: int | None = None, *, hour: int | None = None) -> str 
         return None
     if db.one("SELECT 1 FROM stream_sessions WHERE status = 'active' LIMIT 1") is not None:
         return "skipped: live session running"
+    if db.one("SELECT 1 FROM jobs WHERE status = 'running' LIMIT 1") is not None:
+        return "skipped: job running"  # (its worker writes the job's progress all the time and must not wait for the copy)
     from .config import get_settings
 
     path = get_settings().db_path

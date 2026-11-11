@@ -77,6 +77,13 @@ def test_message_is_mailed_with_reply_to_and_no_address_or_text_in_the_log(clien
     assert row["detail"] == "question" and "results" not in str(dict(row)) and "sam@example.com" not in str(dict(row))
 
 
+def test_a_copyright_complaint_is_a_topic_of_its_own(client, mail):
+    assert send(client, topic="copyright", message="A recording of mine is being processed here without my consent.").status_code == 200
+    (msg,) = mail
+    assert msg["Subject"].startswith("[Audio Cleaner] Copyright complaint: ")
+    assert db.one("SELECT detail FROM audit_log WHERE action = 'contact_sent'")["detail"] == "copyright"
+
+
 def test_signed_in_post_needs_the_csrf_token_and_a_same_origin_request(client, mail):
     _, h = login(client, "acct@example.com")
     assert send(client, headers=H).status_code == 403  # cookie but no token

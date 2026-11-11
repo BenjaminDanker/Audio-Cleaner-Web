@@ -240,7 +240,9 @@ is replaced atomically, last. A failure at any step publishes nothing: the previ
 in `mirror-status.json` and the journal, and the monitor mails `mirror_stale` after an hour (a newer release not served) or
 2 hours (no successful run). The previous version's files stay 7 days (downloads in progress), then they are deleted.
 The routes serve only names in `state.json`, open files without following links, re-check the size, and rate-limit the
-start of a file download per network (40 bursts, then one every 45 s; resuming and HEAD cost a tenth).
+start of a file download per network (40 bursts, then one every 45 s; resuming and HEAD cost a tenth). At most 8 file
+downloads per network are in flight at a time in each process (a ninth gets 429 with `Retry-After: 10`): a reader that takes a
+file very slowly holds a connection of the server for as long as it reads.
 
 **Commands.**
 

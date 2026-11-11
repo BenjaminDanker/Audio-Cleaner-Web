@@ -145,6 +145,27 @@ def ensure_customer(user_id: str) -> str:
     return db.one("SELECT stripe_customer_id FROM users WHERE id = ?", (user_id,))["stripe_customer_id"]
 
 
+def forget_customer(user_id: str) -> None:
+    """The account is being deleted: its Stripe customer goes too, and the e-mail address and saved cards on it with it
+    (Stripe keeps the payments themselves, which the tax and dispute rules need). Raises BillingUnavailable when Stripe
+    can't be reached: the deletion is then refused whole and can be tried again."""
+    row = db.one("SELECT stripe_customer_id FROM users WHERE id = ?", (user_id,))
+    customer = row["stripe_customer_id"] if row else None
+    if not customer:
+        return
+    if not enabled():
+        log.warning("account %s deleted with payments switched off: its Stripe customer %s stays", user_id, customer)
+        return
+    try:
+        client().v1.customers.delete(customer)
+    except stripe.InvalidRequestError as e:
+        if getattr(e, "code", None) != "resource_missing":  # (missing: an earlier try got this far)
+            raise BillingUnavailable(str(e)) from e
+    except stripe.StripeError as e:
+        raise BillingUnavailable(str(e)) from e
+    db.execute("UPDATE users SET stripe_customer_id = NULL, default_payment_method = NULL WHERE id = ?", (user_id,))
+
+
 def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
     if not (TOPUP_MIN_CENTS <= amount_cents <= TOPUP_MAX_CENTS):
         raise ValueError("amount out of range")

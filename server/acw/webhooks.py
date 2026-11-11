@@ -180,14 +180,15 @@ async def resolve_public(host: str) -> str:
     """The address to connect to. Refuses unless every address the name resolves to is public (a name that answers with
     a public and a private address is a rebinding attempt, not a mixed answer to be picked from)."""
     await asyncio.to_thread(own_addresses)  # fills the cache off the event loop
+    # One text for a name that does not exist and for one that is not public: the job's owner reads it, and the name was
+    # looked up from inside our network, so telling the two apart would tell which private names exist here.
+    refused = Refused("The address can't be called: its name was not found, or it is not on the public internet.")
     try:
         addrs = await _getaddrinfo(host)
     except OSError:
-        raise Refused("The address could not be found (DNS).") from None
-    if not addrs:
-        raise Refused("The address could not be found (DNS).")
-    if not all(is_public_ip(a) for a in addrs):
-        raise Refused("The address points to a place that can't be called (it is not on the public internet).")
+        raise refused from None
+    if not addrs or not all(is_public_ip(a) for a in addrs):
+        raise refused
     return addrs[0].split("%", 1)[0]
 
 

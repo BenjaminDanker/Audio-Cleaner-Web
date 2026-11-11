@@ -239,6 +239,95 @@ def test_resuming_and_head_cost_a_tenth(main):
     assert main.head(WIN, headers=h).status_code == 200
 
 
+@pytest.fixture
+def in_flight():
+    """The downloads in flight per network (module state of the routes): empty before and after."""
+    from acw.api import downloads_routes as D
+
+    D._in_flight.clear()
+    yield D._in_flight
+    D._in_flight.clear()
+
+
+def test_a_network_has_at_most_eight_file_downloads_in_flight_and_each_one_ending_frees_its_place(tmp_path, in_flight):
+    import asyncio
+
+    from acw.api import downloads_routes as D
+
+    f = tmp_path / "file.bin"
+    f.write_bytes(b"x" * 1000)
+    net = "203.0.113.50"
+    gate = asyncio.Event()  # slow readers take nothing until it is set
+
+    def body(net=net, head=False):
+        return D.FileBody(os.open(f, os.O_RDONLY), 0, 1000, 200, {"Content-Length": "1000"}, head, net)
+
+    async def answer(file_body, slow=False, fail=False):
+        """The messages the body sent; `slow`: its reader waits for `gate`; `fail`: its reader is gone at the first chunk."""
+        sent = []
+
+        async def send(m):
+            sent.append(m)
+            if m["type"] == "http.response.body" and m["body"]:
+                if fail:
+                    raise OSError("client gone")
+                if slow:
+                    await gate.wait()
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        try:
+            await file_body({"type": "http"}, receive, send)
+        except OSError:
+            pass
+        return sent
+
+    async def settle(n):  # (bounded: until `n` downloads of the network are in flight)
+        for _ in range(500):
+            if in_flight.get(net, 0) == n:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(f"{in_flight=}")
+
+    async def go():
+        slow = [asyncio.create_task(answer(body(), slow=True)) for _ in range(D.MAX_PER_NET)]
+        await settle(D.MAX_PER_NET)
+        busy = await answer(body())  # the ninth: refused, nothing sent of the file
+        assert busy[0]["status"] == 429 and (b"retry-after", b"10") in busy[0]["headers"] and b"Too many downloads" in busy[1]["body"]
+        assert in_flight == {net: D.MAX_PER_NET}
+        assert (await answer(body(net="203.0.113.51")))[0]["status"] == 200  # another network is not affected
+        assert (await answer(body(head=True)))[0]["status"] == 200  # HEAD and manifests (no net) are not counted
+        assert (await answer(body(net=None)))[0]["status"] == 200
+        assert in_flight == {net: D.MAX_PER_NET}
+        slow[0].cancel()  # one reader goes away: its place is free again
+        await settle(D.MAX_PER_NET - 1)
+        failed = await answer(body(), fail=True)  # one whose connection breaks while sending takes a place and gives it back
+        assert failed[0]["status"] == 200 and in_flight == {net: D.MAX_PER_NET - 1}
+        gate.set()  # the rest finish
+        done = await asyncio.gather(*slow[1:])
+        assert all(sum(len(m.get("body", b"")) for m in sent) == 1000 for sent in done)
+        assert in_flight == {}
+
+    asyncio.run(go())
+
+
+def test_the_download_routes_count_files_per_network_but_not_manifests_or_head(main, in_flight):
+    from acw.api import downloads_routes as D
+
+    h = {"X-Forwarded-For": "203.0.113.60"}
+    in_flight["203.0.113.60"] = D.MAX_PER_NET  # eight are in flight from this network
+    r = main.get(WIN, headers=h)
+    assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1 and "Too many downloads" in r.json()["detail"]
+    assert main.get(WIN, headers={**h, "Range": "bytes=100-"}).status_code == 429
+    assert main.get(f"{BASE}/obs-plugin/latest/windows", headers=h).status_code == 429
+    assert main.head(WIN, headers=h).status_code == 200 and main.get(f"{BASE}/obs-plugin/manifest.json", headers=h).status_code == 200
+    assert main.get(WIN, headers={"X-Forwarded-For": "203.0.113.61"}).status_code == 200
+    assert in_flight == {"203.0.113.60": D.MAX_PER_NET}
+    del in_flight["203.0.113.60"]  # one ends
+    assert main.get(WIN, headers=h).status_code == 200 and in_flight == {}  # (and a body that ends normally leaves nothing counted)
+
+
 def test_the_bulk_process_passes_every_byte_through_the_cap(bulk, monkeypatch):
     import acw.bulk_app as b
 

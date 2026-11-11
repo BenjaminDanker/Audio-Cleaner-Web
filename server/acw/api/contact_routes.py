@@ -38,6 +38,7 @@ TOPICS = {
     "billing": "Billing/refund",
     "job": "Problem with a job",
     "privacy": "Privacy/data request",
+    "copyright": "Copyright complaint",
     "other": "Other",
 }
 _JOB_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -71,7 +72,7 @@ def clean_message(text: str) -> str:
 class ContactBody(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     email: str = Field(max_length=320)
-    topic: Literal["question", "billing", "job", "privacy", "other"]
+    topic: Literal["question", "billing", "job", "privacy", "copyright", "other"]
     message: str = Field(max_length=MESSAGE_MAX)
     job: str | None = Field(default=None, max_length=64)
     website: str | None = Field(default=None, max_length=500)  # honeypot

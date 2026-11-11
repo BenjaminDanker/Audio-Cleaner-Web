@@ -148,6 +148,40 @@ def test_export_and_delete_account(client, signed_in):
     assert uid2 != uid
 
 
+def test_deleting_an_account_removes_its_stripe_customer_first_and_the_file_names_from_its_credit_history(client, signed_in, monkeypatch):
+    import stripe
+    from types import SimpleNamespace
+
+    from acw.billing import stripe_service
+
+    uid, h = signed_in
+    ledger.credit(uid, 3_000_000, "grant", "t", "g")
+    ledger.debit_available(uid, 100_000, "usage", "job", "j1", "Denoising: talk.wav (1.0 min)")
+    db.execute("UPDATE users SET stripe_customer_id = 'cus_1', default_payment_method = 'pm_1' WHERE id = ?", (uid,))
+    deleted, failure = [], [stripe.APIConnectionError("no route")]
+
+    def delete(customer):
+        deleted.append(customer)
+        if failure:
+            raise failure.pop(0)
+
+    monkeypatch.setattr(stripe_service, "client", lambda: SimpleNamespace(v1=SimpleNamespace(customers=SimpleNamespace(delete=delete))))
+    usage = lambda: db.one("SELECT description FROM ledger WHERE user_id = ? AND kind = 'usage'", (uid,))["description"]  # noqa: E731
+    ask = lambda: client.post("/api/account/delete", json={"confirm": "user@example.com"}, headers=h)  # noqa: E731
+    r = ask()  # Stripe can't be reached: nothing is deleted, and it can be tried again
+    assert r.status_code == 503 and "nothing was deleted" in r.json()["detail"] and deleted == ["cus_1"]
+    u = db.one("SELECT status, stripe_customer_id, default_payment_method FROM users WHERE id = ?", (uid,))
+    assert (u["status"], u["stripe_customer_id"], u["default_payment_method"]) == ("active", "cus_1", "pm_1")
+    assert usage() == "Denoising: talk.wav (1.0 min)" and client.get("/api/me").json()["signedIn"] is True
+    failure.append(stripe.InvalidRequestError("Bad request", "id", code="parameter_invalid"))  # any other refusal from Stripe is the same
+    assert ask().status_code == 503 and db.one("SELECT status FROM users WHERE id = ?", (uid,))["status"] == "active"
+    failure.append(stripe.InvalidRequestError("No such customer", "id", code="resource_missing"))  # (an earlier try got this far: fine)
+    assert ask().status_code == 200 and deleted == ["cus_1"] * 3
+    u = db.one("SELECT status, stripe_customer_id, default_payment_method FROM users WHERE id = ?", (uid,))
+    assert (u["status"], u["stripe_customer_id"], u["default_payment_method"]) == ("deleted", None, None)
+    assert usage() == "Denoising (1.0 min)"  # the file name is gone from the credit history, the line stays
+
+
 def test_free_tool_files_need_a_signed_in_browser_and_a_daily_cap(client):
     from acw.security import LIMITS, limiter
 

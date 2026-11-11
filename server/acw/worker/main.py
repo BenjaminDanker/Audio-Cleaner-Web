@@ -13,6 +13,7 @@ import math
 import os
 import signal
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -214,7 +215,7 @@ OOM_MESSAGE = "This file needs more memory than we can give one job, so it could
 INTERRUPTED_MESSAGE = "Processing was interrupted several times, so we stopped trying; you were not charged. If the file is very long, splitting it into shorter parts may help."
 # A job put back in the queue by a stopping worker keeps its attempt, so a deploy never costs it a retry. But a worker that
 # keeps stopping on the same job (for example systemd stopping the unit after the kernel killed the runner for memory)
-# must not run it forever: the job is failed at its MAX_INTERRUPTIONS-th interruption.
+# must not run it forever: the job is failed at its MAX_INTERRUPTIONS-th interruption in a row at the same place.
 MAX_INTERRUPTIONS = int(os.environ.get("ACW_MAX_INTERRUPTIONS", "3"))
 
 
@@ -340,10 +341,13 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
             prog["now"], prog["at"] = progress, now
         if now - last_update >= 1.0 or msg.get("progress") == 100:
             last_update = now
-            db.execute(
-                "UPDATE jobs SET progress = ?, stage = ?, heartbeat_at = ? WHERE id = ?",
-                (progress, str(msg.get("stage", ""))[:40], db.now(), job["id"]),
-            )
+            try:
+                db.execute(
+                    "UPDATE jobs SET progress = ?, stage = ?, heartbeat_at = ? WHERE id = ?",
+                    (progress, str(msg.get("stage", ""))[:40], db.now(), job["id"]),
+                )
+            except sqlite3.OperationalError:  # the database is busy longer than we wait for it: the next one says it
+                log.warning("job %s: could not write its progress", job["id"])
     proc.wait()
     if not result_file.exists() and not killed_by_us and proc.returncode == -signal.SIGKILL:
         # Killed from outside while we were not stopping it: the kernel's OOM killer when its counter moved. With
@@ -662,6 +666,20 @@ def _decide(job: dict, extra: dict, duration: float) -> bool:
     return False
 
 
+def _too_late_to_start(job: dict) -> bool:
+    """True when the job's work could not be done before its files go (jobs.hard_deadline), at the speed such work was measured at
+    (job_resources.job_seconds): asked before the long stage, so that a job that waited too long is stopped before the work and not
+    after it (_complete, _complete_edit). A job that goes on after a restart has part of the work behind it and is not judged by the
+    whole of it."""
+    row = db.one("SELECT * FROM jobs WHERE id = ?", (job["id"],))
+    if row is None:
+        return False
+    fresh = dict(row)
+    if json.loads(fresh["params_json"]).get("interruptions"):
+        return False
+    return db.now() + job_resources.job_seconds(fresh) + jobs.MIN_DELIVERY_SECONDS >= jobs.hard_deadline(fresh)
+
+
 def process(job: dict, extra: dict) -> None:
     try:
         d = _write_spec(job, extra, job.get("duration_seconds"))
@@ -677,6 +695,9 @@ def process(job: dict, extra: dict) -> None:
             # An edit run (editing.py): the recording is known, measured and priced already; one stage makes the missing blocks of the
             # timeline, renders it and writes the audio.
             duration = float(job["duration_seconds"])
+            if _too_late_to_start(job):
+                jobs.finish_failed(job, jobs.TOO_LATE)
+                return
             d = _write_spec(job, extra, duration)
             res = run_stage(job, d, "edit", job_resources.stage_limits(duration, _max_seconds(job, params))[1])
             if res.get("needs_cloud_asr"):
@@ -732,6 +753,9 @@ def process(job: dict, extra: dict) -> None:
             fresh = db.one("SELECT params_json, est_cost_micros FROM jobs WHERE id = ?", (job["id"],))  # the job it has become
             job["params_json"], job["est_cost_micros"] = fresh["params_json"], fresh["est_cost_micros"]
             params = json.loads(fresh["params_json"])
+        if _too_late_to_start(job):
+            jobs.finish_failed(job, jobs.TOO_LATE)
+            return
         d = _write_spec(job, extra, duration)
         wall = job_resources.stage_limits(duration, _max_seconds(job, params))[1]
         res = run_stage(job, d, "main", wall)
@@ -754,14 +778,23 @@ def process(job: dict, extra: dict) -> None:
             return
         _complete(job, d, res)
     except Interrupted:
-        # Stopped by a restart or deploy, not a failure: back in the queue with the upload kept, no attempt used.
-        interruptions = int(json.loads(job["params_json"]).get("interruptions", 0)) + 1
+        # Stopped by a restart or deploy, not a failure: back in the queue with the upload kept, no attempt used. The limit
+        # is for a job that makes its worker stop, which it does at about the same place every time. A stop that came
+        # further into the stage than every stop before it, or in another stage or run of the job, is taken for a restart
+        # that happened to come while the job ran: the count starts again. (The furthest stop is what is kept, so stops
+        # that come a little earlier and a little later in turn still add up.)
+        params = json.loads(job["params_json"])
+        row = db.one("SELECT progress FROM jobs WHERE id = ?", (job["id"],))
+        place = [(params.get("run") or {}).get("id"), job.get("next_stage"), int((row["progress"] if row else 0) or 0)]
+        last = params.get("interrupted_at")
+        again = isinstance(last, list) and len(last) == 3 and last[:2] == place[:2] and place[2] <= last[2]
+        interruptions = int(params.get("interruptions", 0)) + 1 if again else 1
         if interruptions >= MAX_INTERRUPTIONS:
-            log.error("job %s interrupted %d times; failing it", job["id"], interruptions)
+            log.error("job %s interrupted %d times at the same place; failing it", job["id"], interruptions)
             jobs.finish_failed(job, INTERRUPTED_MESSAGE)
         else:
             log.info("job %s put back in the queue (worker stopping, interruption %d)", job["id"], interruptions)
-            jobs.update_params(job["id"], interruptions=interruptions)
+            jobs.update_params(job["id"], interruptions=interruptions, interrupted_at=last if again else place)
             jobs.requeue(job)
     except StageFailed as e:
         jobs.finish_failed(job, e.user_message)
@@ -796,7 +829,11 @@ def main() -> None:
                     broker.publish_card_state()
                 except OSError:
                     log.exception("could not write the card's state")
-        job = claim(worker_id, load)
+        try:
+            job = claim(worker_id, load)
+        except sqlite3.OperationalError:  # the database is busy longer than we wait for it (nothing was claimed): ask again
+            log.exception("could not look for a job")
+            job = None
         if job is None:
             if GPU_MODE:
                 # waiting for room on the card is not idle: the CPU workers then take the jobs they can (all but the voice rebuild)

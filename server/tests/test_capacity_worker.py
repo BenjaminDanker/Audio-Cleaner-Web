@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from acw import db, job_resources, jobs
+from acw.config import get_settings
 from acw.billing import ledger
 from tests.test_billing_audit import make_job, running_job, user
 
@@ -125,6 +126,169 @@ def test_a_job_that_keeps_getting_interrupted_is_failed_not_requeued_forever(mon
     row = db.one("SELECT status, error, hold_id FROM jobs WHERE id = ?", (jid,))
     assert row["status"] == "failed" and row["error"] == W.INTERRUPTED_MESSAGE and "not charged" in row["error"]
     assert ledger.balance(uid)["held_micros"] == 0
+
+
+def _interrupted(W, jid, progress, next_stage="probe", run_id=None):
+    """The job is claimed, its stage got as far as `progress` and the worker stops: (status, attempts, params) afterwards."""
+    if run_id:
+        jobs.update_params(jid, run={"id": run_id, "op": "process", "timeline": None})
+    db.execute("UPDATE jobs SET next_stage = ?, duration_seconds = claimed_seconds WHERE id = ?", (next_stage, jid))
+    claimed = W.claim("w")
+    assert claimed["id"] == jid
+    db.execute("UPDATE jobs SET progress = ? WHERE id = ?", (progress, jid))  # (what the stage had reported)
+    W.process(claimed, {})
+    row = db.one("SELECT status, attempts, params_json FROM jobs WHERE id = ?", (jid,))
+    return row["status"], row["attempts"], json.loads(row["params_json"])
+
+
+def test_the_interruption_count_only_goes_up_for_a_stop_at_the_same_place_and_starts_again_otherwise(monkeypatch):
+    from acw.worker import main as W
+
+    uid = user()
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    jid = make_job(uid)
+    jobs.mark_uploaded(jid)
+
+    def stopped(*a, **kw):
+        raise W.Interrupted()
+
+    monkeypatch.setattr(W, "run_stage", stopped)
+    monkeypatch.setattr(W, "MAX_INTERRUPTIONS", 3)
+
+    def stop(*place):
+        status, attempts, params = _interrupted(W, jid, *place)
+        assert (status, attempts) == ("queued", 0)
+        return params["interruptions"], params["interrupted_at"]
+
+    assert stop(40) == (1, [None, "probe", 40])
+    assert stop(40) == (2, [None, "probe", 40])  # the same place again: counted
+    assert stop(60) == (1, [None, "probe", 60])  # further than before: the count starts again
+    assert stop(60, "main") == (1, [None, "main", 60])  # another stage
+    assert stop(60, "main", "r1") == (1, ["r1", "main", 60])  # another run of the job
+    assert stop(60, "main") == (2, ["r1", "main", 60])  # the same run, stage and place
+    _, _, params = _interrupted(W, jid, 20, "main")  # not further than the one before: the third in a row, given up
+    assert "run" not in params and params["edit"]["lastRun"]["error"] == W.INTERRUPTED_MESSAGE[:300]  # (a run: the job is as it was)
+    assert db.one("SELECT status FROM jobs WHERE id = ?", (jid,))["status"] == "done"
+
+
+def test_stops_a_little_earlier_and_a_little_later_in_turn_still_add_up_because_the_furthest_stop_is_kept(monkeypatch):
+    from acw.worker import main as W
+
+    uid = user()
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    jid = make_job(uid)
+    jobs.mark_uploaded(jid)
+
+    def stopped(*a, **kw):
+        raise W.Interrupted()
+
+    monkeypatch.setattr(W, "run_stage", stopped)
+    monkeypatch.setattr(W, "MAX_INTERRUPTIONS", 3)  # (the default limit)
+
+    def stop(progress):
+        status, attempts, params = _interrupted(W, jid, progress)
+        assert (status, attempts) == ("queued", 0)
+        return params["interruptions"], params["interrupted_at"]
+
+    assert stop(40) == (1, [None, "probe", 40])
+    assert stop(41) == (1, [None, "probe", 41])  # a little further: the count starts again
+    assert stop(40) == (2, [None, "probe", 41])  # a little earlier: counted, and the furthest stop stays the place
+    status, _, params = _interrupted(W, jid, 41)  # the same place as the furthest: the third in a row, given up
+    assert status == "failed"
+    assert db.one("SELECT error FROM jobs WHERE id = ?", (jid,))["error"] == W.INTERRUPTED_MESSAGE
+
+
+@pytest.mark.parametrize("stage", ["main", "edit"])
+def test_a_job_that_waited_too_long_is_stopped_before_its_stage_and_one_with_room_or_a_restart_behind_it_is_not(monkeypatch, stage):
+    from acw.worker import main as W
+
+    uid = user()
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    ran = []
+
+    def stage_runs(job, d, name, timeout):
+        ran.append(name)
+        raise W.StageFailed("the stage ran")
+
+    monkeypatch.setattr(W, "run_stage", stage_runs)
+    cap = get_settings().job_max_retention_seconds
+    # (what the job's work and the delivery need before its files go, and how much is there: -10 s is too little, 600 s is plenty)
+    for room, interruptions, runs in ((-10, 0, False), (600, 0, True), (-10, 1, True)):
+        jid = make_job(uid)
+        jobs.mark_uploaded(jid)
+        if stage == "edit":  # an edit run of a finished recording
+            jobs.update_params(jid, run={"id": "r1", "op": "process", "timeline": None, "est_seconds": 100})
+        if interruptions:
+            jobs.update_params(jid, interruptions=interruptions)  # it has part of the work behind it: not judged by the whole
+        db.execute("UPDATE jobs SET next_stage = ?, duration_seconds = claimed_seconds WHERE id = ?", (stage, jid))
+        needed = job_resources.job_seconds(dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid,)))) + jobs.MIN_DELIVERY_SECONDS
+        db.execute("UPDATE jobs SET uploaded_at = ? WHERE id = ?", (db.now() + needed + room - cap, jid))
+        ran.clear()
+        W.process(W.claim("w"), {})
+        row = db.one("SELECT status, error, params_json FROM jobs WHERE id = ?", (jid,))
+        assert (ran == [stage]) == runs, (room, interruptions, ran)
+        params = json.loads(row["params_json"])
+        error = params["edit"]["lastRun"]["error"] if stage == "edit" else row["error"]  # (an edit run that ends leaves the job done)
+        assert error == ("the stage ran" if runs else jobs.TOO_LATE[:300])
+        assert row["status"] == ("done" if stage == "edit" else "failed") and ("run" not in params or stage != "edit")
+    assert ledger.balance(uid)["held_micros"] == 0
+
+
+def test_a_busy_database_does_not_stop_a_stage_from_keeping_its_result(monkeypatch, caplog):
+    import sqlite3
+
+    from acw.worker import main as W
+
+    uid = user()
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    job, d = running_job(uid)
+    (d / "spec.json").write_text("{}")
+    lines = [json.dumps({"progress": 50, "stage": "Denoising"}).encode(), json.dumps({"progress": 100}).encode()]
+
+    def runner(*a, **kw):  # (the runner writes its result file as it ends)
+        (d / "result-main.json").write_text(json.dumps({"ok": True, "outputs": []}))
+        return SimpleNamespace(stdout=iter(lines), stderr=iter(()), poll=lambda: 0, wait=lambda: 0, returncode=0, pid=1)
+
+    writes = []
+
+    def busy(sql, params=()):
+        writes.append(sql)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(W.subprocess, "Popen", runner)
+    monkeypatch.setattr(W.db, "execute", busy)
+    with caplog.at_level("WARNING", logger="acw.worker"):
+        assert W.run_stage(job, d, "main", 10)["ok"] is True  # its progress could not be written, its result is kept
+    assert len(writes) == 2 and caplog.text.count("could not write its progress") == 2
+
+
+def test_a_worker_whose_claim_meets_a_busy_database_asks_again(monkeypatch):
+    import sqlite3
+
+    from acw.worker import main as W
+
+    asked = []
+
+    class Stop:  # (a stop flag that does not wait)
+        def is_set(self):
+            return len(asked) >= 2
+
+        def wait(self, seconds):
+            return None
+
+    def claim(worker_id, load=None):
+        asked.append(1)
+        if len(asked) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return None
+
+    monkeypatch.setattr(W, "_stop", Stop())
+    monkeypatch.setattr(W, "claim", claim)
+    monkeypatch.setattr(W.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(W.hostload, "get", lambda d: None)
+    monkeypatch.setattr(W.jobs, "sweep", lambda: None)
+    W.main()  # (it returns when the flag says stop; an error from claim would have ended it with the exception)
+    assert len(asked) == 2
 
 
 # ---------------------------------------------------------------- M2: limits that follow the progress
