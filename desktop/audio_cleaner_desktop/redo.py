@@ -72,6 +72,14 @@ def last_result(job: copies.JobCopies) -> Path | None:
     return None
 
 
+def is_original(job: copies.JobCopies, path: Path) -> bool:
+    """Is `path` the job's original file itself (under any spelling: upper or lower case, a link)?"""
+    try:
+        return os.path.samefile(path, job.original_path)
+    except OSError:  # one of the two is not there
+        return False
+
+
 def result_dir(job: copies.JobCopies, fallback: Path | None = None) -> Path:
     """Where a new result goes: next to the latest one, else next to the original (else `fallback`)."""
     last = last_result(job)
@@ -181,6 +189,9 @@ def plan(
         _, problem = engine.check_output_name(name, source)
         if problem:
             p.problems.append(problem)
+    if name and is_original(job, result_dir(job) / name):
+        # (asking "Replace it?" for this name would offer to put the original in the bin)
+        p.problems.append("That is the name of your original file. Pick another name, so the original stays as it is.")
     elif not name:
         p.problems.append("Type a name for the new file.")
     p.steps.append("Save it as a new file" + (f" ({name})" if name else ""))
@@ -255,6 +266,8 @@ def run(
     threads = threads or engine.worker_threads()
     ff = engine.ffmpeg(threads, cancel)
     src = job.original_path
+    if replace is not None and is_original(job, replace):
+        replace = None  # never the original: the new file keeps a name of its own
 
     check = job.check_original()
     if not check.ok:

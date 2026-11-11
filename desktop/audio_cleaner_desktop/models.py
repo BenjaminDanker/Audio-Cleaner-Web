@@ -22,6 +22,7 @@ older versions used).
 from __future__ import annotations
 
 import hashlib
+import http.client
 import logging
 import os
 import shutil
@@ -322,8 +323,13 @@ def _fetch(f: ModelFile, dest: Path, done_before: int, total: int, progress: Pro
                             progress(done_before + min(have, f.size), total)
         except Cancelled:
             raise
-        except OSError as e:  # URLError, timeouts, connection resets
+        except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, connection resets, a body cut short
+            if getattr(e, "code", None) == 416:  # the server has no more of it than we hold: this part can't be finished
+                part.unlink(missing_ok=True)
             raise DownloadError(f"The download stopped ({getattr(e, 'reason', e)}). Try again to continue where it left off.") from e
+        if have < f.size:
+            # The connection ended early without an error (http.client reads a short body as its end): what arrived is kept.
+            raise DownloadError("The download stopped before the end. Try again to continue where it left off.")
     if part.stat().st_size != f.size or _sha256(part, cancel) != f.sha256:
         part.unlink(missing_ok=True)
         raise DownloadError(f"{f.path} did not download correctly. Please try again.")

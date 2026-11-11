@@ -13,6 +13,7 @@ from audio_cleaner_desktop import models, resources
 class _RangeHandler(http.server.BaseHTTPRequestHandler):
     files: dict[str, bytes] = {}
     requests: list[str] = []
+    cut: dict[str, int] = {}  # path -> the connection ends after this many bytes of the body (its length was announced in full)
 
     def do_GET(self):  # noqa: N802
         body = self.files.get(self.path)
@@ -30,7 +31,7 @@ class _RangeHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
         self.send_header("Content-Length", str(len(body) - start))
         self.end_headers()
-        self.wfile.write(body[start:])
+        self.wfile.write(body[start:start + self.cut[self.path]] if self.path in self.cut else body[start:])
 
     def log_message(self, *_args):
         pass
@@ -38,7 +39,7 @@ class _RangeHandler(http.server.BaseHTTPRequestHandler):
 
 @pytest.fixture
 def server(monkeypatch, tmp_path):
-    _RangeHandler.files, _RangeHandler.requests = {}, []
+    _RangeHandler.files, _RangeHandler.requests, _RangeHandler.cut = {}, [], {}
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RangeHandler)
     threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "models"))
@@ -81,6 +82,80 @@ def test_an_interrupted_download_resumes(server):
     models.download(m)
     assert models.is_installed(m) and (models.model_dir(m) / "big.bin").read_bytes() == data
     assert _RangeHandler.requests == ["/big.bin bytes=1000000-"]
+
+
+def test_a_connection_that_ends_early_without_an_error_keeps_the_part_and_the_next_try_continues_from_it(server):
+    data = bytes(range(256)) * 20_000
+    m = _model(server, {"big.bin": data})
+    _RangeHandler.cut["/big.bin"] = 1_500_000  # the server goes away half way (http.client reads that as the end of the body)
+    with pytest.raises(models.DownloadError, match="stopped before the end"):
+        models.download(m)
+    part = models.models_dir() / "test-model.partial" / "big.bin.part"
+    assert part.read_bytes() == data[:1_500_000] and not models.is_installed(m)  # what arrived is kept
+    _RangeHandler.cut.clear()
+    models.download(m)  # again: from where it was
+    assert _RangeHandler.requests == ["/big.bin", "/big.bin bytes=1500000-"]
+    assert models.is_installed(m) and (models.model_dir(m) / "big.bin").read_bytes() == data and not part.exists()
+
+
+class _Opener:
+    """What `_fetch` opens its request with: answers with `body` (a response whose reads fail with `error` when the body is used up) or raises."""
+
+    def __init__(self, body=b"", error=None, raises=None):
+        self.body, self.error, self.raises, self.requests = body, error, raises, []
+
+    def open(self, request, timeout=None):
+        self.requests.append(request.get_header("Range"))
+        if self.raises is not None:
+            raise self.raises
+        opener = self
+
+        class Response:
+            status = 206 if request.get_header("Range") else 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n):
+                chunk, opener.body = opener.body[:n], opener.body[n:]
+                if not chunk and opener.error is not None:
+                    raise opener.error
+                return chunk
+
+        return Response()
+
+
+def test_a_body_cut_short_or_a_range_the_server_cannot_serve_is_a_download_error_and_only_the_second_loses_the_part(tmp_path):
+    import http.client
+    import urllib.error
+
+    data = b"0123456789" * 100
+    f = models.ModelFile("a.bin", "https://example.invalid/a.bin", len(data), hashlib.sha256(data).hexdigest())
+    dest = tmp_path / "a.bin"
+    part = tmp_path / "a.bin.part"
+    # a body that stops with an IncompleteRead: the error is ours to say, what arrived stays
+    with pytest.raises(models.DownloadError, match="The download stopped"):
+        models._fetch(f, dest, 0, f.size, None, None, _Opener(data[:400], error=http.client.IncompleteRead(b"", 600)))
+    assert part.read_bytes() == data[:400] and not dest.exists()
+    # the next try asks for the rest with a Range header and finishes the file
+    again = _Opener(data[400:])
+    models._fetch(f, dest, 0, f.size, None, None, again)
+    assert again.requests == ["bytes=400-"] and dest.read_bytes() == data and not part.exists()
+    # 416: the server has no more of the file than we hold, so this part can't be finished and goes
+    dest.unlink()
+    part.write_bytes(data[:400])
+    gone = urllib.error.HTTPError(f.url, 416, "Range Not Satisfiable", {}, None)
+    with pytest.raises(models.DownloadError, match="The download stopped"):
+        models._fetch(f, dest, 0, f.size, None, None, _Opener(raises=gone))
+    assert not part.exists() and not dest.exists()
+    # any other HTTP error keeps the part
+    part.write_bytes(data[:400])
+    with pytest.raises(models.DownloadError, match="The download stopped"):
+        models._fetch(f, dest, 0, f.size, None, None, _Opener(raises=urllib.error.HTTPError(f.url, 503, "Unavailable", {}, None)))
+    assert part.read_bytes() == data[:400]
 
 
 def test_a_file_that_does_not_match_is_never_used(server):

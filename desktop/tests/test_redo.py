@@ -165,6 +165,53 @@ def test_saving_with_the_name_of_an_earlier_result_replaces_it_only_when_asked_a
 
 
 @pytest.mark.native
+def test_replacing_never_puts_the_original_in_the_bin_or_writes_over_it(clip, tmp_path):
+    _, job = first_run(clip, tmp_path, strength="max")
+    original = clip.read_bytes()
+    trashed = []
+
+    def trash(path):
+        trashed.append(path)
+        return True
+
+    # the original's own name was chosen, in its folder, and "Replace it" was agreed to: the new file gets a name of its own
+    out = redo.run(job, redo.Wanted(timeline=timeline(12.0), output_name="talk.wav"), out_dir=clip.parent, replace=clip, trash=trash)
+    assert out.output.is_file() and out.output != clip and clip.read_bytes() == original and trashed == []
+    # the results are next to the original now: its name is refused outright
+    with pytest.raises(MediaError, match="name of your original file"):
+        redo.run(job, redo.Wanted(timeline=timeline(12.0), output_name="talk.wav"), replace=clip, trash=trash)
+    assert clip.read_bytes() == original and trashed == [] and sorted(p.name for p in clip.parent.iterdir()) == sorted(["talk.wav", out.output.name])
+
+
+def test_the_original_is_known_by_any_spelling_and_is_never_offered_as_the_name_of_a_new_file(tmp_path):
+    media = tmp_path / "media"
+    media.mkdir()
+    original = media / "talk.wav"
+    original.write_bytes(b"x")
+    job = copies.JobCopies.create(copies.new_job_dir(tmp_path / "jobs"), original, copies.fingerprint(original), {})
+    link = tmp_path / "link.wav"
+    link.symlink_to(original)
+    other = media / "other.wav"
+    other.write_bytes(b"x")
+    assert redo.is_original(job, original) and redo.is_original(job, link) and redo.is_original(job, media / ".." / "media" / "talk.wav")
+    assert not redo.is_original(job, other) and not redo.is_original(job, media / "talk-cleaned.wav")  # (a file that is not there)
+    original.unlink()
+    assert not redo.is_original(job, original) and not redo.is_original(job, link)  # nothing there: it is not asked about
+    original.write_bytes(b"x")
+    # a new result goes next to the original when none was saved yet: the name of the original is refused, another is fine
+    check = job.check_original()
+    p = redo.plan(job, redo.Wanted(output_name="talk.wav"), check)
+    assert any("name of your original file" in x for x in p.problems) and not p.ok
+    assert not any("original file" in x for x in redo.plan(job, redo.Wanted(output_name="talk-cleaned.wav"), check).problems)
+    assert redo.plan(job, redo.Wanted(output_name=" "), check).problems[-1] == "Type a name for the new file."  # (as before)
+    results = tmp_path / "results"  # ... and next to the latest result when there is one: the same name is a new file there
+    results.mkdir()
+    (results / "x.wav").write_bytes(b"1")
+    job.add_save([results / "x.wav"], {})
+    assert not any("original file" in x for x in redo.plan(job, redo.Wanted(output_name="talk.wav"), check).problems)
+
+
+@pytest.mark.native
 def test_a_moved_or_changed_original_makes_every_change_unavailable_with_the_reason(clip, tmp_path):
     _, job = first_run(clip, tmp_path, strength="max")
     wanted = redo.Wanted(timeline=timeline(24.0), output_name="x.wav")
