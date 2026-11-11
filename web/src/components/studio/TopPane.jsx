@@ -5,7 +5,7 @@ import { tipAttr } from './ui.jsx';
 
 /** The top of the editor: the picture (or the poster of a sound), the file's name and length, the Automatic switch with what it did and
  * the suggestions, and the tools (play, split, undo, zoom, select). Its buttons work through the screen's `data-act` clicks. */
-export default function TopPane({ session, job, S, T, info, fileUrl, audioUrl, mediaRef, engineRef, done, localAb, ph, playing, signedIn, pend, reco, zoom, more, fileMeta }) {
+export default function TopPane({ session, job, S, T, info, fileUrl, audioUrl, mediaRef, engineRef, done, localAb, ph, playing, signedIn, pend, reco, zoom, more, fileMeta, newAsk = false }) {
   // the lines under the file name
   const autoLine = session.listening
     ? <span data-testid="reco-listening"><span className="spinner" aria-hidden="true" /> Listening to a little of your file to pick the best settings…</span>
@@ -39,7 +39,17 @@ export default function TopPane({ session, job, S, T, info, fileUrl, audioUrl, m
       <div className="tinfo">
         <div className="tname">
           <h1 className="fname" data-testid="file-name">{shownName(session.fileName)}</h1>
-          <p className="fmeta" data-testid="file-meta">{fileMeta} · <button type="button" className="link" data-act="newfile" data-testid="different-file">Different file</button></p>
+          <p className="fmeta" data-testid="file-meta">{fileMeta} · {newAsk
+            ? (
+              <span data-testid="different-file-ask">
+                {job ? 'Choose a different file? The changes you haven’t saved will be lost.' : 'Choose a different file? What you set up for this one will be lost.'}{' '}
+                <button type="button" className="link" data-act="newfile-yes" data-testid="different-file-yes">Yes, different file</button>
+                {' · '}
+                <button type="button" className="link" data-act="newfile-no" data-testid="different-file-no">Keep this one</button>
+              </span>
+            )
+            : <button type="button" className="link" data-act="newfile" data-testid="different-file">Different file</button>}
+          </p>
         </div>
         <div className="autoc">
           <div className="autow" data-testid="auto-box">

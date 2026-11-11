@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, barBalance, check, dragRange, dropFile, jobIdOf, launch, mainButton, pick, setLeveling, setStrength, setVoice, settleRecommendation, signIn, summary, typeName } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, barBalance, check, differentFileAfterEdit, dragRange, dropFile, jobIdOf, launch, mainButton, pick, setLeveling, setStrength, setVoice, settleRecommendation, signIn, summary, typeName } from './helpers.mjs';
 
 const EMAIL = `files-${Date.now()}@example.com`;
 const SERVER_RATES = { denoise: 0.009, leveling: 0.001, rebuild: 0.03 }; // the served list (GET /api/billing/pricing), per minute
@@ -382,7 +382,7 @@ await check('echo removal and translation: Echo removal is offered only with Sta
   const size = statSync(join(FILES, 'echo2.mp4')).size;
   if (!whole(L.echo, T) || !/\.mka$/.test(b.filename) || b.sizeBytes >= size) throw new Error(JSON.stringify(b));
   await pick(page, 'noise', 'off');
-  await page.getByTestId('different-file').click();
+  await differentFileAfterEdit(page); // (the choices above are changes of the person's: it asks first)
   await choose('noisy.wav');
   await pick(page, 'noise', 'denoise');
   await pick(page, 'subs', 'standard');
@@ -599,7 +599,7 @@ await check('Voice Off, Leveling on its own: nothing chosen at first (Start is o
   if (!whole(L.leveling, T) || L.leveling[0].loudness_lufs !== -14) throw new Error('sent: ' + JSON.stringify(b));
   if (asked.answer.lines.length !== 1 || asked.answer.lines[0].item !== 'leveling') throw new Error('the server\'s estimate: ' + JSON.stringify(asked.answer));
   // a longer file makes the words precise: ten minutes of Leveling are about $0.01 by the price list, and the run's own amount (about $0.0016) comes on top
-  await page.getByTestId('different-file').click();
+  await differentFileAfterEdit(page); // (Leveling was chosen above: it asks first)
   await choose('long10min.mp3');
   await pick(page, 'noise', 'off');
   await setLeveling(page, 'youtube');

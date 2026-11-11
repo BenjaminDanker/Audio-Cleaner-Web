@@ -143,6 +143,12 @@ export async function dropFile(page, path, { recommended = false } = {}) {
   if (!recommended) await restoreOldDefaults(page);
   await page.waitForTimeout(300);
 }
+/** "Different file" after the person changed something in the editor (a choice, a part): it asks first (different-file-ask), so this says yes. With nothing
+ * changed it goes straight to the file chooser: click `different-file` alone. */
+export async function differentFileAfterEdit(page) {
+  await page.getByTestId('different-file').click();
+  await page.getByTestId('different-file-yes').click();
+}
 /** Drag across the waveform from second `s` to second `e` (the editor takes whole seconds). */
 export async function dragRange(page, s, e) {
   const wf = page.getByTestId('waveform');

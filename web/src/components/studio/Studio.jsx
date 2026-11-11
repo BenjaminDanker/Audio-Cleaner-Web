@@ -97,6 +97,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const [sheet, setSheet] = useState(false);
   const [sgIdx, setSgIdx] = useState(-1);
   const [delAsk, setDelAsk] = useState(false);
+  const [newAsk, setNewAsk] = useState(false); // "Different file" asks first when it would throw the person's own changes away
   const [zoom, setZoom] = useState(1);
   const [hear, setHear] = useState({ voice: true, echo: true, level: true });
   const [toast, setToast] = useState('');
@@ -381,7 +382,13 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     if (suppress.current && (a === 'sec' || a === 'sheet')) return;
     if (b.getAttribute('aria-disabled') === 'true') return; // its tooltip says why
     switch (a) {
-      case 'newfile': onNewFile?.(); break;
+      case 'newfile':
+        // a slip on this small link must not cost what the person set up by hand (a job that is saved loses nothing: it stays under Files)
+        if (S.past.length > 0 && (!job || changed)) setNewAsk(true);
+        else onNewFile?.();
+        break;
+      case 'newfile-yes': setNewAsk(false); onNewFile?.(); break;
+      case 'newfile-no': setNewAsk(false); break;
       case 'auto': session.setAuto(!session.auto); break;
       case 'auto-undo': session.undoAuto(); break;
       case 'auto-again': session.useAgain(); break;
@@ -589,7 +596,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
             <div className="ed">
               <div className="edl">
                 <div className="pane main" id="edmain">
-                  <TopPane {...{ session, job, S, T, info, fileUrl, audioUrl, mediaRef, engineRef, done, localAb, ph, playing, signedIn, pend, reco, zoom, more, fileMeta }} />
+                  <TopPane {...{ session, job, S, T, info, fileUrl, audioUrl, mediaRef, engineRef, done, localAb, ph, playing, signedIn, pend, reco, zoom, more, fileMeta, newAsk }} />
                   <Timeline ctx={ctx} />
                 </div>
                 <OutputPane ctx={ctx} />
