@@ -1,9 +1,9 @@
 //! Acoustic echo cancellation: WebRTC's AEC3 through `sonora` (a pure-Rust port, BSD-3-Clause). It needs the
 //! far-end ("reference") signal: what went to the speakers, which the OBS plugin sends alongside the mic.
-//! Measured on our synthetic room echo (server/tests/test_native_live.py's room): 42.8 dB of echo removed, the
-//! near-end voice at 0.94 of its level, 1.1% of a core (the canceller we used before did 38 dB at ~2%).
+//! Measured on our synthetic room echo (server/tests/test_echo_cancel.py's room): about 43 dB of echo removed, the
+//! near-end voice at 0.93 of its level, 1-2% of a core (the canceller we used before did 38 dB at ~2%).
 
-use sonora::config::EchoCanceller as EcConfig;
+use sonora::config::{EchoCanceller as EcConfig, TransparentModeType};
 use sonora::{AudioProcessing, Config, StreamConfig};
 
 pub const FRAME: usize = 480; // 10 ms at 48 kHz
@@ -18,8 +18,12 @@ pub struct EchoCanceller {
 impl EchoCanceller {
     pub fn new() -> Self {
         let sc = StreamConfig::new(48_000, 1);
+        // With headphones nothing of the reference is in the mic, and until the canceller has noticed that it holds
+        // the voice down while the desktop plays: someone talking the moment they go live lost their first 3-4 s
+        // (13-47 dB down). The HMM detector notices in about 2 s; with a real echo the output is the same as before.
+        let ec = EcConfig { transparent_mode: TransparentModeType::Hmm, ..EcConfig::default() };
         let apm = AudioProcessing::builder()
-            .config(Config { echo_canceller: Some(EcConfig::default()), ..Default::default() })
+            .config(Config { echo_canceller: Some(ec), ..Default::default() })
             .capture_config(sc)
             .render_config(sc)
             .build();

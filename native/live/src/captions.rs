@@ -22,6 +22,14 @@ use crate::gate::{self, Gate, Piece};
 
 const INPUT_RATE: usize = 16_000;
 const TICK: Duration = Duration::from_millis(50);
+/// How far the recogniser is behind the talk when it gives a line's first words (16 kHz samples). Measured on read
+/// speech: 0.55 to 1.5 s, mostly 0.7 to 1.0; a subtitle that is a little early reads better than a late one.
+const FIRST_WORDS_LAG: u64 = INPUT_RATE as u64;
+/// Someone talking without a pause gets a new line after this long (16 kHz samples), see `publish`.
+const LONG_LINE: u64 = 12 * INPUT_RATE as u64;
+/// After this much talk without any pause the recogniser starts afresh at such a line end, so that what it holds for
+/// one stretch of talk stays small (the words around that one cut can be lost).
+const LONG_TALK: u64 = 120 * INPUT_RATE as u64;
 /// Streams one recognizer serves before another is made, and its decoder threads (ACW_CAPTION_STREAMS_PER_MODEL,
 /// ACW_CAPTION_THREADS).
 fn streams_per_recognizer() -> usize {
@@ -49,6 +57,9 @@ struct DecoderSide {
     to16k: Decimate3,
     fed: u64, // 16 kHz samples given to the recognizer (or skipped)
     line_start: u64,
+    spoken_from: Option<u64>, // `fed` when the line's first words were recognised
+    reset_at: u64,            // `fed` when the recogniser last started afresh
+    skip: usize,              // bytes of the recogniser's text since then that went out as earlier lines
     last_text: String,
     line: u64,
     behind: bool,
@@ -103,10 +114,11 @@ fn new_recognizer(model_dir: &Path, threads: i32) -> Result<Recognizer, String> 
     cfg.decoding_method = greedy.as_ptr();
     cfg.max_active_paths = 4;
     cfg.enable_endpoint = 1;
-    // Long silence with nothing said: reset. A pause after speech ends the line; long monologues still get lines.
+    // Long silence with nothing said: reset. A pause after speech ends the line. Long monologues get their lines in
+    // `publish`: rule 3 would end them here, and the reset that follows an end lost the words around it.
     cfg.rule1_min_trailing_silence = 5.0;
     cfg.rule2_min_trailing_silence = 0.7;
-    cfg.rule3_min_utterance_length = 12.0;
+    cfg.rule3_min_utterance_length = 1e9;
     cfg.hotwords_file = empty.as_ptr();
     cfg.hotwords_score = 1.5;
     cfg.rule_fsts = empty.as_ptr();
@@ -236,6 +248,12 @@ fn decoder_loop(g: Arc<Group>) {
 }
 
 
+/// Where a line that has gone on too long ends: the byte offset in `rest` of the space before its last word, which may
+/// still be growing and opens the next line. None while there is no whole word before it.
+fn cut_at_word(rest: &str) -> Option<usize> {
+    rest.trim_end().rfind(' ').filter(|&sp| !rest[..sp].trim().is_empty())
+}
+
 /// The model writes lowercase without punctuation: capitalise the line and "I" (alone, or in I'm, I've, I'll, I'd).
 pub fn tidy(text: &str) -> String {
     let t = text.trim();
@@ -279,6 +297,9 @@ impl Captioner {
                 to16k: Decimate3::new(),
                 fed: at / 3,
                 line_start: at / 3,
+                spoken_from: None,
+                reset_at: at / 3,
+                skip: 0,
                 last_text: String::new(),
                 line: first_line,
                 behind: false,
@@ -358,20 +379,46 @@ impl Captioner {
                 s
             }
         };
-        let text = serde_json::from_str::<Value>(&raw).ok().and_then(|v| v.get("text").and_then(|t| t.as_str()).map(tidy)).unwrap_or_default();
+        let heard = serde_json::from_str::<Value>(&raw).ok().and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_owned)).unwrap_or_default();
+        // The line so far: what the recogniser has since it started afresh, minus the lines already sent from it.
+        let rest = match heard.get(side.skip..) {
+            Some(rest) => rest,
+            None => {
+                side.skip = 0;
+                heard.as_str()
+            }
+        };
         let endpoint = last || unsafe { so::SherpaOnnxOnlineStreamIsEndpoint(rec, side.stream) != 0 };
-        if !text.is_empty() && (endpoint || text != side.last_text) && !self.closed.load(Ordering::SeqCst) {
+        if !rest.trim().is_empty() && side.spoken_from.is_none() {
+            side.spoken_from = Some(side.fed);
+        }
+        // Talk without a pause: the line ends at its last whole word and the recogniser carries on with the next one.
+        let long = !endpoint && side.spoken_from.is_some_and(|at| side.fed - at >= LONG_LINE);
+        let cut = if long { cut_at_word(rest) } else { None };
+        let text = tidy(cut.map_or(rest, |sp| &rest[..sp]));
+        let ends = endpoint || cut.is_some();
+        if !text.is_empty() && (ends || text != side.last_text) && !self.closed.load(Ordering::SeqCst) {
             let r = INPUT_RATE as f64;
+            // The line starts where its first words were said, not where the line before it ended: a subtitle that is
+            // on screen through the whole pause before the sentence gives the sentence away.
+            let start = side.spoken_from.map_or(side.line_start, |at| at.saturating_sub(FIRST_WORDS_LAG).max(side.line_start));
             (self.emit)(json!({
-                "type": "caption", "id": format!("l{}", side.line), "text": text, "final": endpoint,
-                "start": ((side.line_start as f64 / r) * 1000.0).round() / 1000.0,
+                "type": "caption", "id": format!("l{}", side.line), "text": text, "final": ends,
+                "start": ((start as f64 / r) * 1000.0).round() / 1000.0,
                 "end": ((side.fed as f64 / r) * 1000.0).round() / 1000.0, "language": "en",
             }));
         }
         side.last_text = text.clone();
-        if endpoint {
-            unsafe { so::SherpaOnnxOnlineStreamReset(rec, side.stream) };
+        if ends {
+            if endpoint || side.fed - side.reset_at >= LONG_TALK {
+                unsafe { so::SherpaOnnxOnlineStreamReset(rec, side.stream) };
+                side.reset_at = side.fed;
+                side.skip = 0;
+            } else if let Some(sp) = cut {
+                side.skip += sp;
+            }
             side.line_start = side.fed;
+            side.spoken_from = None;
             side.last_text.clear();
             if !text.is_empty() {
                 side.line += 1;
@@ -427,7 +474,7 @@ impl Drop for Captioner {
 
 #[cfg(test)]
 mod tests {
-    use super::tidy;
+    use super::{cut_at_word, tidy};
 
     #[test]
     fn tidy_capitalises_the_line_and_i() {
@@ -435,5 +482,21 @@ mod tests {
         assert_eq!(tidy("it is ice"), "It is ice");
         assert_eq!(tidy("hi i'd say"), "Hi I'd say");
         assert_eq!(tidy("  "), "");
+    }
+
+    #[test]
+    fn a_long_line_is_cut_before_its_last_word_and_only_when_a_whole_word_comes_before_it() {
+        let rest = " but poor rachel smi";
+        assert_eq!(cut_at_word(rest), Some(16));
+        assert_eq!(&rest[..16], " but poor rachel"); // what goes out as the line
+        assert_eq!(&rest[16..], " smi"); // what opens the next one
+        assert_eq!(cut_at_word("poor smi"), Some(4));
+        assert_eq!(cut_at_word("smi"), None); // one word, still growing
+        assert_eq!(cut_at_word(" smi"), None); // nothing but blanks before it
+        assert_eq!(cut_at_word("   smi"), None);
+        assert_eq!(cut_at_word(""), None);
+        assert_eq!(cut_at_word("  "), None);
+        assert_eq!(cut_at_word(" but poor rachel smi  "), Some(16)); // blanks after the last word do not count
+        assert_eq!(cut_at_word(" but poor rachel smi "), Some(16));
     }
 }
