@@ -43,7 +43,7 @@ function HeroArt() {
 }
 
 const FAQ = [
-  ['Does the free tool upload my audio?', 'No. It runs right in your browser, on your own device, and nothing about your file is sent anywhere. You do need a free account to use it, to keep bots away.'],
+  ['Does the free tool upload my audio?', 'No. It runs right in your browser, on your own device, and nothing about your file is sent anywhere. It needs no account.'],
   ['How fast is it?', 'Usually a little over a minute of waiting for every ten minutes of audio on a normal laptop. You get a progress bar and an estimate, so you know what to expect.'],
   ['Is this always the best option?', 'No, and we’d rather tell you. YouTube already gives English uploads free automatic captions and free auto-translate, and big English channels get free live captions. OBS and NVIDIA Broadcast have free noise filters that are fine for mild noise, and Macs have Voice Isolation. If you only want captions on your own screen, Windows, Macs, Chrome and phones have free built-in Live Captions. Every option here has a “Good to know” note saying when something you already have is enough. We’re for stubborn noise, Twitch and other sites, files you keep, and fewer mistakes.'],
   ['What is Denoising for?', 'Longer recordings and finished files. We remove the noise, Leveling evens out the voice and sets the loudness (podcast, YouTube or broadcast), and you can add subtitles and a transcript in the same go. Your computer stays free in the meantime.'],

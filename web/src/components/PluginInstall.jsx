@@ -9,7 +9,7 @@ export const PLUGIN_DOWNLOADS = `${API}downloads/obs-plugin`;
 
 const Code = ({ children }) => <code className="mono install-code">{children}</code>;
 const ADD_FILTER = (
-  <li>Start OBS. In the <b>Audio Mixer</b>, click the three dots (or right-click) next to your microphone, choose <b>Filters</b>, click <b>+</b> and pick <b>Audio Cleaner</b>. Paste your API key into it.</li>
+  <li>Start OBS. In the <b>Audio Mixer</b>, click the three dots (or right-click) next to your microphone, choose <b>Filters</b>, click <b>+</b> and pick <b>Audio Cleaner (cloud)</b>. Paste your API key into it.</li>
 );
 
 /**

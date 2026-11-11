@@ -61,7 +61,7 @@ function ObsSetup() {
       <ol className="ol-steps mb0">
         <li>Create an API key on this page with <b>OBS plugin and live</b> switched on, and copy it.</li>
         <li>Download and install the Audio Cleaner OBS plugin below. You need OBS 31 or newer; restart OBS afterwards.</li>
-        <li>In OBS, add the <b>Audio Cleaner</b> filter to your microphone source and paste the key.</li>
+        <li>In OBS, add the <b>Audio Cleaner (cloud)</b> filter to your microphone source and paste the key.</li>
         <li>Pick how much delay you can live with (80, 150 or 250 ms), turn on captions if you want them, and go live.</li>
       </ol>
       <PluginInstall />
@@ -174,7 +174,7 @@ function LiveDemo({ pricing, offline }) {
   const translateRate = findRate(pricing, 'stream_translate', 'standard');
   const mediaOk = !!(navigator.mediaDevices?.getUserMedia && window.AudioWorklet && window.WebSocket);
 
-  useEffect(() => () => session.current?.stop(), []);
+  useEffect(() => () => { session.current?.stop(); roomStop.current?.abort(); }, []);
   useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight }); }, [lines]);
 
   const onEvent = useCallback((ev) => {

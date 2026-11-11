@@ -19,7 +19,7 @@ Speech denoising and transcription, self-hosted.
 - **Desktop app** (free, Windows/macOS): the Studio clean chain running locally
   on video and audio files, batch queue, preview with original/cleaned toggle.
 
-Prepaid credit, no subscription: top up from $10, optional auto-reload.
+Prepaid credit, no subscription: top up from $5, optional auto-reload.
 
 ## Layout
 
@@ -75,8 +75,8 @@ and `redo` (saving changes to a finished job, the strength slider, a job made th
 
 ## Licences
 
-Everything except `obs-plugin/` is proprietary, all rights reserved (see `LICENSE`); the
-source is visible but not licensed for reuse. OBS plugin: GPL-2.0-or-later. Third-party:
+The website and the service (`server/`, `web/`, `deploy/`, `docs/`, `tools/`) are proprietary, all rights reserved (see `LICENSE`); the
+source is visible but not licensed for reuse. Desktop app (`desktop/`, with `common/` and `native/deepfilter/`): MIT. OBS plugin (`obs-plugin/`): GPL-2.0-or-later. Third-party:
 DeepFilterNet (MIT/Apache-2.0), DPDFNet (Apache-2.0), Sidon and onnx-asr (MIT), WebRTC AEC3 via the
 LiveKit SDK (BSD / Apache-2.0), tract (MIT/Apache-2.0), NVIDIA Parakeet and NeMo models (CC BY 4.0), FFmpeg (server: GPL build run as
 a separate program, never distributed; desktop: LGPL build shipped as separate executables),

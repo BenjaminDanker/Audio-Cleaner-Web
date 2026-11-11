@@ -12,7 +12,7 @@ Exceptions:
     tools/public-desktop/template/LICENSE). They are published as the
     repository https://github.com/BenjaminDanker/Audio-Cleaner.
   * obs-plugin/ is licensed under the GNU General Public License v2.0 or
-    later (see obs-plugin/LICENSE), because it links against libobs.
+    later (see obs-plugin/LICENSE.txt), because it links against libobs.
   * Third-party components keep their own licences (see the Licenses page of
     the website and the notices next to each component).
 

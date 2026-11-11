@@ -249,7 +249,7 @@ def test_the_eula_is_the_mit_license_and_keeps_the_open_source_rights():
         assert model in eula, model
     assert "replace the Qt or FFmpeg files with your own builds" in eula  # the LGPL right to swap the libraries
     assert "checks the app's releases on GitHub for a newer version" in eula and "your IP address" in eula  # says what goes online
-    assert "from the app's releases on GitHub" in eula and "download server" not in eula  # where the models come from too
+    assert "once, from Hugging Face (huggingface.co)" in eula and "download server" not in eula  # where the models come from too
     for restriction in ("may not", "reverse engineer", "decompile", "all rights reserved", "end this licence"):
         assert restriction not in eula.lower(), restriction  # no terms on top of the MIT License
 
