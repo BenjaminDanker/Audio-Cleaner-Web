@@ -404,9 +404,13 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     sound (Listen to Original / Cleaned and the speakers of the rows); change a part or a setting and "Save changes" makes a new file next to the
     last one (`redo.py`). "Delete this job" is in Your files.
   * *Dialogs* are only for what the web also shows as one: "All the options" (the (i); also Help), Settings (File > Settings: where results are saved, the
-    usual type of audio files, files at once, updates, the model downloads), About, and the questions that protect something (stop cleaning, delete a
-    job, replace a file). Everything about a file is on the screen. Files added together: the first is in the editor, the rest wait in the jobs column
-    ("Not started") with their own settings; "Start all" in the column's menu starts them.
+    usual type of audio files, files at once, updates, the model downloads), About, "Use these settings for other files", and the questions that
+    protect something (stop cleaning, delete a job, replace a file). Everything about a file is on the screen. Files added together: the first is in the
+    editor, the rest wait in the jobs column ("Not started") with their own settings. "Use these settings for other files…" in the start row gives
+    the ticked waiting files the settings of the file in the editor (whole file: Automatic stays Automatic, so each file decides for itself; parts stay
+    with their file, the others get what most of it has; each keeps its own name; `doc.FileSettings`), and any of them can still be changed on its
+    own. "Start all N" (start row, and the column's menu) puts every waiting file in line with its own settings; one still being read starts once it
+    is read, one that can't start is named with why.
   * *Fast to open.* Nothing is read on the window's thread and nothing is decoded in full before the screen shows (`gui/doc.py`, `quick_look.py`): the file's
     facts (a probe), the waveform (streamed at 8 kHz in one channel: an hour in about 2 s, drawn as it fills), and what Automatic picks (about a minute of
     the file read from a few stretches, the same ones `pipeline.measure_windows` uses on the whole recording) arrive as they are ready, with visible

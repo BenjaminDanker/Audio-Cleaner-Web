@@ -45,4 +45,5 @@ class FileItem:
     keep_dir: Path | None = None  # the folder the saved copies of the run in line (or running) go to
     timeline: dict | None = None  # what to do to which part (None: the whole file with the options as they are)
     entry_id: int = 0  # the job list's entry once the run is recorded
+    start_when_read: bool = False  # Start all was pressed while the file was still being read: it starts once it is
     doc: object | None = None  # the editor's state for this file (doc.Doc)

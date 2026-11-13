@@ -82,6 +82,8 @@ class Studio(QWidget):
     chooseFolder = Signal()
     differentFile = Signal()
     primaryClicked = Signal()
+    startAllClicked = Signal()
+    shareClicked = Signal()
     cancelClicked = Signal()
     deleteRequested = Signal()
     openResult = Signal()
@@ -98,6 +100,8 @@ class Studio(QWidget):
         self.prefs = prefs
         self.doc: Doc | None = None
         self.problems: Callable[[Doc], list[str]] = lambda doc: []
+        # (files not started yet: all of them, and the others this file's settings can go to)
+        self.waiting: Callable[[Doc | None], tuple[int, int]] = lambda doc: (0, 0)
         self.out_dir: Callable[[], Path | None] = lambda: None
         self.preview: JobPreview | None = None
         self._refresh_timer = QTimer(self, singleShot=True, interval=0, timeout=self._refresh_all)
@@ -208,6 +212,8 @@ class Studio(QWidget):
         o.nextToOriginal.connect(self.nextToOriginal)
         s = self.start
         s.startClicked.connect(self.primaryClicked)
+        s.startAllClicked.connect(self.startAllClicked)
+        s.shareClicked.connect(self.shareClicked)
         s.cancelClicked.connect(self.cancelClicked)
         s.set_fillers(self._fill_details, self._fill_files)
 
@@ -376,6 +382,8 @@ class Studio(QWidget):
     # ------------------------------------------------------------------------------------------------------ the start row
     def _refresh_start(self) -> None:
         doc, s = self.doc, self.start
+        waiting, others = self.waiting(doc)
+        s.set_many(doc is not None and doc.model is not None and doc.stage != "processing" and others > 0, waiting)
         if doc is None or doc.model is None:
             s.set_mode("empty")
             s.set_button("Start", False)

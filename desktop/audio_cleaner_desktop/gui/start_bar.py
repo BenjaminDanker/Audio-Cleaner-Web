@@ -71,8 +71,14 @@ def _drop(layout) -> None:
             _drop(item.layout())
 
 
+SHARE_LONG, SHARE_SHORT = "Use these settings for other files…", "Settings for others…"  # (the short one in a narrow window)
+NARROW = 820
+
+
 class StartBar(Pane):
     startClicked = Signal()
+    startAllClicked = Signal()
+    shareClicked = Signal()
     cancelClicked = Signal()
     deleteRequested = Signal()
 
@@ -107,10 +113,20 @@ class StartBar(Pane):
         self.button.setMinimumWidth(200)
         self.button.setMinimumHeight(40)
         self.button.clicked.connect(self.startClicked)
+        # Several files: this file's settings for the others, and all of them in line at once (they run one after the other).
+        self.share = link_button(SHARE_LONG, "Give the files that are waiting the settings of this file")
+        self.share.clicked.connect(self.shareClicked)
+        self.share.hide()
+        self.all_button = QPushButton("Start all")
+        self.all_button.setMinimumHeight(40)
+        self.all_button.clicked.connect(self.startAllClicked)
+        self.all_button.hide()
         lay.addWidget(self.progress_box, 1)
         lay.addStretch(1)
+        lay.addWidget(self.share)
         lay.addWidget(self.details)  # (beside the button, like the website's balance)
         lay.addWidget(self.files)
+        lay.addWidget(self.all_button)
         lay.addWidget(self.button)
         self.popover = Popover(self)
         self._fill: dict[str, Callable[[Popover], None]] = {}
@@ -133,6 +149,18 @@ class StartBar(Pane):
                 self.bar.setValue(int(fraction * 1000))
             self.cancel.setText(cancel)
             self.cancel.setVisible(bool(cancel))
+
+    def set_many(self, share: bool, waiting: int) -> None:
+        """`share`: offer this file's settings to the files that wait; `waiting`: how many files are not started yet (Start all shows from 2)."""
+        self.share.setVisible(share)
+        self.all_button.setVisible(waiting >= 2)
+        self.all_button.setText(f"Start all {waiting}")
+        self.all_button.setToolTip(f"Put all {waiting} files that are waiting in line, each with its own settings. They are cleaned one after "
+                                   "the other, so you can leave them to it.")
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.share.setText(SHARE_SHORT if self.width() < NARROW else SHARE_LONG)
 
     def set_button(self, label: str, enabled: bool, tip: str = "", state: str = "") -> None:
         self.button.setText(label)

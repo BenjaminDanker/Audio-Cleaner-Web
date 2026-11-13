@@ -15,7 +15,7 @@ from pathlib import Path
 from PySide6.QtCore import QRunnable, QSettings, QStandardPaths, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QBoxLayout, QFileDialog, QFrame, QLineEdit, QMainWindow, QMessageBox, QScrollArea, QSystemTrayIcon, QVBoxLayout,
+    QApplication, QBoxLayout, QDialog, QFileDialog, QFrame, QLineEdit, QMainWindow, QMessageBox, QScrollArea, QSystemTrayIcon, QVBoxLayout,
     QWidget,
 )
 
@@ -32,10 +32,11 @@ from .items import CANCELLED, DONE as ITEM_DONE, FAILED as ITEM_FAILED, RUNNING,
 from .jobs_column import JobsColumn, format_spent
 from .preferences import Preferences
 from .settings_dialog import SettingsDialog
+from .share_settings import Choice, ShareSettingsDialog
 from .speech_model import SpeechModelDownloader, size_text
 from .studio import Studio
 from .theme import set_property
-from .widgets import Banner
+from .widgets import Banner, format_time
 from .worker import Job, JobQueue
 from .workers import Worker
 from ..labels import STRENGTH_LABELS, settings_dict
@@ -211,6 +212,7 @@ class MainWindow(QMainWindow):
         self.body.setSpacing(14)
         self.studio = Studio(self.prefs, self.speech_download, self.voice_download)
         self.studio.problems = self._problems
+        self.studio.waiting = self._waiting
         self.studio.out_dir = self.prefs.output_dir
         self.jobs = JobsColumn(self.history, lambda: list(self._items.values()), lambda: self._queued)
         self.jobs.setFixedWidth(JOBS_WIDTH)
@@ -237,6 +239,8 @@ class MainWindow(QMainWindow):
         s.chooseFolder.connect(self.choose_folder)
         s.differentFile.connect(self.different_file)
         s.primaryClicked.connect(self.primary)
+        s.startAllClicked.connect(self.start_all)
+        s.shareClicked.connect(self.share_settings)
         s.cancelClicked.connect(self.cancel_current)
         s.deleteRequested.connect(self.delete_current)
         s.changeFolder.connect(self._change_folder)
@@ -370,8 +374,14 @@ class MainWindow(QMainWindow):
 
     def _probed_one(self, doc: Doc) -> None:
         self._probing.discard(doc)
-        if not self._closing:
-            self._probe_more()
+        if self._closing:
+            return
+        self._probe_more()
+        item = doc.item
+        if item is not None and item.start_when_read and doc.model is not None:
+            item.start_when_read = False
+            if item.state == WAITING and item.id in self._items and not self.start_item(item):
+                self._say_held([(item, (self._problems(doc) or ["it can't be started"])[0])])
 
     def _unreadable(self, doc: Doc, message: str) -> None:
         """A file that can't be read: it is not taken in, and it is said so (in the editor when it is the one that was to be shown)."""
@@ -560,9 +570,72 @@ class MainWindow(QMainWindow):
         self.primary()
 
     def start_all(self) -> None:
-        """Start every file that is waiting, each with its own choices."""
+        """Start every file that is waiting, each with its own choices (they run one after the other). One that is still being read starts once
+        it is read; one that can't start is named, with why."""
+        held = []
         for item in [i for i in self._items.values() if i.state == WAITING and i.id not in self._queued]:
-            self.start_item(item)
+            doc = item.doc
+            if doc is not None and doc.model is None and not doc.error and not self._missing:
+                item.start_when_read = True
+                continue
+            if not self.start_item(item) and doc is not None and doc.model is not None:
+                problems = self._problems(doc)
+                if problems:
+                    held.append((item, problems[0]))
+        self._say_held(held)
+
+    def _say_held(self, held: list) -> None:
+        if not held:
+            return
+        item, why = held[0]
+        if len(held) == 1:
+            self.banner_files.show_message(f"{item.path.name} was not started: {why} Open it to see more.", "warn")
+        else:
+            self.banner_files.show_message(f"{len(held)} files were not started. {item.path.name}: {why} Open them to see more.", "warn")
+
+    def _waiting(self, doc: Doc | None) -> tuple[int, int]:
+        """(files that are waiting and not in line yet, those of them besides `doc` that can take its settings)"""
+        waiting = [i for i in self._items.values() if i.state == WAITING and i.id not in self._queued]
+        return len(waiting), len(self._others(doc))
+
+    def _others(self, doc: Doc | None) -> list[FileItem]:
+        """The files that can take the settings of `doc`: not started, not in line, and not `doc` itself."""
+        if doc is None:
+            return []
+        return [i for i in self._items.values() if i.state in (WAITING, CANCELLED) and i.id not in self._queued and i.doc is not None
+                and i.doc is not doc and not i.doc.error and i.doc.stage == "ready"]
+
+    def share_settings(self) -> None:
+        """The settings of the file in the editor for the files that are waiting (the ones ticked in the list)."""
+        doc = self.doc
+        settings = doc.settings() if doc is not None else None
+        others = self._others(doc)
+        if settings is None or not others:
+            return
+        choices = []
+        for it in others:
+            bits = [format_time(it.duration)] if it.duration else []
+            try:
+                bits.append(format_size(it.path.stat().st_size))
+            except OSError:
+                pass
+            choices.append(Choice(it.id, it.path.name, "  ·  ".join(bits)))
+        has_video = doc.facts.has_video if doc.facts is not None else False
+        dlg = ShareSettingsDialog(doc.name, settings.describe(has_video), choices, had_parts=settings.had_parts, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        given = 0
+        for item_id in dlg.chosen():
+            item = self._items.get(item_id)
+            if item is not None and item.doc is not None and item.state in (WAITING, CANCELLED) and item.id not in self._queued:
+                item.doc.take_settings(settings)
+                given += 1
+        if given:
+            waiting = self._waiting(doc)[0]
+            start = f" Press Start all to clean all {waiting} one after the other." if waiting >= 2 else ""
+            self.banner_files.show_message(f"{_plural(given, 'file has', 'files have')} the settings of {doc.name} now. Open one to change it on its "
+                                           f"own.{start}", "info")
+        self._draw_jobs()
 
     def start_item(self, item: FileItem) -> bool:
         doc = item.doc

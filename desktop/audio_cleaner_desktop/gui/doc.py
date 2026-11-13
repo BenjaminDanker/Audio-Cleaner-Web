@@ -20,9 +20,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from acw_common.timeline import Timeline
+from acw_common.timeline import LAYERS, Timeline
 
-from .. import copies, editor_job, editor_session, engine, quick_look, redo, resources, speed
+from .. import copies, editor_job, editor_session, engine, labels, quick_look, redo, resources, speed
 from ..editor_model import STRENGTH_DB, EditModel
 from .history import Entry
 from .items import FileItem
@@ -107,6 +107,61 @@ class Facts:
         return engine.Source(self.has_video, self.ext, self.video_codec, self.duration, self.channels)
 
 
+@dataclass(frozen=True)
+class FileSettings:
+    """The choices of one file that another can be given ("Use these settings for other files"): about the file as a whole, since the
+    parts of a recording are about its own moments. `layers` None: Automatic, which each file decides for itself; else per layer what most
+    of the file has (None: off). `ending`: the type of the result when another than the usual one was picked."""
+
+    layers: dict | None
+    subtitles: str
+    language: str
+    video_size: str
+    ending: str | None = None
+    had_parts: bool = False
+    # (Automatic only: what it does besides what it picks, from the remembered choices; for the words)
+    auto_leveling: str | None = None  # the loudness, None: no leveling
+    auto_echo: bool = False
+
+    def describe(self, has_video: bool) -> str:
+        """In words, as the job list says it ("Strong noise reduction, leveled (podcast), subtitles: ...")."""
+        s: dict = {"subtitles": self.subtitles, "video_size": self.video_size}
+        if self.layers is None:
+            s.update(strength=engine.AUTO_STRENGTH, leveling=self.auto_leveling is not None, loudness=self.auto_leveling,
+                     echo_track=self.auto_echo)
+        else:
+            noise, level = self.layers.get("noise"), self.layers.get("leveling")
+            s["rebuild_voice"] = self.layers.get("rebuild") is not None
+            if noise is not None:
+                s["strength_db"] = noise.get("strength_db")
+                s["noise"] = noise.get("remover", "auto")
+            elif not s["rebuild_voice"]:
+                s["strength_db"] = 0
+            s["echo_track"] = self.layers.get("echo") is not None
+            s["leveling"] = level is not None
+            if level is not None:
+                s["loudness"] = editor_job.loudness_key(level.get("loudness_lufs"))
+        text = labels.describe_settings(s, has_video)
+        if self.layers is not None and self.layers.get("noise") is None and self.layers.get("rebuild") is None:
+            text = ", ".join(["no noise reduction", *text.split(", ")[1:]])  # (the first piece says the noise reduction)
+        if self.ending:
+            text += f", saved as {self.ending}"
+        return text
+
+
+def _most_of(tl: Timeline, layer: str) -> dict | None:
+    """The settings that most of the recording has in this layer (None: most of it has the layer off)."""
+    time: dict[str, float] = {}
+    settings: dict[str, dict] = {}
+    for part in tl.layers[layer]:
+        key = repr(sorted((part.settings or {}).items()))
+        time[key] = time.get(key, 0.0) + part.seconds
+        settings[key] = dict(part.settings or {})
+    if not time or sum(time.values()) < tl.seconds / 2:
+        return None
+    return settings[max(time, key=time.get)]
+
+
 def facts_of_job(job: copies.JobCopies, path: Path) -> Facts:
     m = job.media
     try:
@@ -162,6 +217,8 @@ class Doc(QObject):
         self.video_size = env.prefs.video_size
         self.out_name = ""
         self.out_custom = False
+        self._given: FileSettings | None = None  # settings given from another file before this one was read: they are used once it is
+        self._taking = False
         # the live sound of a job
         self.session: editor_session.Session | None = None
         self.session_state = "none"  # "none" | "opening" | "ready" | "failed"
@@ -266,6 +323,9 @@ class Doc(QObject):
             if not item.out_custom:
                 item.out_name = engine.default_output_name(self.path, item.source, self.env.prefs.job_options())
             self.out_name, self.out_custom = item.out_name, item.out_custom
+        if self._given is not None:
+            given, self._given = self._given, None
+            self.take_settings(given)
         self.changed.emit()
         self.factsReady.emit()
         if self.active:
@@ -463,7 +523,7 @@ class Doc(QObject):
     def _remember_choices(self) -> None:
         """What was chosen for the whole file is what the next file starts with (not what Automatic picked: that is decided again)."""
         m = self.model
-        if m is None or self.auto or editor_job.has_parts(m.draft):
+        if m is None or self.auto or self._taking or editor_job.has_parts(m.draft):
             return
         p, tl = self.env.prefs, m.draft
         p.leveling = bool(tl.layers["leveling"])
@@ -478,6 +538,66 @@ class Doc(QObject):
             if key:
                 p.strength = key
             p.noise = st["remover"]
+
+    # -- the same settings for other files ---------------------------------------------------------------------------------------
+    def settings(self) -> FileSettings | None:
+        """What this file is set to, for other files (None: nothing to give yet, the file is still being read)."""
+        m = self.model
+        if m is None:
+            return None
+        tl = m.draft
+        auto = not self.is_job and self.auto and (self.untouched_auto or not self.applied)
+        usual = engine.split_name(engine.default_output_name(self.path, self.facts.source(), self.env.prefs.job_options()))[1] \
+            if self.facts is not None else ""
+        ending = engine.split_name(self.out_name)[1] if self.out_name else ""
+        p = self.env.prefs
+        return FileSettings(None if auto else {name: _most_of(tl, name) for name in LAYERS}, self.subtitles, self.language, self.video_size,
+                            ending if ending and ending != usual else None, had_parts=not auto and editor_job.has_parts(tl),
+                            auto_leveling=p.loudness if p.leveling else None, auto_echo=bool(p.echo_track))
+
+    def take_settings(self, s: FileSettings) -> None:
+        """Take another file's settings (a file that has not been started). Its own name stays; a file still being read takes them once it
+        is read. Undo brings back what it had, except after Automatic (which decides afresh for this file)."""
+        if self.is_job or self.stage != "ready":
+            return
+        m = self.model
+        if m is None or self.facts is None:
+            self._given = s
+            return
+        self._taking = True  # (what this file is given is not remembered as the choices new files start with: that file's own were)
+        try:
+            self._take(s, m)
+        finally:
+            self._taking = False
+
+    def _take(self, s: FileSettings, m: EditModel) -> None:
+        self.subtitles, self.language, self.video_size = s.subtitles, s.language, s.video_size
+        m._remember()
+        if s.layers is None:  # Automatic: this file decides for itself (when it is opened, or by the run)
+            self.stop("listen")
+            self.listening, self.auto, self.applied, self.auto_base, self.choices = False, True, False, None, None
+            self._after_started = False
+            m.draft = editor_session.baseline_for(self.options_for(auto=False), self.seconds, echo=self._echo_wanted())
+            m.clear_history()
+        else:
+            self.stop("listen")
+            self.listening, self.auto, self.applied, self.auto_base = False, False, False, None
+            tl = Timeline(self.seconds)
+            for name, st in s.layers.items():
+                if st is not None and (name != "echo" or self.facts.tracks >= 2):
+                    tl.paint(name, 0.0, tl.seconds, dict(st) or None)
+            if s.layers.get("leveling") is not None:
+                m._loudness = s.layers["leveling"].get("loudness_lufs", m._loudness)
+            m.draft = tl
+        source = self.facts.source()
+        if s.ending and not self.out_custom and s.ending in engine.available_endings(source):
+            usual = engine.default_output_name(self.path, source, self.env.prefs.job_options())
+            name = engine.with_ending(usual, s.ending)
+            self.set_out_name(name, custom=name != usual)
+        if self.subtitles == "embed" and engine.split_name(self.out_name)[1] not in engine._EMBED_ENDINGS:
+            self.subtitles = "srt"  # (only a video file can hold them)
+        m._changed()
+        self.changed.emit()
 
     # -- the choices about the whole file ---------------------------------------------------------------------------------------
     def set_subtitles(self, kind: str) -> None:
