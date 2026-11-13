@@ -133,7 +133,12 @@ async def transcribe_chunks(chunk_dir: Path, language: str | None = None, max_se
         return text
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=20)) as http:
-        texts = await asyncio.gather(*(one(p) for p in paths))
+        # Every segment runs to its end before a failure is raised: one that fails must not cut off the others before
+        # they are saved (they would be paid for again on the next attempt).
+        texts = await asyncio.gather(*(one(p) for p in paths), return_exceptions=True)
+    for t in texts:
+        if isinstance(t, BaseException):
+            raise t
     return [
         Segment(float(c["offset"]), float(c["offset"]) + float(c["seconds"]), text)
         for c, text in zip(chunks, texts)
