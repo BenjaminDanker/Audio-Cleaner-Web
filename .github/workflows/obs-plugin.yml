@@ -129,8 +129,10 @@ jobs:
         run: cmake -S . -B build_tests -DACW_BUILD_PLUGIN=OFF -DACW_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF
       - name: Build
         run: cmake --build build_tests --config RelWithDebInfo --parallel
+      # The shared runners here wake timers late and connect slowly at random (a different 5 s wait runs out each time), so a
+      # test program that fails is run again, up to three times in all; one that is really broken fails every time.
       - name: Unit and loopback tests
-        run: ctest --test-dir build_tests -C RelWithDebInfo --output-on-failure
+        run: ctest --test-dir build_tests -C RelWithDebInfo --output-on-failure --repeat until-pass:3
 
   # ---------------------------------------------------------------------------
   linux:
