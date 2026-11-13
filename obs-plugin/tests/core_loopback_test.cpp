@@ -862,7 +862,7 @@ static Capture run_audio(Session &s, double secs)
 		proc = blk;
 		const auto t0 = steady_clock::now();
 		s.process(proc.data(), proc.size());
-		c.max_call_us = std::max<long long>(c.max_call_us, duration_cast<microseconds>(steady_clock::now() - t0).count());
+		c.max_call_us = (std::max<long long>)(c.max_call_us, duration_cast<microseconds>(steady_clock::now() - t0).count());
 		c.in.insert(c.in.end(), blk.begin(), blk.end());
 		c.out.insert(c.out.end(), proc.begin(), proc.end());
 		t += milliseconds(10);
@@ -2141,8 +2141,8 @@ static void test_silence_frames()
 		CHECK(c.out.size() > from + 4800);  // enough was delivered to look at
 		double peak = 0;
 		size_t loud = 0;
-		for (size_t i = std::min(from, c.out.size()); i < c.out.size(); ++i) {
-			peak = std::max<double>(peak, std::fabs(c.out[i]));
+		for (size_t i = (std::min)(from, c.out.size()); i < c.out.size(); ++i) {
+			peak = (std::max<double>)(peak, std::fabs(c.out[i]));
 			loud += c.out[i] != 0.0f;
 		}
 		// A block whose reply came in time is zeros. One whose reply did not (late, or not even sent yet: on a slow
@@ -2290,7 +2290,12 @@ static void test_network_thread_sleeps()
 		// The fake service answers at once, so the round trip is how long a finished frame waits for the network thread:
 		// it wakes when the frame is due, as late as this machine's timers make it (not at the next ping or watchdog).
 		CHECK(b.rtt_avg_ms < 30.0 + 3.0 * timer_late_ms);
-		CHECK(b.late - a.late <= 2 && b.dropped == 0);
+		// A reply is late when it is not back by the time its block plays; on time timers that is at most a couple of
+		// frames (the start of the window). A runner whose timers wake late (a mac VM: 20 ms) makes one more frame late per
+		// ~4 ms of lateness, but never more than a quarter of the window: if most frames are late, the thread is not keeping up.
+		const double late_frames = static_cast<double>(b.late - a.late);
+		const double late_allowed = (std::min)(2.0 + timer_late_ms / 4.0, 0.25 * 1.5 * 48000.0 / 960.0);
+		CHECK(late_frames <= late_allowed && b.dropped == 0);
 		src.stop();
 		s.stop(0, 500);
 	}

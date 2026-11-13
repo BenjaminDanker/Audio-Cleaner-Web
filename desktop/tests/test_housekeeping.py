@@ -251,7 +251,8 @@ def test_a_run_writes_down_its_temporary_file_and_folder_while_it_works_and_leav
         seen.append((Path(path).name, Path(path).parent, Path(path).is_dir(), Path(path).exists(), note is not None and note.is_file()))
         return note
 
-    monkeypatch.setattr(engine, "note_unfinished", record)  # (no scratch folder is set: the work folder is made beside the result)
+    monkeypatch.setattr(engine, "note_unfinished", record)
+    monkeypatch.setattr(engine, "scratch_root", lambda: None)  # (no scratch folder, as on Linux: the work folder is made beside the result)
     result = engine.process(speech_wav, engine.JobOptions(audio_format="flac"), out_dir=out)
     files = [x for x in seen if not x[2]]
     folders = [x for x in seen if x[2]]
@@ -271,6 +272,7 @@ def test_a_stopped_or_failed_run_leaves_no_note(speech_wav, tmp_path, monkeypatc
     written = []
     real = engine.note_unfinished
     monkeypatch.setattr(engine, "note_unfinished", lambda path: written.append(Path(path).name) or real(path))
+    monkeypatch.setattr(engine, "scratch_root", lambda: None)  # (as on Linux: the work folder is beside the result, so it is noted too)
     for error in (engine.Cancelled(), RuntimeError("the render broke")):  # (stopped, and failed: both in the middle of the work)
         def render(*a, **k):
             raise error
@@ -290,6 +292,9 @@ def test_a_job_writes_its_work_files_to_the_scratch_folder(speech_wav, tmp_path,
     if resources.check():
         pytest.skip("native components missing")
     monkeypatch.setenv("ACW_DESKTOP_SCRATCH", str(tmp_path / "scratch"))
+    noted = []
+    real_note = engine.note_unfinished
+    monkeypatch.setattr(engine, "note_unfinished", lambda path: noted.append(Path(path)) or real_note(path))
     seen = []
     real = engine.shutil.rmtree
 
@@ -303,6 +308,7 @@ def test_a_job_writes_its_work_files_to_the_scratch_folder(speech_wav, tmp_path,
     out = tmp_path / "out"
     result = engine.process(speech_wav, engine.JobOptions(audio_format="flac"), out_dir=out)
     assert seen == [tmp_path / "scratch"]
+    assert [p.parent for p in noted] == [out]  # (only the temporary result file is noted: a leftover in the scratch folder is swept by age)
     assert sorted(p.name for p in out.iterdir()) == [result.output.name]
     assert list((tmp_path / "scratch").iterdir()) == []
     assert list(engine._unfinished_dir().iterdir()) == []  # (a normal run leaves no note behind)

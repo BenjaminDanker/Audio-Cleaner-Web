@@ -261,7 +261,7 @@ def test_a_stopped_change_leaves_nothing_behind_and_the_blocks_stay(clip, tmp_pa
 def test_a_change_writes_down_its_temporary_file_and_folder_while_it_works_and_leaves_no_note(clip, tmp_path, monkeypatch):
     first, job = first_run(clip, tmp_path, strength="max")
     no_models(monkeypatch)
-    monkeypatch.delenv("ACW_DESKTOP_SCRATCH", raising=False)  # (Linux: no scratch folder, the work folder is made beside the result)
+    monkeypatch.setattr(engine, "scratch_root", lambda: None)  # (as on Linux: no scratch folder, the work folder is made beside the result)
     seen = []
     real = engine.note_unfinished
 
