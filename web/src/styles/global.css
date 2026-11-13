@@ -86,6 +86,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
 
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+/* a short page still has its footer at the bottom of the window (not the page's grey under it) */
+#root { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; }
+#root > main { flex: 1 0 auto; }
 .skip-link { position: absolute; left: 8px; top: -60px; background: var(--brand); color: var(--brand-contrast); padding: 8px 14px; border-radius: 8px; z-index: 200; }
 .skip-link:focus { top: 8px; }
 
