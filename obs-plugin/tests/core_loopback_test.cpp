@@ -2295,7 +2295,14 @@ static void test_network_thread_sleeps()
 		// ~4 ms of lateness, but never more than a quarter of the window: if most frames are late, the thread is not keeping up.
 		const double late_frames = static_cast<double>(b.late - a.late);
 		const double late_allowed = (std::min)(2.0 + timer_late_ms / 4.0, 0.25 * 1.5 * 48000.0 / 960.0);
-		CHECK(late_frames <= late_allowed && b.dropped == 0);
+		// Timers that wake a whole frame late make every frame late, so the count proves nothing there.
+		const double frame_ms = 1000.0 * static_cast<double>(kFrameSamples) / 48000.0;
+		if (timer_late_ms >= frame_ms) {
+			std::printf("  late count not judged: this machine's timers wake later than a frame\n");
+			CHECK(b.dropped == 0);
+		} else {
+			CHECK(late_frames <= late_allowed && b.dropped == 0);
+		}
 		src.stop();
 		s.stop(0, 500);
 	}
