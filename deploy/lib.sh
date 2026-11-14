@@ -32,7 +32,7 @@ else
   H="${ACW_HOME:-$HOME/audio-cleaner}"
 fi
 
-# The website's build needs Node 20 or newer (CI builds with 22; an older one only warns at npm ci and breaks later).
+# The website's build needs Node 20 or newer (CI builds with 24; an older one only warns at npm ci and breaks later).
 # Used by publish-web.sh, and by install.sh BEFORE it touches the server, so a deploy never puts new server code live next
 # to a website it then cannot build.
 require_node() {
@@ -41,11 +41,11 @@ require_node() {
   [ "$major" -ge 20 ] 2>/dev/null && return 0
   version="$(node --version 2>/dev/null || echo missing)"
   where="$(command -v node 2>/dev/null || true)"
-  say_fail "Node $version${where:+ ($where)} is too old: the website needs Node 20 or newer (22 like CI)."
+  say_fail "Node $version${where:+ ($where)} is too old: the website needs Node 20 or newer (24 like CI)."
   {
-    echo "  Install Node 22 (docs/operations.md, \"Node.js\"), then run the deploy again:"
-    echo "    curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh && sudo bash /tmp/nodesource_setup.sh   # only adds the repository"
-    echo "    sudo apt-get install -y nodejs     # this installs it (apt-cache policy nodejs shows Candidate 22.x once the repository is there)"
+    echo "  Install Node 24 (docs/operations.md, \"Node.js\"), then run the deploy again:"
+    echo "    curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource_setup.sh && sudo bash /tmp/nodesource_setup.sh   # only adds the repository"
+    echo "    sudo apt-get install -y nodejs     # this installs it (apt-cache policy nodejs shows Candidate 24.x once the repository is there)"
   } >&2
   return 1
 }

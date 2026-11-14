@@ -116,15 +116,17 @@ Rollback keeps units, packages and the database as they are; schema changes are 
 
 ### Node.js
 
-The website is built on primary-ram with Node 22 (the same major as CI); `deploy/publish-web.sh` stops on anything older
-than 20. Ubuntu 24.04's own `nodejs` is 18, so Node comes from NodeSource:
+The website is built on primary-ram with Node 24 (the same major as CI; 22 gets no fixes after April 2027); `deploy/publish-web.sh`
+stops on anything older than 20. Ubuntu 24.04's own `nodejs` is 18, so Node comes from NodeSource:
 
-    curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh && sudo bash /tmp/nodesource_setup.sh
+    curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource_setup.sh && sudo bash /tmp/nodesource_setup.sh
     sudo apt-get install -y nodejs        # replaces Ubuntu's nodejs and npm packages
-    node --version                        # v22.x
+    sudo npm install -g npm@12            # Node 24 brings npm 11; npm 12 blocks the packages' own install scripts
+    node --version                        # v24.x (npm --version: 12.x)
 
-The first command only adds the NodeSource repository; the second is what installs Node 22. If `node --version` still says 18
-after the first one alone, `apt-cache policy nodejs` shows `Installed: 18.x` next to `Candidate: 22.x`: run the second command.
+The first command only adds the NodeSource repository; the second is what installs Node 24. If `node --version` still says an
+older one after the first one alone, `apt-cache policy nodejs` shows the old `Installed:` next to `Candidate: 24.x`: run the second
+command.
 `install.sh` checks Node before it stages or restarts anything when the website has to be published, so an old Node stops the
 deploy with production untouched. (A user-space Node in `~/.local` would also work, but the PATH has `~/.local/bin` last,
 after `/usr/bin`, so it would have to be put first in `~/.profile`; the apt route needs no PATH changes.)

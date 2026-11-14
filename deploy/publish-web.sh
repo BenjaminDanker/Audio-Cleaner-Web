@@ -20,7 +20,7 @@ if [ -n "$ACW_SERVICE_USER" ] && [ "$(id -un)" = "$ACW_SERVICE_USER" ]; then
   exit 1
 fi
 cd "$REPO/web"
-# The website's libraries need Node 20 or newer (CI builds with 22; an older one only warns at npm ci and breaks later).
+# The website's libraries need Node 20 or newer (CI builds with 24; an older one only warns at npm ci and breaks later).
 require_node || exit 1
 npm ci --no-audit --no-fund
 LEGAL_ENV="$(bash "$REPO/deploy/legal-archive.sh")"   # version and archive the Terms and the Privacy Policy; the versions for the build (stdout)
