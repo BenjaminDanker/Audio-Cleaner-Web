@@ -6,7 +6,7 @@ One small VPS (IONOS VPS Linux XS: 1 vCPU, 1 GB, Ubuntu 24.04, Kansas City; its 
 | Name | What | How it reaches home |
 |---|---|---|
 | `audiocleaner.live` (and `www.`, redirected) | Audio Cleaner: the website (served from this VPS, `/srv/audio-cleaner/website`) and its API | SSH reverse tunnels that primary-ram opens (below) |
-| `mc-multi-world.space` | the Minecraft network's web address: resource packs (`/srv/minecraft/resource-packs`), the pet companion's Stripe checkout (another project, its own tunnel on 18788), and the old Audio Cleaner address `/audio` (redirects; its API still answers for old OBS plugin builds) | |
+| `mc-multi-world.space` | the Minecraft network's web address: resource packs (`/srv/minecraft/resource-packs`), the pet companion's Stripe checkout (another project, its own tunnel on 18788) and its Terms and Privacy pages (`/terms`, `/privacy` from `/srv/minecraft/site`), and the old Audio Cleaner address `/audio` (redirects; its API still answers for old OBS plugin builds) | |
 | Minecraft (ports 25565, 19132/udp) | the Minecraft network itself | frp: `frps` here, `frpc` on the Velocity proxy machine at home (192.168.1.200) |
 
 Nothing else of ours is on the VPS: no data, no secrets beyond the frp token. The free tools' models come from
@@ -30,11 +30,13 @@ connection and 420+ on four, about 350 up; over SSH to the VPS (what the tunnels
 | unattended-upgrades | | Ubuntu default | security updates by themselves |
 | Website files | `silver` | `/srv/audio-cleaner/website` | `deploy/publish-web.sh` (from primary-ram, rsync) |
 | Resource packs | `silver` | `/srv/minecraft/resource-packs` | `scp <name>.zip vps:/srv/minecraft/resource-packs/` (~/mc-servers/README.md) |
+| Pet Companion Terms and Privacy | `silver` | `/srv/minecraft/site` | `scp site/*.html vps:/srv/minecraft/site/` (from MC-Mods/Shared-Mods/Social/Pet-Companion) |
 
 ### Where things are
 
     /srv/audio-cleaner/website      the audiocleaner.live website (deploy/publish-web.sh)
     /srv/minecraft/resource-packs   the Minecraft servers' resource packs, served at mc-multi-world.space/pack/<name>.zip
+    /srv/minecraft/site             Pet Companion's Terms and Privacy, served at mc-multi-world.space/terms and /privacy
     /srv/caddy/sites                one Caddy settings file per domain (= deploy/vps/sites/)
     /srv/caddy/publishing           new site files on their way in (publish-sites.sh)
     /srv/caddy/previous             the last live sites, put back when new ones do not load

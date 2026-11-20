@@ -16,6 +16,14 @@ mc-multi-world.space {
 	handle @return {
 		reverse_proxy 127.0.0.1:18788
 	}
+	# Its Terms and Privacy Policy (the checkout's agree box links them): static pages from /srv/minecraft/site, owned by
+	# silver; source MC-Mods/Shared-Mods/Social/Pet-Companion/site (publish: scp site/*.html vps:/srv/minecraft/site/).
+	@petpages path /terms /privacy
+	handle @petpages {
+		root * /srv/minecraft/site
+		rewrite * {path}.html
+		file_server
+	}
 
 	# Resource packs of the Minecraft servers: /pack/<name>.zip from /srv/minecraft/resource-packs (owned by silver; publish:
 	# scp <name>.zip vps:/srv/minecraft/resource-packs/). /pack/tech/... and /pack/magitech/... are the packs' versioned URLs.

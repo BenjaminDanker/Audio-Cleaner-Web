@@ -6,7 +6,7 @@
 #   1. packages: Caddy (official repository), ufw, fail2ban, unattended-upgrades
 #   2. SSH: keys only, no root login
 #   3. firewall: only the ports below are open
-#   4. folders the normal user owns, by project: /srv/audio-cleaner/website, /srv/minecraft/resource-packs, /srv/caddy/{sites,
+#   4. folders the normal user owns, by project: /srv/audio-cleaner/website, /srv/minecraft/{resource-packs,site}, /srv/caddy/{sites,
 #      publishing,previous}; files of the older layout (/var/www/audio, /var/www/pack, /srv/edge) are copied over first
 #   5. frps (the Minecraft tunnel) as its own user, from /opt/frp and /etc/frp, instead of root and /root
 #   6. Caddy: /etc/caddy/Caddyfile imports /srv/caddy/sites/*.caddy, so publish-sites.sh changes sites without sudo; once it
@@ -58,13 +58,13 @@ ufw status | sed -n '1,30p'
 
 say "4. folders for $OWNER"
 install -d -m 0755 /srv/audio-cleaner /srv/minecraft /srv/caddy
-install -d -o "$OWNER" -g "$OWNER" -m 0755 /srv/audio-cleaner/website /srv/minecraft/resource-packs \
+install -d -o "$OWNER" -g "$OWNER" -m 0755 /srv/audio-cleaner/website /srv/minecraft/resource-packs /srv/minecraft/site \
   /srv/caddy/sites /srv/caddy/publishing /srv/caddy/previous
 # The older layout's files, copied (not moved: Caddy keeps serving them until step 6 switches it over).
 copy_old() { if [ -d "$1" ] && [ -z "$(ls -A "$2")" ]; then cp -a "$1"/. "$2"/ && chown -R "$OWNER:$OWNER" "$2" && echo "copied $1 -> $2"; fi; }
 copy_old /var/www/audio /srv/audio-cleaner/website
 copy_old /var/www/pack /srv/minecraft/resource-packs
-echo "/srv/audio-cleaner/website /srv/minecraft/resource-packs /srv/caddy/{sites,publishing,previous}"
+echo "/srv/audio-cleaner/website /srv/minecraft/{resource-packs,site} /srv/caddy/{sites,publishing,previous}"
 
 say "5. frps as its own user"
 OLD=/root/frp_0.65.0_linux_amd64
