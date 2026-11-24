@@ -1231,7 +1231,8 @@ class MainWindow(QMainWindow):
     def _update_ready(self) -> None:
         """A newer version has been downloaded (updater.py checked its signature and checksum)."""
         version = self.updater.ready_version
-        if not version:
+        if not version:  # none, or updates were turned off: no restart is waiting for the files either
+            self._restart_when_idle = False
             self.banner_update.hide()
         elif sys.platform == "darwin":
             self.banner_update.show_message(f"Audio Cleaner {version} is downloaded and ready to install.", "info", action_text="Install")
@@ -1260,7 +1261,7 @@ class MainWindow(QMainWindow):
     def _restart_for_update(self) -> None:
         """Close the app; setup then installs the new version and starts it (updater.install_on_close)."""
         self._restart_when_idle = False
-        if self.queue.busy or self._closing:
+        if self.queue.busy or self._closing or not self.updater.ready_version:
             return
         self.updater.relaunch = True
         self.close()

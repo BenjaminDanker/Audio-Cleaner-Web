@@ -120,8 +120,10 @@ class SettingsDialog(QDialog):
                              "background. It sends nothing but a normal web request: your IP address and the version of this app.\n\n"
                              "• Windows: the new version installs by itself when you close the app, over the old one. Your settings, history and models stay.\n"
                              "• Mac: a message offers to open the installer; it asks for your password as any installer does.\n\n"
-                             "Every update is checked against a digital signature and a checksum before it is used. Turn this off to update by hand (download "
-                             "the new installer from the releases page and run it).")
+                             "Every update is checked against a digital signature and a checksum before it is used.\n\n"
+                             "Turn this off to stay on this version: nothing is downloaded or installed, and an update that was already downloaded "
+                             "is deleted. Check now then only tells you whether there is a newer version. To update by hand, download the new "
+                             "installer from the releases page and run it.")
         up.layout_.addWidget(self._updates)
         row = QHBoxLayout()
         self._check_now = QPushButton("Check now")
@@ -146,7 +148,7 @@ class SettingsDialog(QDialog):
         self._browse.clicked.connect(self._change_folder)
         self._format.currentIndexChanged.connect(lambda _: self._store("audio_format", self._format.currentData()))
         self._parallel.currentIndexChanged.connect(lambda _: self._store("parallel", self._parallel.currentData()))
-        self._updates.toggled.connect(lambda v: self._store("check_updates", v))
+        self._updates.toggled.connect(self._updates_toggled)
         self._check_now.clicked.connect(updater.check_now)
         updater.statusChanged.connect(self._show_update_status)
         self._show_update_status(updater.status)
@@ -170,6 +172,10 @@ class SettingsDialog(QDialog):
         setattr(self._prefs, key, value)
         self._refresh()
         self.changed.emit()
+
+    def _updates_toggled(self, on: bool) -> None:
+        self._store("check_updates", on)
+        self.updater.setting_changed()  # off: a downloaded update is deleted and never installed
 
     def _show_update_status(self, text: str) -> None:
         self._status.setText(text)

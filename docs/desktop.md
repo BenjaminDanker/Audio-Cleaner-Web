@@ -156,7 +156,8 @@ its own (versions compare as numbers, so 2.0.15 is newer than 2.0.9), picks the 
 (`windows-x86_64`, `macos-arm64`, `macos-x86_64`) and downloads that installer into the app's data folder
 (`%LOCALAPPDATA%\Audio Cleaner\Audio Cleaner\updates`, `~/Library/Application Support/Audio Cleaner/Audio Cleaner/updates`)
 with the model downloader's code (`models.fetch_file`: https only, never a redirect to http, resumable, size and SHA-256
-checked, free space checked first). The download address is the release of the version the manifest names plus the
+checked, free space checked first, and a server that sends more than the pinned size is cut off before the extra bytes
+are written, so no download can fill the disk). The download address is the release of the version the manifest names plus the
 file name (`config.release_url(version)`), not taken from the manifest. Only the newest download is kept;
 the verified manifest is saved next to it, so the next start finds the download again without asking the server (and checks
 the signature and the file's hash once more). A manifest with a bad or missing signature, a size or hash that does not
@@ -173,21 +174,38 @@ match, an unexpected file name, or no file for the platform is never used; every
   version, "Restart now" does. "Restart now" waits for a running batch to finish (the banner says so) and then closes the
   app; setup is started with `/RELAUNCH=1`, which makes a silent setup start the new version as the original user (the
   second `[Run]` entry in `AudioCleaner.iss`; without the parameter a silent setup starts nothing). A silent setup never
-  downloads models; if a new version needs different models the app offers the download as usual.
+  downloads models; if a new version needs different models the app offers the download as usual. The installer that
+  setup runs is the file that was checked: right before starting it the app opens it so that nothing can write,
+  replace, rename or delete it (`updater.open_locked`, read sharing only), reads its size and SHA-256 through that same
+  handle, and hands the handle down to setup (`STARTUPINFO` handle list), so the file stays locked until setup has
+  finished, after the app has quit too. Setup is started by the locked file's real path (`updater.final_path`,
+  GetFinalPathNameByHandle), so a junction or link on the way can't send it to another file. A program on the user's account can't swap it between the check and an
+  all-users install that the user approves at the administrator prompt.
 * **macOS.** The banner says "Audio Cleaner <v> is downloaded and ready to install." with an "Install" button that opens
   the `.pkg` with `open`; the macOS installer asks for the password. Nothing is silent. (A file the app downloads itself
   does not get the quarantine flag, so Gatekeeper does not block the opened `.pkg`.)
 * **Settings.** The checkbox, a "Check now" button and a line of text: "You have the newest version (2.0.15).",
-  "Downloading 2.0.16... 40%", "Version 2.0.16 is ready...", or the error. Turning the checkbox off stops checks and
-  automatic installs; the user can still install a new version by hand.
+  "Downloading 2.0.16... 40%", "Version 2.0.16 is ready...", or the error. **Turning the checkbox off keeps the
+  installed version**: no automatic check, nothing is downloaded or installed, a check or download under way stops, and
+  an update that was already downloaded is deleted (`UpdateController.setting_changed`), so it is not installed when the
+  app closes, the banner goes away, and a "Restart now" that was waiting for a batch is called off. A download the app
+  had no time to delete (it was closed right after) is deleted at the next start while the setting is off. "Check now" then only
+  says whether there is a newer version ("Version 2.0.16 is available. Updates are off, so nothing was downloaded.").
+  With the setting off, closing the app never starts setup and the Mac "Install" button opens nothing, whatever is on
+  disk. The user can still install a new version by hand.
 
-**The signature.** CI signs `update.json` in the release job (`desktop.yml`) with a raw Ed25519 signature over the exact
+**The signature.** CI signs `update.json` in its own job (`sign` in `desktop.yml`) with a raw Ed25519 signature over the exact
 bytes of the file: `openssl pkeyutl -sign -rawin -inkey KEY.pem -in update.json -out update.json.sig` (64 bytes). The
 private key is the GitHub Actions secret **`UPDATE_SIGNING_KEY`** (the PEM file, with its `-----BEGIN PRIVATE KEY-----`
-lines); a copy is kept offline, outside the repository. The release job builds `update.json` with
-`packaging/make_update_manifest.py` (version, publish time, and the name, size and SHA-256 of the three
-installers, keys sorted), signs it, checks the signature against the key's public half and uploads both files with the
-installers, for automatic and tagged releases alike. It fails closed: **without the secret, or with a key that is not
+lines); a copy is kept offline, outside the repository. Three jobs share the work so that no code from the repository
+ever runs on a machine that holds a secret (otherwise code pushed to the branch could copy the key or a token out):
+`update-info` builds `update.json` with `packaging/make_update_manifest.py` (version, publish time, and the name, size
+and SHA-256 of the three installers, keys sorted) with read access only; `sign` runs nothing but its own lines in the
+workflow and openssl: it checks that the key's public half is `PUBLIC_KEY` (read from `updater.py` as text), signs, and
+verifies the signature; `release` publishes the installers and both files with the tokens, again without running
+anything from the repository (the version comes from `update-info` and is checked to be a version number). The same
+for automatic and tagged releases. Changing the workflow file needs a GitHub sign-in that may edit workflows, so a
+sign-in that can only push code can get a release signed, but can't get at the key. It fails closed: **without the secret, or with a key that is not
 the one built into the app, the release gets no `update.json`** (a warning or error annotation shows it) and no installed
 app updates itself; the installers are still published. The public key is `PUBLIC_KEY` in `updater.py` (raw Ed25519,
 base64). Signature checking uses the `cryptography` package, pinned in `requirements.lock` (48.0.1, the newest release
@@ -205,8 +223,8 @@ version and hashes; `openssl pkeyutl -verify -rawin -pubin -inkey PUB.pem -in up
 new key; **apps already installed only trust the old key**, so they cannot update themselves to it. They have to
 get one last release signed with the OLD key whose app already contains the new `PUBLIC_KEY`: do step 3 in two pushes
 (first change `PUBLIC_KEY` while the secret still holds the old key, wait for that release; then replace the secret).
-`make_update_manifest.py check-key` (run by the release job) refuses a secret that does not match `PUBLIC_KEY`, so a
-mistake in the order publishes no manifest instead of one nobody trusts. Users who miss the bridging release install
+The `sign` job refuses a secret that does not match `PUBLIC_KEY` (`make_update_manifest.py check-key` does the same check by
+hand), so a mistake in the order publishes no manifest instead of one nobody trusts. Users who miss the bridging release install
 the newest setup by hand.
 
 **If the secret leaks.** The key alone does not let anyone push a file to the apps: the manifest only names a file (the app builds the address itself, in the public repository's releases, and downloads it over https),

@@ -215,12 +215,16 @@ def updates_dir() -> Path:
 
 
 def _sha256_of(path: Path, cancel: threading.Event | None = None) -> str:
-    h = hashlib.sha256()
     with open(path, "rb") as f:
-        while chunk := f.read(1 << 20):
-            if cancel is not None and cancel.is_set():
-                raise models.Cancelled
-            h.update(chunk)
+        return _sha256_read(f, cancel)
+
+
+def _sha256_read(f, cancel: threading.Event | None = None) -> str:
+    h = hashlib.sha256()
+    while chunk := f.read(1 << 20):
+        if cancel is not None and cancel.is_set():
+            raise models.Cancelled
+        h.update(chunk)
     return h.hexdigest()
 
 
@@ -336,13 +340,81 @@ def windows_installer_command(installer: str | Path, exe: str | Path, relaunch: 
     return cmd
 
 
-def start_windows_installer(installer: Path, relaunch: bool) -> None:
-    """Start setup detached from this process (it outlives the app) and without a console window."""
+GENERIC_READ = 0x80000000
+FILE_SHARE_READ = 0x00000001
+OPEN_EXISTING = 3
+
+
+def open_locked(path: Path):
+    """Windows: `path` opened for reading so that, while the handle is open, no program can write, replace, rename or
+    delete the file (others may still read and run it). A binary file object; raises OSError."""
+    import _winapi
+    import msvcrt
+
+    handle = _winapi.CreateFile(str(path), GENERIC_READ, FILE_SHARE_READ, _winapi.NULL, OPEN_EXISTING, 0, _winapi.NULL)
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except OSError:
+        _winapi.CloseHandle(handle)
+        raise
+    return os.fdopen(fd, "rb")
+
+
+def locked_installer(path: Path, entry: UpdateFile):
+    """Windows: the installer opened with open_locked() when it is intact, else None. The size and SHA-256 are read
+    through that same handle, so the file that was checked is the file setup runs from (start_windows_installer)."""
+    try:
+        f = open_locked(path)
+    except OSError:
+        return None
+    try:
+        if os.fstat(f.fileno()).st_size == entry.size and _sha256_read(f) == entry.sha256:
+            return f
+    except OSError:
+        pass
+    f.close()
+    return None
+
+
+def final_path(f) -> str:
+    """Windows: the real path of the open file `f` (GetFinalPathNameByHandle: every junction and link on the way
+    resolved), as an ordinary path. Raises OSError."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get = kernel32.GetFinalPathNameByHandleW
+    get.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    get.restype = wintypes.DWORD
+    buf = ctypes.create_unicode_buffer(32768)
+    n = get(msvcrt.get_osfhandle(f.fileno()), buf, len(buf), 0)
+    if n == 0 or n >= len(buf):
+        raise ctypes.WinError(ctypes.get_last_error())
+    path = buf.value
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[len("\\\\?\\UNC\\"):]
+    return path[len("\\\\?\\"):] if path.startswith("\\\\?\\") else path
+
+
+def start_windows_installer(installer: Path, relaunch: bool, locked=None) -> None:
+    """Start setup detached from this process (it outlives the app) and without a console window. `locked`, the
+    installer opened by locked_installer(), is handed down to setup, so the file stays locked until setup has
+    finished, also after this app has quit: nothing can swap it between the check and the install. Setup is started
+    by the locked file's real path, so a junction or link on the way can't point it at another file."""
+    extra = {}
+    if locked is not None:
+        import msvcrt
+
+        installer = Path(final_path(locked))
+        handle = msvcrt.get_osfhandle(locked.fileno())
+        os.set_handle_inheritable(handle, True)
+        extra["startupinfo"] = subprocess.STARTUPINFO(lpAttributeList={"handle_list": [handle]})  # only this handle
     cmd = windows_installer_command(installer, Path(sys.executable), relaunch)
     log.info("starting the update: %s", cmd)
     subprocess.Popen(
         cmd, creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, close_fds=True,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **extra,
     )
 
 
@@ -420,9 +492,14 @@ class UpdateController(QObject):
 
     # -- starting a check -------------------------------------------------------------------------------------
     def schedule_startup_check(self, delay_ms: int = STARTUP_DELAY_MS) -> None:
-        """Check once, shortly after the window opened (the app has to be frozen, and the setting on)."""
-        if self.enabled and self._prefs.check_updates:
+        """Check once, shortly after the window opened (the app has to be frozen, and the setting on). With the setting
+        off, a download that is still there (the app quit before it could delete it) is deleted now."""
+        if not self.enabled:
+            return
+        if self._prefs.check_updates:
             QTimer.singleShot(delay_ms, self.startup_check)
+        else:
+            self._drop_download()
 
     def startup_check(self) -> None:
         if self.enabled and self._prefs.check_updates:
@@ -442,35 +519,68 @@ class UpdateController(QObject):
             return
         self._cancel.clear()
         wanted = manual or self.due()
+        fetch = bool(self._prefs.check_updates)  # off: "Check now" only says whether there is a newer version
         self.busy = True
         self._set_status("Checking for updates..." if wanted else self.status)
-        self._thread = threading.Thread(target=self._work, args=(wanted, manual), name="update-check", daemon=True)
+        self._thread = threading.Thread(target=self._work, args=(wanted, manual, fetch), name="update-check", daemon=True)
         self._thread.start()
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    def setting_changed(self) -> None:
+        """Settings turned updates on or off. Off keeps this version: a check or download under way stops, and an
+        update already downloaded is deleted, so it is never installed (not when the app closes, not by "Restart
+        now")."""
+        if self._prefs.check_updates:
+            return
+        if self.running:
+            self._forget()  # at once: nothing is ready from now on
+            self._cancel.set()  # _on_outcome deletes the files once the worker has stopped
+        else:
+            self._drop_download()
+        if self.status.startswith(("Checking", "Downloading", "Version")):
+            self._set_status("")
+
+    def _forget(self) -> None:
+        had = self.ready_update is not None
+        self.ready_update = self.ready_path = None
+        self.relaunch = False
+        if had:
+            self.readyChanged.emit()
+
+    def _drop_download(self) -> None:
+        """Forget and delete the downloaded update (GUI thread, while no worker runs)."""
+        self._forget()
+        try:
+            prune(self.folder, None)
+        except OSError:
+            log.warning("could not delete the downloaded update", exc_info=True)
 
     def wait(self, timeout: float | None = None) -> None:
         if self._thread is not None:
             self._thread.join(timeout)
 
     # -- the worker thread --------------------------------------------------------------------------------------
-    def _work(self, network: bool, manual: bool) -> None:
+    def _work(self, network: bool, manual: bool, fetch: bool = True) -> None:
         try:
-            outcome = self._run(network)
+            outcome = self._run(network, fetch)
         except models.Cancelled:
-            return
+            outcome = _Outcome(False, "")  # still reported: the GUI thread is no longer busy and tidies up
         except (UpdateError, models.DownloadError) as e:
             log.info("update check failed: %s", e)
             outcome = _Outcome(False, f"Could not check for updates: {e}")
         except Exception as e:  # noqa: BLE001 - an update problem must never reach the user as a crash
             log.exception("update check failed")
             outcome = _Outcome(False, f"Could not check for updates ({type(e).__name__}).")
-        self._outcome.emit(outcome, manual)
+        try:
+            self._outcome.emit(outcome, manual)
+        except RuntimeError:  # the window is gone (the app quit while this ran)
+            pass
 
-    def _run(self, network: bool) -> _Outcome:
+    def _run(self, network: bool, fetch: bool = True) -> _Outcome:
         folder = self.folder
-        have = pending(folder, self._current, self._key, self._public_key, self._cancel)
+        have = pending(folder, self._current, self._key, self._public_key, self._cancel) if fetch else None
         if have is not None and not network:
             return _Outcome(False, "", *have)
         if not network:
@@ -479,9 +589,13 @@ class UpdateController(QObject):
         manifest_url, signature_url, base = self._urls
         update = check(self._current, self._key, opener=opener, manifest_url=manifest_url, signature_url=signature_url,
                        public_key=self._public_key)
+        if self._cancel.is_set():  # stopped (updates turned off, or the app is closing) while it asked the server
+            raise models.Cancelled
         if update is None:
             prune(folder, None)
             return _Outcome(True, f"You have the newest version ({self._current}).")
+        if not fetch:  # updates are off: this version stays (not counted as a check: turned on, the next start downloads it)
+            return _Outcome(False, f"Version {update.version} is available. Updates are off, so nothing was downloaded.")
         if have is not None and have[0].version == update.version:
             return _Outcome(True, "", *have)
         last = [-1]
@@ -505,6 +619,10 @@ class UpdateController(QObject):
         self.busy = False
         if outcome.checked:
             self._prefs.update_last_check = self._clock()
+        if not self._prefs.check_updates:  # updates are off, or were turned off while this ran: nothing is kept
+            self._drop_download()
+            if outcome.update is not None:
+                outcome = _Outcome(outcome.checked, "")
         if outcome.update is not None and outcome.path is not None:
             changed = self.ready_version != outcome.update.version
             self.ready_update, self.ready_path = outcome.update, outcome.path
@@ -537,20 +655,25 @@ class UpdateController(QObject):
             return False
         if not self.relaunch and self._prefs.update_install_tried == version:
             return False
+        locked = None
         try:
-            if not is_complete(self.ready_path, self.ready_update.file):
+            locked = locked_installer(self.ready_path, self.ready_update.file)
+            if locked is None:
                 log.warning("the downloaded update is not intact any more; not installing it")
                 return False
             self._prefs.update_install_tried = version
-            start_windows_installer(self.ready_path, self.relaunch)
+            start_windows_installer(self.ready_path, self.relaunch, locked)
             return True
         except Exception:  # noqa: BLE001 - closing the app must always work
             log.exception("could not start the update")
             return False
+        finally:
+            if locked is not None:
+                locked.close()  # setup holds its own copy of the handle
 
     def open_installer(self) -> bool:
         """macOS: open the downloaded .pkg."""
-        if self.ready_path is None or self.ready_update is None:
+        if self.ready_path is None or self.ready_update is None or not self._prefs.check_updates:
             return False
         try:
             if not is_complete(self.ready_path, self.ready_update.file):

@@ -309,6 +309,7 @@ def _fetch(f: ModelFile, dest: Path, done_before: int, total: int, progress: Pro
         request = urllib.request.Request(f.url, headers={"User-Agent": user_agent or f"{config.APP_NAME} desktop"})
         if have:
             request.add_header("Range", f"bytes={have}-")
+        too_big = False
         try:
             with opener.open(request, timeout=_TIMEOUT) as response:
                 if have and response.status != 206:  # the server ignored the range: start over
@@ -317,6 +318,9 @@ def _fetch(f: ModelFile, dest: Path, done_before: int, total: int, progress: Pro
                     while chunk := response.read(_CHUNK):
                         if cancel is not None and cancel.is_set():
                             raise Cancelled
+                        if have + len(chunk) > f.size:  # more than the pinned size: a server can't fill the disk
+                            too_big = True
+                            break
                         out.write(chunk)
                         have += len(chunk)
                         if progress is not None:
@@ -327,6 +331,9 @@ def _fetch(f: ModelFile, dest: Path, done_before: int, total: int, progress: Pro
             if getattr(e, "code", None) == 416:  # the server has no more of it than we hold: this part can't be finished
                 part.unlink(missing_ok=True)
             raise DownloadError(f"The download stopped ({getattr(e, 'reason', e)}). Try again to continue where it left off.") from e
+        if too_big:
+            part.unlink(missing_ok=True)
+            raise DownloadError(f"{f.path} did not download correctly. Please try again.")
         if have < f.size:
             # The connection ended early without an error (http.client reads a short body as its end): what arrived is kept.
             raise DownloadError("The download stopped before the end. Try again to continue where it left off.")
