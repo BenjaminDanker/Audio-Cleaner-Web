@@ -7,11 +7,14 @@ import base64
 import hashlib
 import http.server
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
+import types
 from pathlib import Path
 
 import pytest
@@ -257,6 +260,20 @@ def test_a_download_that_does_not_match_the_manifest_is_never_kept(server, key, 
     assert updater.pending(folder, "2.0.3", WIN, _public(key)) is None
 
 
+def test_a_server_that_sends_more_than_the_pinned_size_is_cut_off_and_nothing_is_kept(server, tmp_path, monkeypatch):
+    size = 100_000
+    pinned = b"p" * size
+    _Handler.files["/big.bin"] = pinned + b"x" * 600_000  # the pinned file, and then some
+    monkeypatch.setattr(models, "_CHUNK", 64 * 1024)  # (so the first chunk fits and the second one does not)
+    dest = tmp_path / "big.bin"
+    on_disk = []
+    with pytest.raises(models.DownloadError, match="did not download correctly"):
+        models.fetch_file(f"{server}/big.bin", dest, size, hashlib.sha256(pinned).hexdigest(),
+                          lambda done, total: on_disk.append(dest.with_name("big.bin.part").stat().st_size))
+    assert on_disk and max(on_disk) <= size  # the extra bytes were never written
+    assert not list(tmp_path.glob("big.bin*"))  # neither the part nor the file
+
+
 def test_the_installer_comes_from_the_release_of_the_version_the_manifest_names(server, key, tmp_path, monkeypatch):
     # The manifest is the newest release's (config.LATEST_URL); the installer is a file of that version's own release
     # (config.release_url), whatever version the app itself is.
@@ -413,10 +430,194 @@ def test_the_update_setting_defaults_to_on_and_is_remembered(qapp, tmp_path):
     assert Preferences(QSettings(str(ini), QSettings.Format.IniFormat)).check_updates is False
 
 
+def _offline_controller(tmp_path, key, enabled=True, **kw) -> tuple[updater.UpdateController, Preferences]:
+    prefs = _prefs(tmp_path)
+    return updater.UpdateController(prefs, enabled=enabled, folder=tmp_path / "updates", current="2.0.3", key=WIN,
+                                    public_key=_public(key), **kw), prefs
+
+
+def _ready(ctl: updater.UpdateController, key: Ed25519PrivateKey, version: str = "2.0.15") -> Path:
+    """A downloaded update waiting in the controller's folder (the installer, update.json and its signature, and a file
+    of someone else's). Returns the folder."""
+    data, installer = _manifest(version)
+    folder = ctl.folder
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"AudioCleaner-{version}-Windows.exe").write_bytes(installer)
+    (folder / "update.json").write_bytes(data)
+    (folder / "update.json.sig").write_bytes(key.sign(data))
+    (folder / "notes.txt").write_text("not ours")
+    ctl.ready_update = updater.decide(data, key.sign(data), "2.0.3", WIN, _public(key))
+    ctl.ready_path = folder / f"AudioCleaner-{version}-Windows.exe"
+    return folder
+
+
+def test_turning_updates_off_forgets_and_deletes_a_downloaded_update(qapp, tmp_path, key, monkeypatch):
+    ctl, prefs = _offline_controller(tmp_path, key)
+    folder = _ready(ctl, key)
+    ready = []
+    ctl.readyChanged.connect(lambda: ready.append(ctl.ready_version))
+    ctl.relaunch = True  # "Restart now" had been chosen
+    prefs.check_updates = False
+    ctl.setting_changed()
+    assert ctl.ready_version is None and ctl.ready_path is None and not ctl.relaunch
+    assert ready == [None]  # the window hears of it once
+    assert [p.name for p in folder.iterdir()] == ["notes.txt"]  # no installer, no update.json, no signature
+    started = []
+    monkeypatch.setattr(updater, "start_windows_installer", lambda *args: started.append(args))
+    with monkeypatch.context() as m:
+        m.setattr(updater.sys, "platform", "win32")
+        assert not ctl.install_on_close()
+    assert started == []
+
+
+def test_turning_updates_on_keeps_a_downloaded_update(qapp, tmp_path, key):
+    ctl, prefs = _offline_controller(tmp_path, key)
+    folder = _ready(ctl, key)
+    ready = []
+    ctl.readyChanged.connect(lambda: ready.append(1))
+    ctl.setting_changed()  # the setting is on
+    assert ctl.ready_version == "2.0.15" and ready == []
+    assert (folder / "AudioCleaner-2.0.15-Windows.exe").is_file() and (folder / "update.json").is_file()
+
+
+def test_turning_updates_off_while_a_check_runs_forgets_the_update_at_once_and_deletes_it_when_the_check_ends(
+        qapp, tmp_path, server, key, monkeypatch):
+    _publish(server, key)
+    ctl, prefs = _controller(qapp, tmp_path, server, key)
+    folder = _ready(ctl, key)
+    real, reached, go = updater.check, threading.Event(), threading.Event()
+
+    def held(*args, **kwargs):  # the worker waits here (the check is under way) until the test lets it go
+        reached.set()
+        go.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(updater, "check", held)
+    ready = []
+    ctl.readyChanged.connect(lambda: ready.append(ctl.ready_version))
+    ctl.relaunch = True
+    ctl.check_now()
+    assert wait_until(reached.is_set, timeout=30) and ctl.running
+    prefs.check_updates = False
+    ctl.setting_changed()
+    assert ctl.ready_version is None and ctl.ready_path is None and not ctl.relaunch and ready == [None]  # at once
+    assert (folder / "AudioCleaner-2.0.15-Windows.exe").is_file()  # the files go when the worker has stopped
+    go.set()
+    assert wait_until(lambda: not ctl.busy, timeout=30)
+    assert ctl.ready_version is None and ready == [None]  # (nothing is announced twice, nothing comes back)
+    assert [p.name for p in folder.iterdir()] == ["notes.txt"]
+
+
+def _leftover_download(tmp_path, key, monkeypatch, enabled=True):
+    """A controller of a freshly started app that finds a download in its folder (the last run quit before deleting it)."""
+    ctl, prefs = _offline_controller(tmp_path, key, enabled=enabled)
+    folder = _ready(ctl, key)
+    ctl.ready_update = ctl.ready_path = None  # nothing is remembered, only the files are there
+    timers = []
+    monkeypatch.setattr(updater, "QTimer", types.SimpleNamespace(singleShot=lambda ms, fn: timers.append((ms, fn))))
+    return ctl, prefs, folder, timers
+
+
+def test_the_startup_check_with_updates_off_deletes_a_leftover_download_and_starts_no_check(qapp, tmp_path, key, monkeypatch):
+    ctl, prefs, folder, timers = _leftover_download(tmp_path, key, monkeypatch)
+    prefs.check_updates = False
+    ctl.schedule_startup_check()
+    assert [p.name for p in folder.iterdir()] == ["notes.txt"]  # no installer, no update.json, no signature
+    assert timers == [] and not ctl.busy and not ctl.running
+
+
+def test_the_startup_check_with_updates_on_is_scheduled_and_keeps_a_downloaded_update(qapp, tmp_path, key, monkeypatch):
+    ctl, prefs, folder, timers = _leftover_download(tmp_path, key, monkeypatch)
+    ctl.schedule_startup_check()
+    assert timers == [(updater.STARTUP_DELAY_MS, ctl.startup_check)]
+    assert (folder / "AudioCleaner-2.0.15-Windows.exe").is_file() and (folder / "update.json").is_file()
+
+
+def test_the_startup_check_of_a_copy_that_is_not_installed_does_nothing_even_with_updates_off(qapp, tmp_path, key, monkeypatch):
+    ctl, prefs, folder, timers = _leftover_download(tmp_path, key, monkeypatch, enabled=False)
+    prefs.check_updates = False
+    ctl.schedule_startup_check()
+    assert timers == [] and (folder / "AudioCleaner-2.0.15-Windows.exe").is_file() and (folder / "update.json").is_file()
+
+
+def test_an_update_that_finishes_downloading_after_updates_were_turned_off_is_not_kept(qapp, tmp_path, server, key):
+    _publish(server, key)
+    ctl, prefs = _controller(qapp, tmp_path, server, key)
+    ready = []
+    ctl.readyChanged.connect(lambda: ready.append(ctl.ready_version))
+    ctl.check_now()
+    ctl.wait(30)  # the download is done and its result waits for the GUI thread (nothing has processed events)
+    assert not ctl.running
+    prefs.check_updates = False  # turned off in the meantime
+    assert wait_until(lambda: not ctl.busy, timeout=30)
+    assert ctl.ready_version is None and ready == [] and ctl.status == ""
+    assert not list((tmp_path / "updates").glob("AudioCleaner-*")) and not (tmp_path / "updates" / "update.json").exists()
+
+
+def test_check_now_with_updates_off_only_says_that_a_newer_version_exists(qapp, tmp_path, server, key):
+    _publish(server, key)
+    ctl, prefs = _controller(qapp, tmp_path, server, key)
+    prefs.check_updates = False
+    ctl.check_now()
+    assert wait_until(lambda: not ctl.busy and ctl.status.startswith("Version"), timeout=30)
+    assert ctl.status == "Version 2.0.15 is available. Updates are off, so nothing was downloaded."
+    assert [r.split()[0] for r in _Handler.requests] == ["/desktop/update.json", "/desktop/update.json.sig"]  # no installer asked for
+    assert not list((tmp_path / "updates").glob("AudioCleaner-*")) and ctl.ready_version is None
+
+
+def test_a_cancelled_download_ends_the_check_so_the_controller_is_not_busy_any_more(qapp, tmp_path, server, key, monkeypatch):
+    _publish(server, key)
+    ctl, _ = _controller(qapp, tmp_path, server, key)
+    real, reached, go = updater.download, threading.Event(), threading.Event()
+
+    def held(*args, **kwargs):  # the worker waits here until the test has cancelled
+        reached.set()
+        go.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(updater, "download", held)
+    ctl.check_now()
+    assert wait_until(reached.is_set, timeout=30) and ctl.busy
+    ctl.cancel()
+    go.set()
+    assert wait_until(lambda: not ctl.busy, timeout=30)
+    assert ctl.ready_version is None and ctl.status == "" and not (tmp_path / "updates" / "update.json").exists()
+    ctl.check_now()  # and a new check can start
+    assert ctl.busy
+    ctl.wait(30)
+    assert wait_until(lambda: not ctl.busy, timeout=30) and ctl.ready_version == "2.0.15"
+
+
+def test_the_installer_is_not_opened_when_updates_are_off(qapp, tmp_path, key, monkeypatch):
+    ctl, prefs = _offline_controller(tmp_path, key)
+    _ready(ctl, key)
+    opened = []
+    monkeypatch.setattr(updater, "open_mac_installer", opened.append)
+    assert ctl.open_installer() and len(opened) == 1  # (the setting is on)
+    prefs.check_updates = False
+    assert not ctl.open_installer() and len(opened) == 1
+
+
 # ---- the window ------------------------------------------------------------------------------------------------
 def test_closing_starts_the_installer_once_per_version(qapp, tmp_path, monkeypatch):
-    started = []
-    monkeypatch.setattr(updater, "start_windows_installer", lambda path, relaunch: started.append((path.name, relaunch)))
+    started, handed, opened = [], [], []
+
+    def locked_installer(path, entry):  # what Windows' locked_installer does (size + SHA-256 through the open file)
+        f = open(path, "rb")
+        data = f.read()
+        if len(data) == entry.size and hashlib.sha256(data).hexdigest() == entry.sha256:
+            f.seek(0)
+            opened.append(f)
+            return f
+        f.close()
+        return None
+
+    def start_windows_installer(path, relaunch, locked=None):
+        started.append((path.name, relaunch))
+        handed.append(locked)
+
+    monkeypatch.setattr(updater, "locked_installer", locked_installer)
+    monkeypatch.setattr(updater, "start_windows_installer", start_windows_installer)
     prefs = _prefs(tmp_path)
     ctl = updater.UpdateController(prefs, enabled=True)
     entry_bytes = b"setup" * 50
@@ -431,17 +632,45 @@ def test_closing_starts_the_installer_once_per_version(qapp, tmp_path, monkeypat
     monkeypatch.setattr(updater.sys, "platform", "win32")
     try:
         assert ctl.install_on_close() and started == [(path.name, False)]
+        assert handed == opened and opened[0].closed  # setup got the locked file, and this app let go of it afterwards
         assert prefs.update_install_tried == "2.0.15"
         assert not ctl.install_on_close() and len(started) == 1  # a cancelled setup is not started at every close
         ctl.relaunch = True  # "Restart now" is a clear request
         assert ctl.install_on_close() and started[-1] == (path.name, True)
+        assert handed == opened and len(opened) == 2 and opened[1].closed
         prefs.check_updates = False
         assert not ctl.install_on_close()  # switched off since: nothing starts
         prefs.check_updates = True
         path.write_bytes(entry_bytes[:-1] + b"X")  # the file changed since it was verified
-        assert not ctl.install_on_close() and len(started) == 2
+        assert not ctl.install_on_close() and len(started) == 2 and len(opened) == 2
     finally:
         monkeypatch.undo()
+
+
+def test_the_window_drops_its_banner_and_a_waiting_restart_when_updates_are_turned_off(qapp, tmp_path, key, monkeypatch):
+    import studio_helpers as sh
+    from audio_cleaner_desktop.gui.main_window import MainWindow
+
+    settings = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
+    prefs = Preferences(settings)
+    ctl = updater.UpdateController(prefs, enabled=False, folder=tmp_path / "updates", current="2.0.3", key=WIN,
+                                   public_key=_public(key))
+    _ready(ctl, key)
+    w = MainWindow([], settings=settings, history_path=tmp_path / "h.db", updater=ctl)
+    closed = []
+    monkeypatch.setattr(w, "close", lambda: closed.append(1))
+    try:
+        w.show()
+        ctl.readyChanged.emit()
+        assert w.banner_update.isVisible()
+        w._restart_when_idle = True  # "Restart now" was pressed while files were being cleaned
+        prefs.check_updates = False
+        ctl.setting_changed()
+        assert not w._restart_when_idle and not w.banner_update.isVisible()
+        w._restart_for_update()  # e.g. the queue went idle
+        assert closed == [] and not ctl.relaunch
+    finally:
+        sh.shut(w)
 
 
 # ---- Windows setup: the command line and the script -------------------------------------------------------------------
@@ -480,6 +709,127 @@ def test_the_installer_is_started_detached_without_a_console_and_the_mac_one_wit
     monkeypatch.setattr(updater.subprocess, "Popen", lambda cmd, **kw: opened.append(cmd))
     updater.open_mac_installer(tmp_path / "AudioCleaner-2.0.15-Mac-Intel.pkg")
     assert opened == [["open", str(tmp_path / "AudioCleaner-2.0.15-Mac-Intel.pkg")]]
+
+
+# ---- the lock on the installer (Windows only: it is the Windows file sharing rules that make it work) ---------------------
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="file locking by sharing mode is a Windows feature")
+
+
+def _installer_copy(tmp_path) -> tuple[Path, updater.UpdateFile]:
+    """A real program that exits by itself (ping) under the name of an installer, and its manifest entry."""
+    path = tmp_path / "AudioCleaner-2.0.15-Windows.exe"
+    shutil.copyfile(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "PING.EXE", path)
+    data = path.read_bytes()
+    return path, updater.UpdateFile(path.name, len(data), hashlib.sha256(data).hexdigest())
+
+
+@windows_only
+def test_a_locked_installer_cannot_be_written_replaced_renamed_or_deleted_but_can_be_read(tmp_path):
+    path, entry = _installer_copy(tmp_path)
+    other = tmp_path / "other.exe"
+    other.write_bytes(b"something else")
+    locked = updater.locked_installer(path, entry)
+    assert locked is not None
+    try:
+        with pytest.raises(OSError):
+            open(path, "r+b")
+        with pytest.raises(OSError):
+            os.replace(other, path)
+        with pytest.raises(OSError):
+            os.rename(path, tmp_path / "moved.exe")
+        with pytest.raises(OSError):
+            path.unlink()
+        with open(path, "rb") as reader:  # reading (and so running) it is still possible
+            assert reader.read(2) == b"MZ"
+    finally:
+        locked.close()
+    os.rename(path, tmp_path / "moved.exe")  # let go: it is an ordinary file again
+
+
+@windows_only
+@pytest.mark.parametrize("change", ["longer", "other bytes"])
+def test_an_installer_that_does_not_match_is_not_locked_and_no_handle_is_left_open(tmp_path, change):
+    path, entry = _installer_copy(tmp_path)
+    data = path.read_bytes()
+    path.write_bytes(data + b"x" if change == "longer" else data[:-1] + bytes([data[-1] ^ 1]))
+    assert updater.locked_installer(path, entry) is None
+    os.rename(path, tmp_path / "moved.exe")  # nothing holds it
+    assert updater.locked_installer(tmp_path / "missing.exe", entry) is None
+
+
+@windows_only
+def test_setup_started_with_the_locked_file_keeps_it_locked_after_the_app_let_go(tmp_path, monkeypatch):
+    path, entry = _installer_copy(tmp_path)
+    # the real start (detached, handle handed down), with a program that runs for a few seconds in place of setup
+    monkeypatch.setattr(updater, "windows_installer_command", lambda installer, exe, relaunch, env=None: [str(path), "-n", "4", "127.0.0.1"])
+    locked = updater.locked_installer(path, entry)
+    assert locked is not None
+    try:
+        updater.start_windows_installer(path, False, locked)
+    finally:
+        locked.close()  # the app's own handle is gone; the running program still holds the one it was given
+    moved = tmp_path / "moved.exe"
+    with pytest.raises(OSError):
+        os.rename(path, moved)
+    for _ in range(60):  # it ends after about three seconds; then the file is free again
+        try:
+            os.rename(path, moved)
+            break
+        except OSError:
+            time.sleep(0.25)
+    assert moved.is_file() and not path.exists()
+
+
+def _junction_to(real_dir: Path, junction: Path) -> None:
+    import _winapi
+
+    real_dir.mkdir(exist_ok=True)
+    _winapi.CreateJunction(str(real_dir), str(junction))
+
+
+@windows_only
+def test_final_path_names_the_real_file_not_the_junction_it_was_opened_through(tmp_path):
+    real_dir, junction = tmp_path / "the-real-folder", tmp_path / "via-junction"
+    _junction_to(real_dir, junction)
+    try:
+        (real_dir / "Setup.exe").write_bytes(b"x")
+        with updater.open_locked(junction / "Setup.exe") as f:
+            got = updater.final_path(f)
+        assert not got.startswith("\\\\?\\")  # an ordinary path, without the long-path prefix
+        assert got.lower().endswith("\\the-real-folder\\setup.exe") and "via-junction" not in got
+        assert os.path.samefile(got, real_dir / "Setup.exe")
+    finally:
+        os.rmdir(junction)  # the link only, not the folder it points to
+
+
+@windows_only
+def test_setup_is_started_by_the_real_path_of_the_locked_file_not_the_junction_it_was_found_through(tmp_path, monkeypatch):
+    real_dir, junction = tmp_path / "the-real-folder", tmp_path / "via-junction"
+    _junction_to(real_dir, junction)
+    commands, started = [], []
+    real_popen = subprocess.Popen
+
+    def popen(cmd, **kwargs):  # the real start, only with a short program's arguments in place of setup's
+        commands.append(cmd)
+        started.append(real_popen([cmd[0], "-n", "2", "127.0.0.1"], **kwargs))
+
+    monkeypatch.setattr(updater.subprocess, "Popen", popen)
+    try:
+        path, entry = _installer_copy(real_dir)
+        locked = updater.locked_installer(junction / path.name, entry)  # found through the junction
+        assert locked is not None
+        try:
+            updater.start_windows_installer(junction / path.name, False, locked)
+        finally:
+            locked.close()
+        assert os.path.samefile(commands[0][0], path) and "via-junction" not in commands[0][0]
+        assert "/VERYSILENT" in commands[0]
+        started[0].wait(timeout=30)  # and that file did run: it started and ended
+    finally:
+        for process in started:
+            if process.poll() is None:
+                process.kill()
+        os.rmdir(junction)
 
 
 ISS = (PACKAGING / "windows" / "AudioCleaner.iss").read_text(encoding="utf-8")
@@ -577,21 +927,146 @@ _WORKFLOW_FILE = ROOT / ".github" / "workflows" / "desktop.yml"
 WORKFLOW = _WORKFLOW_FILE.read_text(encoding="utf-8") if _WORKFLOW_FILE.is_file() else ""
 
 
-@pytest.mark.skipif("\n  release:\n" not in WORKFLOW, reason="this copy of the repository has no release job")
+_has_release = pytest.mark.skipif("\n  release:\n" not in WORKFLOW, reason="this copy of the repository has no release job")
+
+
+def _jobs() -> dict[str, str]:
+    """{job name: its text} of the workflow (a job starts at its two-space `name:` line under `jobs:`)."""
+    parts = re.split(r"^  ([a-z][\w-]*):\n", WORKFLOW.split("\njobs:\n", 1)[1], flags=re.M)
+    return dict(zip(parts[1::2], parts[2::2]))
+
+
+def _jobs_yaml() -> dict:
+    return pytest.importorskip("yaml").safe_load(WORKFLOW)["jobs"]
+
+
+def _checkouts(job: dict) -> list[dict]:
+    return [step.get("with", {}) for step in job["steps"] if str(step.get("uses", "")).startswith("actions/checkout@")]
+
+
+def _needs(job: dict) -> list[str]:
+    return [job["needs"]] if isinstance(job["needs"], str) else list(job["needs"])
+
+
+@_has_release
+def test_the_release_is_three_jobs_and_no_repository_code_runs_next_to_a_secret():
+    jobs, structure = _jobs(), _jobs_yaml()
+    update_info, sign, release = jobs["update-info"], jobs["sign"], jobs["release"]
+    assert _needs(structure["sign"]) == ["update-info"] and sorted(_needs(structure["release"])) == ["sign", "update-info"]
+    # the key only in sign, the tokens only in release, no secret at all in the job that runs the repository's scripts
+    assert [name for name, text in jobs.items() if "UPDATE_SIGNING_KEY" in text] == ["sign"]
+    assert [name for name, text in jobs.items() if "secrets.PUBLIC_RELEASE_TOKEN" in text] == ["release"]
+    assert [name for name, text in jobs.items() if "github.token" in text] == ["release"]
+    assert "UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}" in sign
+    assert re.findall(r"secrets\.(\w+)", sign) == ["UPDATE_SIGNING_KEY"]
+    assert "secrets." not in update_info
+    assert structure["update-info"]["permissions"] == {"contents": "read"}
+    assert structure["sign"]["permissions"] == {"contents": "read"}
+    assert "version.py" in update_info and "make_update_manifest.py" in update_info  # the scripts run here, with no secret
+    # nothing from the repository runs in sign or release: no Python, and release has no checkout at all
+    assert "python" not in sign.lower() and "python" not in release.lower()
+    assert "actions/checkout" not in release
+    # the jobs that do check out read nothing but what they need, and keep no token in .git
+    assert [c["persist-credentials"] for c in _checkouts(structure["update-info"])] == [False]
+    assert [c["sparse-checkout"].split() for c in _checkouts(structure["update-info"])] == [
+        ["desktop/audio_cleaner_desktop/*.py", "desktop/packaging/version.py", "desktop/packaging/make_update_manifest.py"]]
+    only = _checkouts(structure["sign"])  # only updater.py, read as text for the public key
+    assert len(only) == 1 and only[0]["persist-credentials"] is False and only[0]["sparse-checkout-cone-mode"] is False
+    assert only[0]["sparse-checkout"].split() == ["desktop/audio_cleaner_desktop/updater.py"]
+    # release takes its version from update-info and checks that it is a version number (also in the public repository step)
+    for step in (_step(release, "Create the release"), _step(release, "Publish the release to the public repository")):
+        assert "VERSION: ${{ needs.update-info.outputs.version }}" in step
+        assert '[[ "$VERSION" =~ ^[0-9]+(\\.[0-9]+){1,3}$ ]]' in step and 'version="$VERSION"' in step
+
+
+@_has_release
 def test_the_release_job_signs_the_manifest_and_fails_closed():
-    release = WORKFLOW.split("\n  release:\n")[1]
-    assert "UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}" in release
-    assert 'openssl pkeyutl -sign -rawin -inkey "$key" -in update.json -out update.json.sig' in release
-    assert "files+=(update.json update.json.sig)" in release
-    assert release.index("files+=(update.json update.json.sig)") < release.index("gh release create")  # same release as the installers
-    assert 'if [ -z "$UPDATE_SIGNING_KEY" ]' in release and "::warning::" in release  # no secret: no manifest, a warning
-    assert "check-key" in release  # a secret that is not the app's key publishes no manifest either
-    assert 'rm -f "$key"' in release and "echo \"$UPDATE_SIGNING_KEY\"" not in release
-    sparse = release.split("sparse-checkout: |")[1].split("sparse-checkout-cone-mode")[0].split()
-    # the app's modules (updater.py's key) and the scripts
-    assert sparse == ["desktop/audio_cleaner_desktop/*.py", "desktop/packaging/version.py",
-                      "desktop/packaging/make_update_manifest.py"]
+    jobs = _jobs()
+    sign, release = jobs["sign"], jobs["release"]
+    assert "openssl pkeyutl -sign -rawin" in sign and "openssl pkeyutl -verify -rawin" in sign
+    assert 'if [ -z "$UPDATE_SIGNING_KEY" ]' in sign and "::warning::" in sign  # no secret: no manifest, a warning
+    # a secret that is not the app's key publishes no manifest either: its public half is compared with PUBLIC_KEY
+    assert 'openssl pkey -in "$key" -pubout -outform DER' in sign and '!= "$trusted"' in sign and "::error::" in sign
+    assert "PUBLIC_KEY" in sign and "check-key" not in sign  # (no repository script reads the key)
+    # the key file is removed whatever happens, and it is never printed
+    trap = re.search(r"""trap 'rm -f "\$key"[^']*' EXIT""", sign)
+    assert trap and trap.start() < sign.index('printf \'%s\\n\' "$UPDATE_SIGNING_KEY" > "$key"')
+    assert "echo \"$UPDATE_SIGNING_KEY\"" not in sign
+    # signed=true only after the signature was verified, and the signed files are what the next job downloads
+    assert sign.count("signed=true") == 1
+    assert sign.index("openssl pkeyutl -verify") < sign.index('echo "signed=true" >> "$GITHUB_OUTPUT"')
+    assert "signed: ${{ steps.sign.outputs.signed }}" in sign and "if: steps.sign.outputs.signed == 'true'" in sign
+    # release publishes them in the same release as the installers, only when signing happened
+    assert "if: needs.sign.outputs.signed == 'true'" in release and "name: update-information" in release
+    add = "[ ! -f update.json ] || files+=(update.json update.json.sig)"
+    assert release.index("files=(") < release.index(add) < release.index("gh release create")
     assert WORKFLOW.count("--require-hashes") >= 2 and "--require-hashes -r desktop/requirements.lock" in WORKFLOW
+
+
+def _sed_pattern() -> str:
+    """The sed command of the sign job that reads the key the app trusts out of updater.py, as a Python regex."""
+    script = next(step["run"] for step in _jobs_yaml()["sign"]["steps"] if step.get("id") == "sign")
+    bre = re.search(r"sed -n 's/(.+?)/\\1/p' desktop/audio_cleaner_desktop/updater\.py", script).group(1)
+    return re.sub(r"\\\{(\d+)\\\}", r"{\1}", bre.replace(r"\(", "(").replace(r"\)", ")"))
+
+
+@_has_release
+def test_the_sign_job_reads_exactly_the_public_key_the_app_trusts():
+    rx = re.compile(_sed_pattern())
+    source = (ROOT / "desktop" / "audio_cleaner_desktop" / "updater.py").read_text(encoding="utf-8").splitlines()
+    assert [m.group(1) for m in map(rx.search, source) if m] == [updater.PUBLIC_KEY]
+    assert not rx.search(f'    PUBLIC_KEY = "{updater.PUBLIC_KEY}"') and not rx.search(f'PUBLIC_KEY = "{updater.PUBLIC_KEY[:-1]}"')
+
+
+def _run_sign_step(tmp_path, public: str, secret: str) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    """The sign job's own script, run as the runner runs it, in a checkout that has only updater.py and the downloaded
+    update.json. Returns the process, the GITHUB_OUTPUT file and the folder with update.json."""
+    script = next(step["run"] for step in _jobs_yaml()["sign"]["steps"] if step.get("id") == "sign")
+    (tmp_path / "sign.sh").write_text(script, encoding="utf-8")
+    work, runner, output = tmp_path / "work", tmp_path / "runner", tmp_path / "output"
+    (work / "desktop" / "audio_cleaner_desktop").mkdir(parents=True)
+    (work / "info").mkdir()
+    runner.mkdir()
+    output.touch()
+    (work / "desktop" / "audio_cleaner_desktop" / "updater.py").write_text(f'DOWNLOAD = "x"\nPUBLIC_KEY = "{public}"\n')
+    (work / "info" / "update.json").write_bytes(_manifest()[0])
+    env = {**os.environ, "RUNNER_TEMP": str(runner), "GITHUB_OUTPUT": str(output), "UPDATE_SIGNING_KEY": secret}
+    done = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(tmp_path / "sign.sh")], cwd=work, env=env,
+                          capture_output=True, text=True, timeout=120, check=False)
+    return done, output, work / "info"
+
+
+def _pem(key: Ed25519PrivateKey) -> str:
+    return key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+
+
+linux_bash = pytest.mark.skipif(sys.platform != "linux" or shutil.which("bash") is None,
+                                reason="the sign job runs on Ubuntu (bash, GNU sed, stat and base64)")
+
+
+@_has_release
+@openssl
+@linux_bash
+def test_the_sign_job_signs_with_the_trusted_key_and_leaves_no_key_behind(tmp_path, key):
+    done, output, info = _run_sign_step(tmp_path, _public(key), _pem(key))
+    assert done.returncode == 0, done.stderr
+    assert output.read_text() == "signed=true\n"
+    update = updater.decide((info / "update.json").read_bytes(), (info / "update.json.sig").read_bytes(), "2.0.3", WIN, _public(key))
+    assert update.version == "2.0.15"  # the signature is what the app accepts
+    assert list((tmp_path / "runner").iterdir()) == []  # the key file (and the public halves) are gone
+
+
+@_has_release
+@openssl
+@linux_bash
+@pytest.mark.parametrize("secret", ["empty", "other key", "not a key"])
+def test_the_sign_job_publishes_nothing_without_the_trusted_key(tmp_path, key, secret):
+    value, marker = {"empty": ("", "::warning::"), "other key": (_pem(Ed25519PrivateKey.generate()), "::error::"),
+                     "not a key": ("not a key", "::error::")}[secret]
+    done, output, info = _run_sign_step(tmp_path, _public(key), value)
+    assert done.returncode == 0 and marker in done.stdout  # (the installers are still published)
+    assert output.read_text() == "" and not (info / "update.json.sig").exists()  # no signed=true: release publishes no update.json
+    assert list((tmp_path / "runner").iterdir()) == []
 
 
 def test_cryptography_is_pinned_with_hashes_for_every_platform():
