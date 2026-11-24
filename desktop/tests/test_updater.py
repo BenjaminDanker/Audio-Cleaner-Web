@@ -953,6 +953,9 @@ def test_the_release_is_three_jobs_and_no_repository_code_runs_next_to_a_secret(
     jobs, structure = _jobs(), _jobs_yaml()
     update_info, sign, release = jobs["update-info"], jobs["sign"], jobs["release"]
     assert _needs(structure["sign"]) == ["update-info"] and sorted(_needs(structure["release"])) == ["sign", "update-info"]
+    # sign waits for the owner's approval in the desktop-release environment, and no other job has one (a single click)
+    assert structure["sign"]["environment"] == "desktop-release"
+    assert [name for name, job in structure.items() if "environment" in job] == ["sign"]
     # the key only in sign, the tokens only in release, no secret at all in the job that runs the repository's scripts
     assert [name for name, text in jobs.items() if "UPDATE_SIGNING_KEY" in text] == ["sign"]
     assert [name for name, text in jobs.items() if "secrets.PUBLIC_RELEASE_TOKEN" in text] == ["release"]

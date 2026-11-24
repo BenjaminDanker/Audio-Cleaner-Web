@@ -650,6 +650,10 @@ jobs:
   sign:
     name: Sign the update information
     needs: update-info
+    # Waits for the owner's approval (Review deployments on the run's page): the environment desktop-release has the
+    # owner as its required reviewer and only on-prem, main and desktop-v* tags may use it. Nothing is signed or
+    # published before that, so no push reaches the installed apps without the owner's click.
+    environment: desktop-release
     runs-on: ubuntu-24.04
     permissions:
       contents: read

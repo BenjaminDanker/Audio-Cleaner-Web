@@ -113,7 +113,11 @@ the checklist at the end).
 ## Release process (CI)
 
 1. Releases are automatic: every push to `main` / `on-prem` that changes `desktop/`, `common/`,
-   `native/deepfilter/` or the workflow builds and publishes a GitHub Release. Its version is MAJOR.MINOR from
+   `native/deepfilter/` or the workflow builds and, **once the owner approves it**, publishes a GitHub Release. When the
+   builds and tests have passed, the run waits at the `sign` job (it uses the environment `desktop-release`, whose
+   required reviewer is the owner; only `on-prem`, `main` and `desktop-v*` tags may use it): GitHub notifies the owner,
+   who opens the run and clicks Review deployments > Approve and deploy. Nothing is signed or published before that, so
+   no push reaches the installed apps without that click. A newer push cancels a run still waiting. Its version is MAJOR.MINOR from
    `__version__` in `desktop/audio_cleaner_desktop/__init__.py` plus the CI run number as the last part (2.0.11,
    2.0.12, ...; `desktop/packaging/version.py` writes it into the app before it is built, so the app, the installers,
    the file names and the release title all show it). Only the newest 5 automatic releases are kept. Bump MAJOR.MINOR
